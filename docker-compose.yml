@@ -1,0 +1,217 @@
+services:
+  # ==========================================
+  # 部队 1：本地缓存 - Redis
+  # 仅承担 RAG 缓存、BM25 缓存、限流和 token 预算；向量检索由 Chroma 承担。
+  # ==========================================
+  redis:
+    image: redis:8.2.9-bookworm
+    ports:
+      - "127.0.0.1:6379:6379"
+    command:
+      - redis-server
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      - --maxmemory
+      - 768mb
+      - --maxmemory-policy
+      - noeviction
+    mem_limit: 1g
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  # ==========================================
+  # 部队 2：知识库服务 - Chroma 的唯一进程所有者
+  # Agent、MCP、Windows CLI 与评测任务只允许通过 HTTP API 访问知识库。
+  # ==========================================
+  knowledge-service:
+    build: .
+    container_name: knowledge-service
+    command:
+      - python
+      - -m
+      - uvicorn
+      - knowledge_service.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8001"
+      - --workers
+      - "1"
+    ports:
+      - "127.0.0.1:8001:8001"
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      # 迁移阶段保留既有目录；只有本服务可以把它作为 PersistentClient 打开。
+      - ./chroma_db:/app/chroma_db
+      - ./data/model_cache:/app/data/model_cache
+      - ./data/knowledge:/app/data/knowledge
+      - ./FinancialResearchReportData:/app/FinancialResearchReportData:ro
+      - ./logs:/app/logs
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - CHROMA_DB_PATH=/app/chroma_db
+      - HASH_RECORD_PATH=/app/chroma_db/file_hashes.json
+      - CHUNK_STORE_PATH=/app/data/knowledge/chunks.sqlite3
+      - RAG_DEVICE=cpu
+      - PYTHONPATH=/app
+      - HF_ENDPOINT=${HF_ENDPOINT:-https://huggingface.co}
+      - HF_HOME=/app/data/model_cache/huggingface
+      # 在线查询服务只使用已存模型缓存，避免预热依赖外网稳定性。
+      # 首次准备空缓存时可在 .env 中临时设为 false，下载完成后恢复 true。
+      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-true}
+      - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-true}
+      - KNOWLEDGE_SERVICE_API_KEY=${KNOWLEDGE_SERVICE_API_KEY:-}
+      - KNOWLEDGE_SERVICE_REQUIRE_API_KEY=${KNOWLEDGE_SERVICE_REQUIRE_API_KEY:-true}
+      - KNOWLEDGE_SERVICE_INGESTION_ROOT=/app/FinancialResearchReportData
+      - KNOWLEDGE_SERVICE_WARMUP_ON_START=${KNOWLEDGE_SERVICE_WARMUP_ON_START:-true}
+      - DOCLING_BASE_URL=http://docling:5001
+      - DOCLING_STRICT_MODE=${DOCLING_STRICT_MODE:-true}
+      - DOCLING_MAX_PAGES_PER_TASK=${DOCLING_MAX_PAGES_PER_TASK:-3}
+      - DOCLING_SEGMENT_RETRIES=${DOCLING_SEGMENT_RETRIES:-1}
+      - RAG_INGESTION_WORKERS=${RAG_INGESTION_WORKERS:-1}
+      - RAG_INGESTION_BATCH_SIZE=${RAG_INGESTION_BATCH_SIZE:-1000}
+      - RAG_INGESTION_FAIL_FAST=${RAG_INGESTION_FAIL_FAST:-true}
+    env_file:
+      - .env
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/api/v1/health/live', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ==========================================
+  # 部队 3：主力作战部队 - Agent 应用（Knowledge Service 客户端）
+  # ==========================================
+  agent-app:
+    build: .
+    container_name: react-agent
+    ports:
+      - "127.0.0.1:8501:8501"
+    depends_on:
+      redis:
+        condition: service_healthy
+      knowledge-service:
+        condition: service_healthy
+    volumes:
+      # Agent 只持有自己的 SQLite 会话状态；知识库与模型缓存归 Knowledge Service。
+      - ./data/agent-state:/app/data/agent-state
+      - ./outputs:/app/outputs
+      # SQL 工具只读查询结构化财务库，不把数据库烘焙进镜像。
+      - ./data_sql:/app/data_sql:ro
+      # 保留应用与 MCP 的本地日志，容器重建后仍可诊断。
+      - ./logs:/app/logs
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - SQL_DB_PATH=/app/data_sql/financials.db
+      - CHECKPOINT_DB_PATH=/app/data/agent-state/agent_checkpoints.sqlite3
+      - OUTPUT_DIR=/app/outputs
+      # 本机 Python 使用 POSTGRES_DB_URL；容器优先使用 host.docker.internal 版本。
+      - POSTGRES_DB_URL=${POSTGRES_DOCKER_DB_URL:-${POSTGRES_DB_URL:-}}
+      - LANGGRAPH_STRICT_MSGPACK=true
+      - PYTHONPATH=/app
+      - KNOWLEDGE_SERVICE_URL=http://knowledge-service:8001
+      - KNOWLEDGE_SERVICE_API_KEY=${KNOWLEDGE_SERVICE_API_KEY:-}
+      - KNOWLEDGE_SERVICE_TIMEOUT=${KNOWLEDGE_SERVICE_TIMEOUT:-150}
+    env_file:
+      - .env
+    restart: unless-stopped
+
+  # ==========================================
+  # 部队 4：一次性评测任务 - 仅通过 Knowledge Service API 读取知识库
+  # 使用 `docker compose --profile eval run --rm eval-runner ...` 显式启动。
+  # ==========================================
+  eval-runner:
+    build:
+      context: .
+      target: eval-runner
+    profiles:
+      - eval
+    depends_on:
+      knowledge-service:
+        condition: service_healthy
+    volumes:
+      - ./eval/dataset:/app/eval/dataset:ro
+      - ./eval/results:/app/eval-results
+    environment:
+      - PYTHONPATH=/app
+      - KNOWLEDGE_SERVICE_URL=http://knowledge-service:8001
+      - KNOWLEDGE_SERVICE_API_KEY=${KNOWLEDGE_SERVICE_API_KEY:-}
+      - KNOWLEDGE_SERVICE_TIMEOUT=${KNOWLEDGE_SERVICE_TIMEOUT:-150}
+      - EVAL_RESULTS_DIR=/app/eval-results
+    env_file:
+      - .env
+    command:
+      - python
+      - -m
+      - eval.run_eval
+      - --help
+    restart: "no"
+
+  # ==========================================
+  # 部队 5：离线建库服务 - Docling 文档解析
+  # 仅在显式启用 ingestion profile 时启动，不参与日常在线查询。
+  # ==========================================
+  docling:
+    image: ghcr.io/docling-project/docling-serve-cpu:v1.30.0@sha256:061d35c03611bc15b73d024c8e8387bcf0624279f8b57c16c1567326f214ba56
+    profiles:
+      - ingestion
+    ports:
+      - "127.0.0.1:5001:5001"
+    environment:
+      DOCLING_DEVICE: cpu
+
+      # 单 Web 进程和单解析 Worker，避免重复加载模型占满内存。
+      UVICORN_WORKERS: "1"
+      DOCLING_SERVE_ENG_KIND: local
+      DOCLING_SERVE_ENG_LOC_NUM_WORKERS: "1"
+      # 只缓存一个模型转换器，并缩小页批次，降低连续处理研报时的内存峰值。
+      DOCLING_SERVE_OPTIONS_CACHE_SIZE: "1"
+      DOCLING_PERF_PAGE_BATCH_SIZE: "1"
+      DOCLING_PERF_ELEMENTS_BATCH_SIZE: "4"
+      # 图片型研报容易在 OCR/版面/表格阶段出现瞬时峰值；三阶段均按单页推理。
+      DOCLING_SERVE_OCR_BATCH_SIZE: "1"
+      DOCLING_SERVE_LAYOUT_BATCH_SIZE: "1"
+      DOCLING_SERVE_TABLE_BATCH_SIZE: "1"
+
+      # 同步请求最多等待 10 分钟；单文档最多运行 1 小时。
+      DOCLING_SERVE_MAX_SYNC_WAIT: "600"
+      DOCLING_SERVE_MAX_DOCUMENT_TIMEOUT: "3600"
+
+      # 为本地环境设置输入保护上限：500 页、500 MiB。
+      DOCLING_SERVE_MAX_NUM_PAGES: "500"
+      DOCLING_SERVE_MAX_FILE_SIZE: "524288000"
+
+      # 控制 CPU 并行度，并在服务启动时加载默认模型。
+      DOCLING_NUM_THREADS: "2"
+      OMP_NUM_THREADS: "2"
+      DOCLING_SERVE_LOAD_MODELS_AT_BOOT: "true"
+
+    cpus: "4.0"
+    mem_limit: 6g
+    restart: "on-failure:3"
+    stop_grace_period: 2m
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5001/ready', timeout=5)"
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 120s

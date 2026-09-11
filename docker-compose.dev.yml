@@ -1,0 +1,103 @@
+# Knowledge Service 与 Agent 的本地开发覆盖配置。
+#
+# 与基础 Compose 文件一起使用：
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build knowledge-service agent-app
+#
+# 这些 bind mount 让运行中的容器直接读取宿主机最新源码，不会修改镜像。
+# Python 源码变化无需重建；依赖、Dockerfile 或系统库变化仍需重新构建镜像。
+services:
+  knowledge-service:
+    # 开发模式监听两个服务端源码目录；config.yaml 变化仍需显式重启。
+    command:
+      - python
+      - -m
+      - uvicorn
+      - knowledge_service.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8001"
+      - --reload
+      - --reload-dir
+      - /app/knowledge_service
+      - --reload-dir
+      - /app/react_agent
+    volumes:
+      - type: bind
+        source: ./react_agent
+        target: /app/react_agent
+        read_only: true
+        bind:
+          create_host_path: false
+
+      - type: bind
+        source: ./knowledge_service
+        target: /app/knowledge_service
+        read_only: true
+        bind:
+          create_host_path: false
+
+      - type: bind
+        source: ./config.yaml
+        target: /app/config.yaml
+        read_only: true
+        bind:
+          create_host_path: false
+
+  agent-app:
+    volumes:
+      # Streamlit、FastAPI、MCP 和建库任务共用的主要 Python 包。
+      - type: bind
+        source: ./react_agent
+        target: /app/react_agent
+        read_only: true
+        bind:
+          create_host_path: false
+
+      # FastAPI 应用源码。
+      - type: bind
+        source: ./api
+        target: /app/api
+        read_only: true
+        bind:
+          create_host_path: false
+
+      # 当前 Streamlit 从 tests/test_agent.py 启动。
+      - type: bind
+        source: ./tests
+        target: /app/tests
+        read_only: true
+        bind:
+          create_host_path: false
+
+      # 可通过 compose run 执行的开发与诊断脚本。
+      - type: bind
+        source: ./scripts
+        target: /app/scripts
+        read_only: true
+        bind:
+          create_host_path: false
+
+      # RAG 评测和数据集脚本通过 Agent 客户端访问 Knowledge Service。
+      - type: bind
+        source: ./eval
+        target: /app/eval
+        read_only: true
+        bind:
+          create_host_path: false
+
+      # 非敏感运行配置；修改后应重启容器。
+      - type: bind
+        source: ./config.yaml
+        target: /app/config.yaml
+        read_only: true
+        bind:
+          create_host_path: false
+
+      # MCP stdio 薄启动入口。
+      - type: bind
+        source: ./mcp_rag_server.py
+        target: /app/mcp_rag_server.py
+        read_only: true
+        bind:
+          create_host_path: false

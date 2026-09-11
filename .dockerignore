@@ -1,0 +1,43 @@
+# 忽略本地虚拟环境、Python 缓存和构建产物
+.venv/
+env/
+**/__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# 忽略本地数据库、私有语料和运行数据；需要时由 Compose 在运行期挂载
+chroma_db/
+data/
+data(20260206)/
+data_sql/
+FinancialResearchReportData/
+outputs/
+redis-data/
+logs/
+tmp/
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.jsonl
+*.log
+
+# 忽略版本控制、IDE 文件和全部环境变量文件（保留无密钥示例）
+.git/
+.idea/
+.vscode/
+.env*
+!.env.example
+
+# 这些文件只用于宿主机开发和说明，不需要进入应用镜像
+Dockerfile*
+docker-compose*.yml
+compose*.yaml
+AGENTS.md
+README*.md
+旧README*.md
+img*.png

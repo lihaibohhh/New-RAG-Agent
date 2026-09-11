@@ -1,0 +1,14 @@
+FinancialResearchReportData
+api
+chroma_db
+data
+data(20260206)
+data_sql
+eval
+logs
+outputs
+react_agent
+redis-data
+scripts
+tests
+tmp

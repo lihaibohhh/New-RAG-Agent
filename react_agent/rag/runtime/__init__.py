@@ -1,0 +1,29 @@
+"""RAG composition types and factories."""
+from typing import TYPE_CHECKING
+
+from react_agent.rag.runtime.container import (
+    RagRuntime,
+    create_rag_runtime,
+)
+from react_agent.rag.runtime.access import (
+    RagRuntimePort,
+    create_configured_rag_runtime,
+)
+from react_agent.rag.runtime.remote import RemoteRagRuntime
+
+if TYPE_CHECKING:
+    from react_agent.core.config import RagProfile
+def get_rag_runtime_profile(requested: str | None = None) -> "RagProfile":
+    """延迟解析设备档位，避免导入 Runtime 时立即导入 Torch。"""
+    from react_agent.rag.runtime.device import get_rag_runtime_profile as resolve
+
+    return resolve(requested)
+
+__all__ = [
+    "RagRuntime",
+    "RagRuntimePort",
+    "RemoteRagRuntime",
+    "create_configured_rag_runtime",
+    "create_rag_runtime",
+    "get_rag_runtime_profile",
+]

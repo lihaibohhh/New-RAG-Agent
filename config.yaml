@@ -1,0 +1,48 @@
+# 工具的全局配置
+tools:
+  rag:
+    max_retries: 2
+    max_content_chars: 800
+    # CPU 档面向 6 核/16GB 个人开发机：单精排、较长预算、适中候选池。
+    cpu_timeout: 120
+    cpu_rerank_candidates: 12
+    cpu_reranker_concurrency: 1
+    # CUDA 档保留更宽候选池；个人项目默认也只运行一个精排任务。
+    cuda_timeout: 45
+    cuda_rerank_candidates: 20
+    cuda_reranker_concurrency: 1
+    rerank_top_n: 5
+
+  excel:
+    # 默认工作模式 (可选: timestamp, overwrite, append)
+    mode: "timestamp"
+    # 是否保留时间戳备份
+    keep_backup: false
+
+  search:
+    max_retries: 2
+    timeout: 15
+    max_search_results: 10
+
+  vector_store:
+    data_dir: "./data"
+    CHROMA_DB_PATH: "./chroma_db"
+    CHUNK_STORE_PATH: "./data/knowledge/chunks.sqlite3"
+    HASH_RECORD_PATH: "./chroma_db/file_hashes.json"
+
+  sql_store:
+    DB_PATH: "./data_sql/financials.db"
+
+core:
+  agent:
+    # 每个会话最多保留的消息条数
+    MAX_HISTORY_MESSAGES: 20
+
+# 大模型参数配置
+llm:
+  model: "deepseek/deepseek-chat"
+  llm_temperature: 0.2
+  llm_max_tokens: 2048
+  llm_timeout: 60
+  llm_retries: 2
+
