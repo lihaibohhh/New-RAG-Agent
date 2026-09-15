@@ -5,9 +5,55 @@ import logging
 from collections.abc import Callable
 from typing import Any
 from langchain_core.tools import tool
-from react_agent.utils.tool_helpers import _ok, _err, _shrink_search_results, with_retry
+from react_agent.tooling.results import tool_error as _err
+from react_agent.tooling.results import tool_success as _ok
+from react_agent.tooling.retry import with_retry
 
 logger = logging.getLogger(__name__)
+
+
+def _trim_text(text: str, max_chars: int) -> str:
+    text = (text or "").strip()
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 3] + "..."
+
+
+def _normalize_search_results(
+    raw: Any,
+    *,
+    max_items: int = 5,
+    max_chars_per_item: int = 800,
+) -> Any:
+    """把 Tavily 响应压缩为 Agent 可消费的搜索结果。"""
+    if raw is None:
+        return None
+    if isinstance(raw, dict) and isinstance(raw.get("results"), list):
+        results = []
+        for item in raw["results"][:max_items]:
+            if not isinstance(item, dict):
+                continue
+            results.append(
+                {
+                    "title": _trim_text(str(item.get("title", "")), 200),
+                    "url": str(item.get("url", "")),
+                    "content": _trim_text(
+                        str(item.get("content", "")),
+                        max_chars_per_item,
+                    ),
+                    "score": item.get("score"),
+                    "published_date": (
+                        item.get("published_date") or item.get("published_time")
+                    ),
+                }
+            )
+        return {
+            "results": results,
+            "answer": _trim_text(str(raw.get("answer", "")), 1200),
+        }
+    if isinstance(raw, str):
+        return _trim_text(raw, 3000)
+    return raw
 
 
 # ================================================================================
@@ -141,7 +187,7 @@ async def _execute_search(
         logger.info("[search] Tavily 返回 | query=%r | 耗时=%.2fs | 命中=%d 条", q, _elapsed, _hit_count)
 
         # 裁剪结果以适应上下文
-        data = _shrink_search_results(raw, max_items=min(5, max_results))
+        data = _normalize_search_results(raw, max_items=min(5, max_results))
         return _ok(
             tool_name=tool_name,
             query=q,

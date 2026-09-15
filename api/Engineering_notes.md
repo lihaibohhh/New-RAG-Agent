@@ -15,7 +15,7 @@
 **全景一行**:
 `请求 → API-Key/匿名IP 鉴权 → Redis 限流 + 当日 token 预算 → /api/v1/chat/stream(token 级 SSE,断连即取消上游 LLM) → done 帧产出 ttft/tokens/cost → Prometheus 同源采集 → problem+json 错误 + request_id 全链路`
 
-**贯穿全程的护栏**:Composition Root 创建单一 `AgentService`、`ConversationService` 与共享 checkpointer;工具统一 `_ok`/`_err` 返回;入口 `_sanitize_dangling_tool_calls` + `_ai_tool_call_ids` 防悬空 tool_call;Streamlit 与 FastAPI 使用同一组应用服务构造规则;旧 `/chat/*` 作为冻结的 legacy 保留。
+**贯穿全程的护栏**:Composition Root 创建单一 `AgentService`、`ConversationService` 与共享 checkpointer;工具统一 `_ok`/`_err` 返回;入口 `_sanitize_dangling_tool_calls` + `_ai_tool_call_ids` 防悬空 tool_call;Streamlit 与 FastAPI 使用同一组应用服务构造规则;对话接口统一使用 `/api/v1/chat/*`。
 
 ---
 
@@ -23,7 +23,7 @@
 
 **起点**:基础 FastAPI——CORS 全开、全局兜底返回 `{"detail": "..."}`、无 request_id、无结构化日志、无版本化。
 
-**做了什么**:新增 `api/settings.py`(pydantic-settings)、`api/errors.py`(RFC 7807 problem+json)、纯 ASGI 中间件(request_id + JSON 日志);路由挂 `/api/v1`,旧 `/chat/*` 保留并打 `Deprecation` 头。
+**做了什么**:新增 `api/settings.py`(pydantic-settings)、`api/errors.py`(RFC 7807 problem+json)、纯 ASGI 中间件(request_id + JSON 日志);对话与会话路由统一挂载在 `/api/v1`。
 
 **关键决策 / 踩坑**
 - **fail-fast 不能写在模块 import 时 `sys.exit()`**。`settings.py` 做成零副作用 import,fail-fast 挪到 `main.py` 构造 app 处。原因:Phase 5 的 pytest 会 import 这个模块,import 期 `sys.exit` 会直接杀掉测试进程——一个「为了健壮反而毁掉可测性」的反模式。
@@ -32,7 +32,7 @@
 - **一处 wrap 两用**:在纯 ASGI 里包一层 `send` 抓 `http.response.start`,同一个点既拿到 status 打 summary 日志,又注入 `X-Request-Id` 响应头。
 - uvicorn 自带 access log 纳入同一套 JSON 配置,消除「一半 JSON 一半纯文本」的混合日志。
 
-**验证证据**:缺 LLM key → 进 lifespan 前带可读原因退出;任意 4xx/5xx body 是 problem+json 五字段且响应头同带 `X-Request-Id`;旧路径可用且带 `Deprecation: true`;新路径无 Deprecation;日志全 JSON、同一请求全程 request_id 一致。
+**验证证据**:缺 LLM key → 进 lifespan 前带可读原因退出;任意 4xx/5xx body 是 problem+json 五字段且响应头同带 `X-Request-Id`;日志全 JSON、同一请求全程 request_id 一致。
 
 **🎤 面试这样讲**:「我做错误处理时统一成了 RFC 7807 的 problem+json,并且让 request_id 从中间件一路贯穿到错误体和日志,排障从『翻日志大海』变成『按 id 直达』。中间件我特意用纯 ASGI 而不是 BaseHTTPMiddleware,因为后者会缓冲响应、把我后面的 SSE 流式吃掉——这是个常见但隐蔽的坑。」
 
@@ -48,7 +48,7 @@
 - **头号 bug——token 不冒泡**。根因:Python 3.10 的 async 下,callback 不走 contextvar 自动传播,内层 `model.ainvoke` 收不到 `astream_events` 装的回调句柄,`on_chat_model_stream` 自然出不来。**修法**:在节点函数 `call_model` 签名里显式声明 `config: RunnableConfig`,框架才会注入,再手动 `config=config` 透传给 `model.ainvoke`。这是 LangChain 官方点名的 3.10 async 限制,定位到这一行靠的是用 `GenericFakeChatModel` 做探针确认事件有没有冒出来。
 - **断连即取消,而且要真掐掉上游**。Queue+Task 架构有个陷阱:客户端断开后 generator 不再读队列,但 **producer task 不会因为没人读就自己停**——「我不发了」≠「LLM 停了、不计费了」。正确做法:`finally` 里对 producer task **`cancel()` 且 `await`**(吞掉 CancelledError),让取消信号真传进 `astream_events` 的 `aclose` 一路到底层 httpx。
 - **第二个 bug——cost 静默归零**。用 `ctx.model`(配置别名)当 key 查价表会 miss,静默返回 0、不报错(最阴险的一类 bug)。改成读 `response_metadata.model_name`(API 回传的真实型号)。
-- **第三个 bug——streaming 下用量抽空**。`_extract_deepseek_v4_usage` 的标准字段在流式模式拿不到,加了读 `usage_metadata` 的 fallback。非流式测过不代表流式没问题,两种模式 usage 格式不同。
+- **第三个 bug——streaming 下用量抽空**。`extract_model_usage` 的标准字段在流式模式拿不到,加了读 `usage_metadata` 的 fallback。非流式测过不代表流式没问题,两种模式 usage 格式不同。
 - `X-Accel-Buffering: no` 关掉 Nginx 缓冲,否则反代攒一批才下发,逐 token 效果在生产消失;Queue `maxsize=100` 做背压。
 
 **验证证据(真实 key、含工具调用,非 fake/非 401)**

@@ -23,7 +23,7 @@ from react_agent.runtime import (
     create_application_services,
     warmup_application_services,
 )
-from react_agent.utils.usage_logger import (
+from react_agent.observability import (
     log_usage,
     extract_cumulative_snapshot,
     format_usage_for_user,

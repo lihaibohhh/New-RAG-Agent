@@ -5,9 +5,10 @@ import asyncio
 import inspect
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
-from react_agent.rag.contracts import RagDocument
+from react_agent.rag.contracts import CandidateRetrievalTrace, RagDocument
 from react_agent.rag.infrastructure.retrieval.bm25_retriever import (
     Bm25CandidateRetriever,
 )
@@ -54,56 +55,129 @@ class HybridRetrieverAdapter:
         filters: dict[str, object] | None = None,
         mode: str = "hybrid",
     ) -> list[RagDocument]:
+        trace = await self.retrieve_with_trace(
+            query,
+            filters=filters,
+            mode=mode,
+        )
+        return list(trace.filtered_candidates)
+
+    async def retrieve_with_trace(
+        self,
+        query: str,
+        *,
+        filters: dict[str, object] | None = None,
+        mode: str = "hybrid",
+    ) -> CandidateRetrievalTrace:
+        """执行与线上相同的候选召回，并保留评测所需阶段快照。"""
+        total_started = time.perf_counter()
+        timings: dict[str, float] = {}
+        degraded_sources: list[str] = []
         if mode not in {"hybrid", "bm25", "vector"}:
             raise ValueError(f"不支持的检索模式: {mode}")
 
         if mode == "vector":
+            started = time.perf_counter()
             documents = await asyncio.to_thread(self._vector.retrieve, query)
-            return self._apply_filters(documents, filters)
+            timings["vector"] = round(time.perf_counter() - started, 4)
+            filtered = self._timed_filter(documents, filters, timings)
+            timings["total"] = round(time.perf_counter() - total_started, 4)
+            return CandidateRetrievalTrace(
+                retrieval_mode=mode,
+                vector_candidates=tuple(documents),
+                fusion_candidates=tuple(documents),
+                filtered_candidates=tuple(filtered),
+                timings=timings,
+            )
 
+        started = time.perf_counter()
         bm25 = await asyncio.to_thread(self._get_bm25)
+        timings["bm25_prepare"] = round(time.perf_counter() - started, 4)
         if mode == "bm25":
+            started = time.perf_counter()
             documents = (
                 await asyncio.to_thread(bm25.retrieve, query)
                 if bm25 is not None
                 else []
             )
-            return self._apply_filters(documents, filters)
+            timings["bm25"] = round(time.perf_counter() - started, 4)
+            filtered = self._timed_filter(documents, filters, timings)
+            timings["total"] = round(time.perf_counter() - total_started, 4)
+            return CandidateRetrievalTrace(
+                retrieval_mode=mode,
+                bm25_candidates=tuple(documents),
+                fusion_candidates=tuple(documents),
+                filtered_candidates=tuple(filtered),
+                timings=timings,
+            )
 
-        vector_task = asyncio.to_thread(self._vector.retrieve, query)
+        async def retrieve_source(name: str, call):
+            source_started = time.perf_counter()
+            try:
+                return await asyncio.to_thread(call), None
+            except Exception as exc:
+                return [], exc
+            finally:
+                timings[name] = round(time.perf_counter() - source_started, 4)
+
         if bm25 is None:
             bm25_documents: list[RagDocument] = []
-            vector_documents = await vector_task
-        else:
-            bm25_result, vector_result = await asyncio.gather(
-                asyncio.to_thread(bm25.retrieve, query),
-                vector_task,
-                return_exceptions=True,
+            vector_documents, vector_error = await retrieve_source(
+                "vector",
+                lambda: self._vector.retrieve(query),
             )
-            if isinstance(bm25_result, BaseException) and isinstance(
-                vector_result, BaseException
-            ):
+            if vector_error is not None:
+                raise vector_error
+            degraded_sources.append("bm25_unavailable")
+        else:
+            (bm25_documents, bm25_error), (vector_documents, vector_error) = (
+                await asyncio.gather(
+                    retrieve_source("bm25", lambda: bm25.retrieve(query)),
+                    retrieve_source("vector", lambda: self._vector.retrieve(query)),
+                )
+            )
+            if bm25_error is not None and vector_error is not None:
                 raise RuntimeError(
                     "BM25 与向量召回同时失败: "
-                    f"bm25={bm25_result}; vector={vector_result}"
-                ) from vector_result
-            if isinstance(bm25_result, BaseException):
-                logger.warning("[RAG] BM25 召回失败，降级为纯向量召回: %s", bm25_result)
-                bm25_documents = []
-            else:
-                bm25_documents = bm25_result
-            if isinstance(vector_result, BaseException):
-                logger.warning("[RAG] 向量召回失败，降级为纯 BM25 召回: %s", vector_result)
-                vector_documents = []
-            else:
-                vector_documents = vector_result
+                    f"bm25={bm25_error}; vector={vector_error}"
+                ) from vector_error
+            if bm25_error is not None:
+                logger.warning("[RAG] BM25 召回失败，降级为纯向量召回: %s", bm25_error)
+                degraded_sources.append("bm25_error")
+            if vector_error is not None:
+                logger.warning("[RAG] 向量召回失败，降级为纯 BM25 召回: %s", vector_error)
+                degraded_sources.append("vector_error")
 
+        started = time.perf_counter()
         documents = reciprocal_rank_fusion(
             (bm25_documents, vector_documents),
             rank_constant=self._rrf_rank_constant,
             limit=2 * self._top_k,
         )
-        return self._apply_filters(documents, filters)
+        timings["fusion"] = round(time.perf_counter() - started, 4)
+        filtered = self._timed_filter(documents, filters, timings)
+        timings["total"] = round(time.perf_counter() - total_started, 4)
+        return CandidateRetrievalTrace(
+            retrieval_mode=mode,
+            bm25_candidates=tuple(bm25_documents),
+            vector_candidates=tuple(vector_documents),
+            fusion_candidates=tuple(documents),
+            filtered_candidates=tuple(filtered),
+            degraded_sources=tuple(degraded_sources),
+            timings=timings,
+        )
+
+    @classmethod
+    def _timed_filter(
+        cls,
+        documents: list[RagDocument],
+        filters: dict[str, object] | None,
+        timings: dict[str, float],
+    ) -> list[RagDocument]:
+        started = time.perf_counter()
+        filtered = cls._apply_filters(documents, filters)
+        timings["filter"] = round(time.perf_counter() - started, 4)
+        return filtered
 
     @staticmethod
     def _apply_filters(

@@ -6,7 +6,7 @@ v1 Chat routes — Phase 1: token 级流式 SSE；Phase 2: auth + 限流 + 预�
 - asyncio.Task + Queue 解耦生产与消费，使 is_disconnected() 可以在帧间轮询
 - 手动 deadline 实现总预算超时（Python 3.10 无 asyncio.timeout）
 - error 帧与 errors.py problem+json 同构（含 request_id）
-- usage/cost 用 _extract_deepseek_v4_usage + _estimate_openai_cost_usd，不裸用 usage_metadata
+- usage/cost 使用 Agent 公开的用量归一化与费用计算契约
 - Phase 2: Depends(require_api_key) → check_rate_limit → check_token_budget → 处理 → record_token_usage
 - 扣费点：generator finally（断连/超时/正常完成均记实际 token，不按预估）
 """
@@ -27,9 +27,9 @@ from api.models import ChatRequest, ChatResponse
 from api.security import require_api_key, get_rate_limit_key
 from api.ratelimit import check_rate_limit, check_token_budget, record_token_usage
 from react_agent.agent import AgentService
-from react_agent.utils.token_utils import (
-    _estimate_openai_cost_usd,
-    _extract_deepseek_v4_usage,
+from react_agent.agent.usage import (
+    estimate_model_cost_usd,
+    extract_model_usage,
 )
 
 _logger = logging.getLogger(__name__)
@@ -94,12 +94,12 @@ def _map_event(ev: dict, state: dict, agent: AgentService, start: float) -> str 
                 g = g[0]
             msg = getattr(g, "message", output)
 
-        usage = _extract_deepseek_v4_usage(msg)
+        usage = extract_model_usage(msg)
         # 优先用 response_metadata.model_name（API 返回的真实型号，如 "deepseek-v4-flash"）
         # ctx.model 是配置名（"deepseek/deepseek-chat"），不一定与价格表 key 匹配
         rm = getattr(msg, "response_metadata", None) or {}
         model_name = rm.get("model_name") or agent.context.model.split("/")[-1]
-        cost = _estimate_openai_cost_usd(
+        cost = estimate_model_cost_usd(
             model_name=model_name,
             usage=usage,
             price_table=agent.context.deepseek_v4_price,

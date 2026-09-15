@@ -15,7 +15,7 @@ import numpy as np
 
 from react_agent.core.config import settings
 from react_agent.rag.contracts import RagDocument
-from react_agent.utils.redis_client import get_async_redis as get_default_async_redis
+from react_agent.infrastructure.redis import get_async_redis as get_default_async_redis
 
 
 logger = logging.getLogger(__name__)

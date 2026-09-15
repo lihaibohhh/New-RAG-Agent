@@ -21,6 +21,7 @@ class KnowledgeServiceSettings:
     require_api_key: bool = False
     ingestion_root: Path = Path("./FinancialResearchReportData")
     warmup_on_start: bool = False
+    evaluation_api_enabled: bool = False
 
     @classmethod
     def from_env(cls) -> "KnowledgeServiceSettings":
@@ -34,6 +35,9 @@ class KnowledgeServiceSettings:
                 )
             ).expanduser(),
             warmup_on_start=_env_bool("KNOWLEDGE_SERVICE_WARMUP_ON_START"),
+            evaluation_api_enabled=_env_bool(
+                "KNOWLEDGE_SERVICE_EVALUATION_API_ENABLED"
+            ),
         )
 
 

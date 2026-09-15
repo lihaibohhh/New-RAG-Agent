@@ -21,7 +21,6 @@ from api.middleware import RequestIDMiddleware
 from api.dependencies import get_runtime_status, shutdown_services, startup_init
 from api.metrics import register_routes
 from api.models import HealthResponse
-from api.routes.chat import router as chat_router
 from api.routes.v1.chat import router as v1_chat_router
 from api.routes.v1.sessions import router as v1_sessions_router
 from fastapi.responses import Response
@@ -80,11 +79,6 @@ register_exception_handlers(app)
 app.include_router(v1_chat_router, prefix="/api/v1")
 # v1 会话 CRUD：/api/v1/sessions/{id}/history、DELETE /api/v1/sessions/{id}
 app.include_router(v1_sessions_router, prefix="/api/v1")
-
-# 旧路径保留（向后兼容）：/chat/stream、/chat/invoke
-# Deprecation: true 响应头由 RequestIDMiddleware 自动注入
-app.include_router(chat_router)
-
 
 # ── 健康检查 ───────────────────────────────────────────────────────────────────
 async def _health_data() -> HealthResponse:

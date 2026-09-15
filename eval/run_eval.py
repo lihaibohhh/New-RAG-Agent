@@ -3,13 +3,13 @@ RAG 评测脚本 — src/eval/run_eval.py
 
 用法:
     # 端到端评测（检索 + 生成 + RAGAS 三项指标）
-    python -m eval.run_eval --dataset eval/dataset/eval_dataset.jsonl --n 50
+    python -m eval.run_eval --dataset eval/dataset/eval_dataset_docling_v1.jsonl --n 50
 
     # 仅检索评测（跳过 LLM 生成，更快更省钱，只算 Precision + Recall）
-    python -m eval.run_eval --dataset eval/dataset/eval_dataset.jsonl --n 50 --retrieval_only
+    python -m eval.run_eval --dataset eval/dataset/eval_dataset_docling_v1.jsonl --n 50 --retrieval_only
 
     # 确定性检索评测（不调用生成/裁判 LLM，默认绕过语义查询缓存）
-    python -m eval.run_eval --dataset eval/dataset/eval_dataset.jsonl --deterministic_only
+    python -m eval.run_eval --dataset eval/dataset/eval_dataset_docling_v1.jsonl --deterministic_only
 
     # 指定模型（默认从 config.yaml 读取；若 config 无此键可通过此参数覆盖）
     python -m eval.run_eval --model deepseek/deepseek-chat --n 30
@@ -47,6 +47,20 @@ RAG 评测脚本 — src/eval/run_eval.py
     修复1：NaN Precision 语义上等于 "无 context 有用" → 记为 0.0 而非排除
     修复2：fallback 时限制为 min(3, top_n) 条，避免低质量文档全部被判 irrelevant
     修复3：默认 --top_n 从 5 改为 3（与线上检索默认值一致，减少噪声 context）
+
+【修复记录 v5】
+  - RAGAS 0.4 Collections改用llm_factory返回的InstructorLLM。
+  - DeepSeek通过原生AsyncOpenAI客户端复用项目中的API Key和Base URL。
+
+【修复记录 v6】
+  - 移除旧的 datasets.Dataset + ragas.evaluate 批处理执行链。
+  - RAGAS 0.4 Collections 指标逐条调用 ascore()，并从 MetricResult.value 取分。
+  - 无答案样本不进入 RAGAS；单项失败记录到 ragas_error，不中断整批。
+
+【修复记录 v7】
+  - 检索延迟汇总优先使用包含 Reranker 的 evaluation_total。
+  - 回答行为裁判对批次遗漏的 case 执行一次单条重试。
+  - 摘要和控制台显式报告 Answerability Judge Coverage。
 """
 
 from __future__ import annotations
@@ -65,10 +79,10 @@ import time
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, ClassVar
-from pydantic import PrivateAttr
-from langchain_core.language_models import BaseChatModel
-from langchain_core.outputs import ChatResult
+from typing import Any, Literal
+
+from openai import AsyncOpenAI
+from pydantic import BaseModel, Field
 
 
 logger = logging.getLogger(__name__)
@@ -82,25 +96,27 @@ if str(_SRC_ROOT) not in sys.path:
 # ---------------------------------------------------------------------------
 # 项目内部导入
 # ---------------------------------------------------------------------------
-from react_agent.rag.query import RetrievalService  # noqa: E402
 from react_agent.rag.runtime import create_configured_rag_runtime  # noqa: E402
+from react_agent.core.config import settings  # noqa: E402
 from eval.retrieval_metrics import (  # noqa: E402
     RETRIEVAL_METRIC_KEYS,
     aggregate_retrieval_metrics,
     evaluate_retrieval,
 )
+from eval.answerability_metrics import (  # noqa: E402
+    aggregate_answerability_metrics,
+    evaluate_answer_behavior,
+)
 
 # load_chat_model 签名：load_chat_model(model_ref: str) -> BaseChatModel
 # model_ref 格式："{provider}/{model_name}"，如 "deepseek/deepseek-chat"
-from react_agent.utils.llm import load_chat_model  # noqa: E402
+from react_agent.models import load_chat_model  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # RAGAS
 # ---------------------------------------------------------------------------
 try:
-    from datasets import Dataset as HFDataset
-    from ragas import evaluate as ragas_evaluate
-    from ragas.llms import LangchainLLMWrapper
+    from ragas.llms import llm_factory as ragas_llm_factory
     from ragas.metrics.collections import (
         ContextPrecision,
         ContextRecall,
@@ -109,71 +125,65 @@ try:
     _RAGAS_OK = True
 except ImportError:
     _RAGAS_OK = False
-    logger.warning("ragas 或 datasets 未安装，将跳过 RAGAS 打分。pip install ragas datasets")
+    logger.warning("ragas 未安装，将跳过 RAGAS 打分。pip install ragas")
 
 # ---------------------------------------------------------------------------
-# DeepSeek Markdown 剥离包装器
+# RAGAS 0.4 LLM factory
 # ---------------------------------------------------------------------------
 
 
-class _MarkdownStrippingLLM(BaseChatModel):
-    """
-    继承 BaseChatModel，在最底层的 _generate / _agenerate 剥离 Markdown 围栏。
-    """
+def _required_ragas_secret(name: str) -> str:
+    value = str(getattr(settings.secrets, name, "") or "").strip()
+    if not value:
+        raise EnvironmentError(f"RAGAS 裁判缺少必要配置：{name}")
+    return value
 
-    # ClassVar：整个类只编译一次，不随实例重复创建
-    _FENCE_RE: ClassVar[re.Pattern] = re.compile(
-        r"^```(?:json)?\s*\n?(.*?)\n?```\s*$", re.DOTALL
+
+def _build_ragas_llm(model_ref: str) -> Any:
+    """为RAGAS Collections指标创建现代InstructorLLM。"""
+    provider, separator, model_name = str(model_ref or "").strip().partition("/")
+    provider = provider.casefold()
+    model_name = model_name.strip()
+    if not separator or not provider or not model_name:
+        raise ValueError("RAGAS 模型必须使用 provider/model_name 格式")
+
+    client_kwargs = {
+        "timeout": settings.llm.llm_timeout,
+        "max_retries": settings.llm.llm_retries,
+    }
+    if provider in {"deepseek", "ds"}:
+        client = AsyncOpenAI(
+            api_key=_required_ragas_secret("DEEPSEEK_API_KEY"),
+            base_url=_required_ragas_secret("DEEPSEEK_BASE_URL"),
+            **client_kwargs,
+        )
+    elif provider == "openai":
+        client = AsyncOpenAI(
+            api_key=_required_ragas_secret("OPENAI_API_KEY"),
+            **client_kwargs,
+        )
+    elif provider in {"local", "qwen-local", "openai-compatible"}:
+        client = AsyncOpenAI(
+            api_key=(settings.secrets.LOCAL_OPENAI_API_KEY or "local-key"),
+            base_url=(
+                settings.secrets.LOCAL_OPENAI_BASE_URL
+                or "http://127.0.0.1:8000/v1"
+            ),
+            **client_kwargs,
+        )
+    else:
+        raise ValueError(
+            "RAGAS Collections当前只支持本项目的OpenAI兼容provider："
+            "deepseek、openai、local、qwen-local、openai-compatible；"
+            f"收到：{provider}"
+        )
+
+    return ragas_llm_factory(
+        model_name,
+        provider="openai",
+        client=client,
+        adapter="instructor",
     )
-
-    _llm: Any = PrivateAttr()
-
-    def __init__(self, llm: Any, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self._llm = llm
-
-    def _strip(self, content: str) -> str:
-        content = content.strip()
-
-        m = self._FENCE_RE.match(content)
-        if m:
-            return m.group(1).strip()
-
-        try:
-            json.loads(content)
-            return content
-        except json.JSONDecodeError:
-            pass
-
-        m2 = re.search(r'\{.*\}', content, re.DOTALL)
-        if m2:
-            candidate = m2.group(0).strip()
-            try:
-                json.loads(candidate)
-                return candidate
-            except json.JSONDecodeError:
-                logger.warning(f"[MarkdownStrip] 提取的片段不是合法 JSON: {candidate[:120]}")
-
-        logger.warning(f"[MarkdownStrip] 无法提取有效 JSON，原样透传: {content[:80]}")
-        return content
-
-    def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
-        result = self._llm._generate(messages, stop=stop, **kwargs)
-        for gen in result.generations:
-            if isinstance(gen.message.content, str):
-                gen.message.content = self._strip(gen.message.content)
-        return result
-
-    async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
-        result = await self._llm._agenerate(messages, stop=stop, **kwargs)
-        for gen in result.generations:
-            if isinstance(gen.message.content, str):
-                gen.message.content = self._strip(gen.message.content)
-        return result
-
-    @property
-    def _llm_type(self) -> str:
-        return "markdown_stripping_wrapper"
 
 
 # ---------------------------------------------------------------------------
@@ -271,13 +281,13 @@ def sample_dataset(records: list[dict], n: int, seed: int = 42) -> list[dict]:
 async def retrieve_for_one(
     record: dict,
     top_n: int,
-    retrieval_service: RetrievalService,
+    retrieval_service: Any,
     use_query_cache: bool = False,
     retrieval_mode: str = "hybrid",
     debug: bool = False,
 ) -> dict:
     """
-    通过线上 RetrievalService 执行完整检索管道。
+    默认通过 Knowledge Service 的专用评测管道执行检索。
 
     评测不再自行拼装召回和精排；空结果也保持线上语义，避免评测指标
     与实际 Agent/MCP 行为产生偏差。
@@ -292,10 +302,13 @@ async def retrieve_for_one(
         )
 
         if debug:
+            traced_stages = getattr(result, "stages", {})
             logger.info(
                 f"[DEBUG] 问题: {question[:40]}...\n"
-                f"  stage={result.stage}, cache_hit={result.cache_hit}, "
-                f"candidates={result.candidates_count}, chunks={len(result.chunks)}，"
+                f"  stage={getattr(result, 'stage', 'evaluation_trace')}, "
+                f"cache_hit={getattr(result, 'cache_hit', False)}, "
+                f"stages={{{', '.join(f'{key}: {len(value)}' for key, value in traced_stages.items())}}}, "
+                f"chunks={len(result.chunks)}，"
                 f"前3条预览: {[chunk.content[:50] for chunk in result.chunks[:3]]}"
             )
 
@@ -325,15 +338,38 @@ async def retrieve_for_one(
             )
 
         metrics = evaluate_retrieval(record, retrieved_items, top_k=top_n)
+        trace_stages = getattr(result, "stages", {})
+        retrieval_trace = {
+            name: [
+                {
+                    "rank": item.rank,
+                    "chunk_id": item.chunk_id,
+                    "source_file": item.source_file,
+                    "source_page": item.source_page,
+                    "content_chars": item.content_chars,
+                    "doc_type": item.doc_type,
+                    "industry": item.industry,
+                }
+                for item in candidates
+            ]
+            for name, candidates in trace_stages.items()
+        }
         return {
             **record,
             "contexts": contexts,
             "sources": sources,
             "retrieved_items": retrieved_items,
             "retrieve_ok": True,
-            "retrieval_stage": result.stage,
-            "retrieval_cache_hit": result.cache_hit,
+            "retrieval_stage": getattr(result, "stage", "evaluation_trace"),
+            "retrieval_cache_hit": getattr(result, "cache_hit", False),
             "retrieval_timings": dict(result.timings),
+            "retrieval_trace": retrieval_trace,
+            "retrieval_configuration": dict(
+                getattr(result, "configuration", {})
+            ),
+            "retrieval_degraded_sources": list(
+                getattr(result, "degraded_sources", ())
+            ),
             **metrics,
         }
 
@@ -353,7 +389,7 @@ async def retrieve_for_one(
 async def batch_retrieve(
     records: list[dict],
     top_n: int,
-    retrieval_service: RetrievalService,
+    retrieval_service: Any,
     concurrency: int = 8,
     debug_first_n: int = 0,
     use_query_cache: bool = False,
@@ -417,96 +453,321 @@ def _generate_answers_sync(records: list[dict], llm: Any) -> list[dict]:
     return updated
 
 
+class _AnswerBehaviorVerdict(BaseModel):
+    """裁判只识别回答行为，不读取数据集的 answerable 标签。"""
+
+    case_id: str
+    behavior: Literal[
+        "supported_answer",
+        "abstention",
+        "unsupported_answer",
+    ]
+    rationale: str = Field(description="一句话说明分类依据")
+
+
+class _AnswerBehaviorBatch(BaseModel):
+    items: list[_AnswerBehaviorVerdict] = Field(default_factory=list)
+
+
+_CLEAR_ABSTENTION_RE = re.compile(
+    r"(资料|参考资料|上下文|知识库|所给信息).{0,12}"
+    r"(不足|未提供|没有|无法|不能).{0,12}(确定|判断|回答|得出|查到)|"
+    r"无法根据.{0,20}(确定|判断|回答|得出)|信息不足",
+    re.IGNORECASE,
+)
+_SPECIFIC_NUMBER_RE = re.compile(r"(?<!\w)\d+(?:\.\d+)?\s*(?:%|万|亿|元|年|月|日|倍)")
+
+
+def _fallback_answer_behavior(answer: str) -> str:
+    """裁判失败时只识别非常明确、且没有具体数字的短拒答。"""
+    text = str(answer or "").strip()
+    if not text:
+        return "empty_response"
+    if (
+        len(text) <= 180
+        and _CLEAR_ABSTENTION_RE.search(text)
+        and not _SPECIFIC_NUMBER_RE.search(text)
+    ):
+        return "abstention"
+    return "judge_error"
+
+
+def _answerability_structured_llm(llm: Any):
+    """创建兼容 DeepSeek 的结构化回答行为裁判。"""
+    structured = llm.with_structured_output(
+        _AnswerBehaviorBatch,
+        method="function_calling",
+    )
+    api_base = str(getattr(llm, "openai_api_base", "") or "").casefold()
+    model_name = str(getattr(llm, "model_name", "") or "").casefold()
+    if "deepseek" in api_base or "deepseek" in model_name:
+        structured = structured.bind(
+            extra_body={"thinking": {"type": "disabled"}}
+        )
+    return structured
+
+
+def _answerability_payload(record: dict, index: int) -> dict[str, Any]:
+    return {
+        "case_id": str(record.get("case_id") or f"row_{index}"),
+        "question": str(record.get("question") or ""),
+        "contexts": [
+            str(context)[:1600]
+            for context in list(record.get("contexts") or [])[:5]
+        ],
+        "answer": str(record.get("answer") or ""),
+    }
+
+
+def _answerability_prompt(payload: list[dict[str, Any]]) -> str:
+    return (
+        "你是RAG回答行为裁判。不要读取或猜测数据集标签，只根据问题、"
+        "检索上下文和最终回答分类。\n"
+        "supported_answer：回答给出了实质内容，且所有关键事实都能由上下文支持。\n"
+        "abstention：回答明确说明现有资料不足，且没有继续给出猜测性具体结论。\n"
+        "unsupported_answer：回答给出了上下文无法支持的关键事实、数字或推断；"
+        "即使先说资料不足再猜测，也属于此类。\n"
+        "必须逐条返回且不得遗漏 case_id。输入：\n"
+        + json.dumps(payload, ensure_ascii=False)
+    )
+
+
+def _invoke_answerability_judge(
+    structured_llm: Any,
+    payload: list[dict[str, Any]],
+) -> dict[str, _AnswerBehaviorVerdict]:
+    response = structured_llm.invoke(_answerability_prompt(payload))
+    return {
+        item.case_id: item
+        for item in response.items
+        if item.case_id
+    }
+
+
+def _judge_answerability_sync(
+    records: list[dict],
+    llm: Any,
+    *,
+    batch_size: int = 6,
+) -> list[dict]:
+    """判断最终回答是有证据回答、拒答还是无依据回答。"""
+    updated = [dict(record) for record in records]
+    pending_indices: list[int] = []
+    for index, record in enumerate(updated):
+        fallback = _fallback_answer_behavior(str(record.get("answer") or ""))
+        if fallback == "empty_response":
+            record.update(evaluate_answer_behavior(record, fallback))
+            record["answerability_judge_rationale"] = "模型未生成回答"
+        else:
+            pending_indices.append(index)
+
+    if not pending_indices:
+        return updated
+
+    structured_llm = _answerability_structured_llm(llm)
+    size = max(1, int(batch_size))
+    for start in range(0, len(pending_indices), size):
+        indices = pending_indices[start : start + size]
+        payload = [_answerability_payload(updated[index], index) for index in indices]
+        try:
+            verdicts = _invoke_answerability_judge(structured_llm, payload)
+        except Exception as exc:
+            logger.warning("回答行为裁判批次失败：%s", exc)
+            verdicts = {}
+
+        missing_indices = [
+            index
+            for index in indices
+            if str(updated[index].get("case_id") or f"row_{index}") not in verdicts
+        ]
+        recovered = 0
+        for index in missing_indices:
+            case_id = str(updated[index].get("case_id") or f"row_{index}")
+            try:
+                retry_verdicts = _invoke_answerability_judge(
+                    structured_llm,
+                    [_answerability_payload(updated[index], index)],
+                )
+                verdict = retry_verdicts.get(case_id)
+                if verdict is not None:
+                    verdicts[case_id] = verdict
+                    recovered += 1
+                else:
+                    logger.warning("回答行为裁判单条重试仍遗漏 case_id=%s", case_id)
+            except Exception as exc:
+                logger.warning(
+                    "回答行为裁判单条重试失败 case_id=%s: %s",
+                    case_id,
+                    exc,
+                )
+        if missing_indices:
+            logger.info(
+                "  回答行为裁判单条重试：%s/%s 条恢复",
+                recovered,
+                len(missing_indices),
+            )
+
+        for index in indices:
+            record = updated[index]
+            case_id = str(record.get("case_id") or f"row_{index}")
+            verdict = verdicts.get(case_id)
+            if verdict is not None:
+                behavior = verdict.behavior
+                rationale = verdict.rationale.strip()
+            else:
+                behavior = _fallback_answer_behavior(
+                    str(record.get("answer") or "")
+                )
+                rationale = (
+                    "结构化裁判未返回该记录；使用确定性拒答回退规则"
+                    if behavior == "abstention"
+                    else "结构化裁判未返回该记录"
+                )
+            record.update(evaluate_answer_behavior(record, behavior))
+            record["answerability_judge_rationale"] = rationale
+
+        logger.info(
+            "  回答行为裁判进度：%s/%s",
+            min(start + size, len(pending_indices)),
+            len(pending_indices),
+        )
+    return updated
+
+
 # ---------------------------------------------------------------------------
-# RAGAS 打分（sync，在 async main 中通过 asyncio.to_thread 调用）
+# RAGAS 0.4 Collections 打分
 # ---------------------------------------------------------------------------
 
-def _run_ragas_sync(records: list[dict], llm: Any, retrieval_only: bool) -> list[dict]:
-    """
-    调用 RAGAS 计算指标，结果写回每条 record。
-    retrieval_only=True 时只算 context_precision + context_recall。
-    ragas_evaluate 是同步阻塞调用，通过 asyncio.to_thread 从 async main 中调用。
 
-    【v2 修复：RAGAS 0.4.x 字段名破坏性变更】
-    RAGAS 0.2+ 将所有数据集字段名重命名，传旧名字不报错但静默返回接近 0 的分数：
-      question     -> user_input
-      contexts     -> retrieved_contexts
-      answer       -> response
-      ground_truth -> reference
-    """
+async def _run_ragas_async(
+    records: list[dict],
+    model_ref: str,
+    retrieval_only: bool,
+) -> list[dict]:
+    """使用Collections指标逐条评分，并将MetricResult.value写回记录。"""
+    base_records = [
+        {
+            **record,
+            "context_precision": None,
+            "context_recall": None,
+            "faithfulness": None,
+            "ragas_error": None,
+        }
+        for record in records
+    ]
+    answerable_indices = [
+        index
+        for index, record in enumerate(base_records)
+        if record.get("answerable") is not False
+    ]
+    if not answerable_indices:
+        logger.info("数据集没有可回答样本，跳过 RAGAS；拒答能力由独立裁判评测")
+        return base_records
+
     if not _RAGAS_OK:
         logger.warning("RAGAS 不可用，跳过打分，所有指标填 None")
-        return [
-            {**r, "context_precision": None, "context_recall": None, "faithfulness": None}
-            for r in records
-        ]
+        return base_records
 
-    # 【v2 修复】使用 RAGAS 0.2+ 的新字段名
-    data: dict[str, list] = {
-        "user_input":          [r["question"] for r in records],
-        "retrieved_contexts":  [r.get("contexts", []) for r in records],
-        "reference":           [str(r.get("ground_truth") or r.get("answer_ref", "")) for r in records],
-    }
-    if not retrieval_only:
-        data["response"] = [r.get("answer", "") for r in records]
-
-    # 统计 contexts 为空的比例，方便排查检索问题
-    empty_ctx = sum(1 for c in data["retrieved_contexts"] if not c)
+    empty_ctx = sum(
+        not base_records[index].get("contexts") for index in answerable_indices
+    )
     if empty_ctx > 0:
         logger.warning(
-            f"⚠️  {empty_ctx}/{len(records)} 条记录的 retrieved_contexts 为空，"
+            f"⚠️  {empty_ctx}/{len(answerable_indices)} 条可回答记录的 "
+            f"retrieved_contexts 为空，"
             f"这些条目的 Precision/Recall 将计为 0。"
             f"建议先用 --debug_retrieval 排查检索问题。"
         )
 
-    hf_dataset = HFDataset.from_dict(data)
+    evaluator_llm = _build_ragas_llm(model_ref)
+    context_precision = ContextPrecision(llm=evaluator_llm)
+    context_recall = ContextRecall(llm=evaluator_llm)
+    faithfulness = Faithfulness(llm=evaluator_llm) if not retrieval_only else None
+    metric_names = ["context_precision", "context_recall"]
+    if faithfulness is not None:
+        metric_names.append("faithfulness")
 
-    # 【v3 修复】DeepSeek 等模型会在 JSON 响应外包裹 ```json ... ``` 代码块，
-    # 导致 RAGAS Pydantic 解析器报 ValidationError（Invalid JSON at column 1）。
-    # 先用 _MarkdownStrippingLLM 剥离代码围栏，再传入 LangchainLLMWrapper。
-    stripped_llm = _MarkdownStrippingLLM(llm)
-    wrapped_llm = LangchainLLMWrapper(stripped_llm)
-    metrics = [
-        ContextPrecision(llm=wrapped_llm),
-        ContextRecall(llm=wrapped_llm),
-    ]
-    if not retrieval_only:
-        metrics.append(Faithfulness(llm=wrapped_llm))
+    logger.info(
+        "RAGAS 仅评估可回答样本（%s/%s 条，指标：%s）...",
+        len(answerable_indices),
+        len(records),
+        metric_names,
+    )
 
-    logger.info(f"RAGAS 打分中（{len(records)} 条，指标：{[m.name for m in metrics]}）...")
-    result = ragas_evaluate(hf_dataset, metrics=metrics)
-    df = result.to_pandas()
-
-    enriched = []
     nan_precision_count = 0
-    for i, rec in enumerate(records):
-        row = df.iloc[i]
+    for position, record_index in enumerate(answerable_indices, 1):
+        record = base_records[record_index]
+        question = str(record.get("question") or "")
+        contexts = [str(value) for value in (record.get("contexts") or [])]
+        reference = str(
+            record.get("ground_truth") or record.get("answer_ref", "")
+        )
+        errors: list[str] = []
 
-        # 【v4 修复】ContextPrecision NaN 的语义：所有 contexts 均被 LLM 判为 irrelevant
-        # RAGAS 的 AP@K 公式此时分母为 0，返回 NaN。
-        # 语义上这等价于 precision=0（没有任何有用的 context），而非"无法计算"，
-        # 因此记为 0.0 而非 None，使其参与均值统计，避免高估整体 Precision。
-        cp_raw = _safe_float(row.get("context_precision"))
-        if cp_raw is None:
+        async def score_metric(name: str, awaitable: Any) -> float | None:
+            try:
+                result = await awaitable
+                return _safe_float(getattr(result, "value", None))
+            except Exception as exc:
+                logger.warning(
+                    "RAGAS %s失败 [%s...]: %s",
+                    name,
+                    question[:30],
+                    exc,
+                )
+                errors.append(f"{name}: {type(exc).__name__}")
+                return None
+
+        cp = await score_metric(
+            "context_precision",
+            context_precision.ascore(
+                user_input=question,
+                reference=reference,
+                retrieved_contexts=contexts,
+            ),
+        )
+        if cp is None and not errors:
             cp = 0.0
             nan_precision_count += 1
-        else:
-            cp = cp_raw
 
-        enriched.append({
-            **rec,
-            "context_precision": cp,
-            "context_recall":    _safe_float(row.get("context_recall")),
-            "faithfulness":      _safe_float(row.get("faithfulness")) if not retrieval_only else None,
-        })
+        recall = await score_metric(
+            "context_recall",
+            context_recall.ascore(
+                user_input=question,
+                reference=reference,
+                retrieved_contexts=contexts,
+            ),
+        )
+        faithful = None
+        if faithfulness is not None:
+            faithful = await score_metric(
+                "faithfulness",
+                faithfulness.ascore(
+                    user_input=question,
+                    response=str(record.get("answer") or ""),
+                    retrieved_contexts=contexts,
+                ),
+            )
+
+        record.update(
+            {
+                "context_precision": cp,
+                "context_recall": recall,
+                "faithfulness": faithful,
+                "ragas_error": "; ".join(errors) or None,
+            }
+        )
+        if position % 5 == 0 or position == len(answerable_indices):
+            logger.info("  RAGAS进度：%s/%s", position, len(answerable_indices))
 
     if nan_precision_count > 0:
         logger.warning(
-            f"⚠️  {nan_precision_count}/{len(records)} 条 ContextPrecision 原始值为 NaN "
+            f"⚠️  {nan_precision_count}/{len(answerable_indices)} 条可回答样本的 "
+            f"ContextPrecision 原始值为 NaN "
             f"（所有 contexts 均被判为 irrelevant，AP@K 分母=0），已记为 0.0。"
             f"若占比过高（>30%），建议提高 Reranker 阈值或减小 --top_n。"
         )
-    return enriched
+    return base_records
 
 
 # ---------------------------------------------------------------------------
@@ -537,10 +798,17 @@ def compute_summary(records: list[dict]) -> dict:
 
     def performance_of(subset: list[dict]) -> dict[str, float | None]:
         latencies_ms = [
-            float(record["retrieval_timings"]["total"]) * 1000
+            float(
+                record["retrieval_timings"].get("evaluation_total")
+                if record["retrieval_timings"].get("evaluation_total") is not None
+                else record["retrieval_timings"]["total"]
+            ) * 1000
             for record in subset
             if isinstance(record.get("retrieval_timings"), dict)
-            and record["retrieval_timings"].get("total") is not None
+            and (
+                record["retrieval_timings"].get("evaluation_total") is not None
+                or record["retrieval_timings"].get("total") is not None
+            )
         ]
         return {
             "retrieve_ok_rate": (
@@ -557,8 +825,10 @@ def compute_summary(records: list[dict]) -> dict:
             "context_precision": mean([r.get("context_precision") for r in subset]),
             "context_recall":    mean([r.get("context_recall")    for r in subset]),
             "faithfulness":      mean([r.get("faithfulness")      for r in subset]),
+            "ragas_error_count": sum(bool(r.get("ragas_error")) for r in subset),
             "n":                 len(subset),
             **aggregate_retrieval_metrics(subset),
+            **aggregate_answerability_metrics(subset),
             **performance_of(subset),
         }
 
@@ -566,6 +836,14 @@ def compute_summary(records: list[dict]) -> dict:
         "generated_at":  datetime.now().isoformat(timespec="seconds"),
         "total_samples": len(records),
         "global":        metrics_of(records),
+        "by_answerability": {
+            "answerable": metrics_of(
+                [record for record in records if record.get("answerable") is not False]
+            ),
+            "no_answer": metrics_of(
+                [record for record in records if record.get("answerable") is False]
+            ),
+        },
         "by_industry":   {},
     }
 
@@ -612,11 +890,18 @@ def write_csv_detail(
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / f"eval_detail_{timestamp}.csv"
     fieldnames = [
-        "case_id", "question", "category", "industry", "page",
+        "case_id", "answerable", "question", "category", "industry", "page",
         "chunk_text_preview", "retrieval_label_mode", "gold_label_count",
         "retrieved_count", "retrieved_chunk_ids", "retrieval_stage",
-        "retrieval_cache_hit", "retrieval_timings", *RETRIEVAL_METRIC_KEYS,
-        "context_precision", "context_recall", "faithfulness",
+        "retrieval_cache_hit", "retrieval_abstained", "retrieval_timings",
+        "retrieval_trace", "retrieval_configuration",
+        "retrieval_degraded_sources",
+        *RETRIEVAL_METRIC_KEYS,
+        "answer", "answer_behavior", "answerability_outcome",
+        "answerability_correct", "correct_abstention", "hallucination",
+        "false_refusal", "negative_label_conflict",
+        "answerability_judge_rationale",
+        "context_precision", "context_recall", "faithfulness", "ragas_error",
         "retrieve_ok", "contexts_count", "sources",
     ]
     with open(out, "w", newline="", encoding="utf-8-sig") as f:
@@ -627,6 +912,7 @@ def write_csv_detail(
             chunk_preview = r.get("chunk_text", "")[:80].replace("\n", " ")
             writer.writerow({
                 "case_id":           r.get("case_id", ""),
+                "answerable":        r.get("answerable", True),
                 "question":           r.get("question", ""),
                 "category":           r.get("category", ""),
                 "industry":           r.get("industry", ""),
@@ -641,13 +927,35 @@ def write_csv_detail(
                 ),
                 "retrieval_stage":    r.get("retrieval_stage"),
                 "retrieval_cache_hit": r.get("retrieval_cache_hit"),
+                "retrieval_abstained": r.get("retrieval_abstained"),
                 "retrieval_timings": json.dumps(
                     r.get("retrieval_timings", {}), ensure_ascii=False
                 ),
+                "retrieval_trace": json.dumps(
+                    r.get("retrieval_trace", {}), ensure_ascii=False
+                ),
+                "retrieval_configuration": json.dumps(
+                    r.get("retrieval_configuration", {}), ensure_ascii=False
+                ),
+                "retrieval_degraded_sources": json.dumps(
+                    r.get("retrieval_degraded_sources", []), ensure_ascii=False
+                ),
                 **{key: r.get(key) for key in RETRIEVAL_METRIC_KEYS},
+                "answer": r.get("answer"),
+                "answer_behavior": r.get("answer_behavior"),
+                "answerability_outcome": r.get("answerability_outcome"),
+                "answerability_correct": r.get("answerability_correct"),
+                "correct_abstention": r.get("correct_abstention"),
+                "hallucination": r.get("hallucination"),
+                "false_refusal": r.get("false_refusal"),
+                "negative_label_conflict": r.get("negative_label_conflict"),
+                "answerability_judge_rationale": r.get(
+                    "answerability_judge_rationale"
+                ),
                 "context_precision":  r.get("context_precision"),
                 "context_recall":     r.get("context_recall"),
                 "faithfulness":       r.get("faithfulness"),
+                "ragas_error":        r.get("ragas_error"),
                 "retrieve_ok":        r.get("retrieve_ok"),
                 "contexts_count":     len(ctxs),
                 "sources":            json.dumps(r.get("sources", []), ensure_ascii=False),
@@ -674,7 +982,6 @@ def print_console_report(summary: dict) -> None:
         ("mrr", "MRR"),
         ("ndcg_at_k", "nDCG@K"),
         ("source_page_recall", "Source/Page Recall"),
-        ("no_answer_accuracy", "No-answer Accuracy"),
     ]:
         val = g[key]
         display = f"{val:.4f}" if val is not None else "  N/A "
@@ -686,12 +993,39 @@ def print_console_report(summary: dict) -> None:
         g["no_answer_count"],
     )
     logger.info(
-        "  成功率=%s  延迟 P50=%sms  P95=%sms",
+        "  负样本检索抑制率=%s  检索异常=%s",
+        g.get("retrieval_abstention_rate"),
+        g.get("no_answer_retrieval_error_count"),
+    )
+    logger.info(
+        "  成功率=%s  端到端延迟 P50=%sms  P95=%sms",
         g["retrieve_ok_rate"],
         g["retrieval_latency_p50_ms"],
         g["retrieval_latency_p95_ms"],
     )
     logger.info(sep)
+
+    logger.info("  Agent 回答/拒答指标")
+    logger.info(sep)
+    for key, label in [
+        ("answerability_accuracy", "Answerability Accuracy"),
+        ("abstention_accuracy", "Abstention Accuracy"),
+        ("hallucination_rate", "Hallucination Rate"),
+        ("false_refusal_rate", "False Refusal Rate"),
+        ("negative_label_conflict_rate", "Negative Label Conflict"),
+    ]:
+        val = g.get(key)
+        display = f"{val:.4f}" if val is not None else "  N/A "
+        logger.info(f"  {label:<26} {display:>8}")
+    logger.info(
+        "  可评判=%s  Judge Coverage=%s  空回答=%s  裁判失败=%s",
+        g.get("answerability_evaluable_count"),
+        g.get("answerability_judge_coverage"),
+        g.get("empty_response_count"),
+        g.get("answerability_judge_error_count"),
+    )
+    logger.info(sep)
+
     logger.info("  RAGAS 指标")
     logger.info(sep)
     logger.info(f"  {'指标':<22} {'均值':>8}")
@@ -704,6 +1038,7 @@ def print_console_report(summary: dict) -> None:
         val = g[key]
         display = f"{val:.4f}" if val is not None else "  N/A "
         logger.info(f"  {label:<22} {display:>8}")
+    logger.info("  RAGAS 单样本失败数：%s", g.get("ragas_error_count", 0))
     logger.info(sep)
 
     if summary["by_industry"]:
@@ -751,7 +1086,11 @@ async def main() -> None:
     parser = argparse.ArgumentParser(description="RAG 系统自动评测工具")
     parser.add_argument(
         "--dataset",
-        default=str(Path(__file__).resolve().parent / "dataset" / "eval_dataset.jsonl"),
+        default=str(
+            Path(__file__).resolve().parent
+            / "dataset"
+            / "eval_dataset_docling_v1.jsonl"
+        ),
         help=".jsonl 评测数据集路径",
     )
     parser.add_argument(
@@ -797,6 +1136,11 @@ async def main() -> None:
         "--debug_retrieval", action="store_true",
         help="对前 3 条记录打印统一检索服务的阶段、缓存和候选数，用于排查 contexts 为空问题",
     )
+    parser.add_argument(
+        "--skip_answerability_judge",
+        action="store_true",
+        help="端到端模式下跳过回答/拒答裁判；默认启用并会增加模型调用",
+    )
     args = parser.parse_args()
     args.top_n = max(1, min(args.top_n, 10))
 
@@ -831,7 +1175,16 @@ async def main() -> None:
     debug_n = 3 if args.debug_retrieval else 0
     rag_runtime = create_configured_rag_runtime()
     try:
-        retrieval_service = rag_runtime.get_retrieval_service()
+        retrieval_service = (
+            rag_runtime.get_retrieval_service()
+            if args.allow_query_cache
+            else rag_runtime.get_evaluation_retrieval_service()
+        )
+        if args.allow_query_cache:
+            logger.warning(
+                "--allow_query_cache 使用普通检索端点，"
+                "本次不会产生分阶段评测 trace"
+            )
         logger.info("评测前执行显式预热...")
         warmup_status = await rag_runtime.operations.ensure_ready(120)
         if not warmup_status.get("ready"):
@@ -855,14 +1208,20 @@ async def main() -> None:
     if not args.retrieval_only and not args.deterministic_only:
         logger.info("生成答案（端到端模式）...")
         records = await asyncio.to_thread(_generate_answers_sync, records, llm)
+        if not args.skip_answerability_judge:
+            logger.info("评判回答/拒答行为...")
+            records = await asyncio.to_thread(
+                _judge_answerability_sync,
+                records,
+                llm,
+            )
 
-    # -- 4. RAGAS 打分（sync 函数通过 to_thread 调用）--------------------------
+    # -- 4. RAGAS 0.4 Collections打分 ----------------------------------------
     if not args.deterministic_only:
         logger.info("RAGAS 打分...")
-        records = await asyncio.to_thread(
-            _run_ragas_sync,
+        records = await _run_ragas_async(
             records,
-            llm,
+            model_ref,
             args.retrieval_only,
         )
 
@@ -873,7 +1232,21 @@ async def main() -> None:
         "query_cache_enabled": args.allow_query_cache,
         "deterministic_only": args.deterministic_only,
         "retrieval_only": args.retrieval_only,
+        "answerability_judge_enabled": (
+            not args.deterministic_only
+            and not args.retrieval_only
+            and not args.skip_answerability_judge
+        ),
         "retrieval_mode": args.retrieval_mode,
+        "evaluation_trace_enabled": not args.allow_query_cache,
+        "retrieval_configuration": next(
+            (
+                dict(record.get("retrieval_configuration") or {})
+                for record in records
+                if record.get("retrieval_configuration")
+            ),
+            {},
+        ),
         "warmup_timings": dict(
             (warmup_status.get("warmup_status") or {}).get("timings") or {}
         ),

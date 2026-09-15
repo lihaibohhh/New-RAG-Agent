@@ -4,7 +4,7 @@ from typing import Literal
 
 from langchain_core.messages import AIMessage
 from react_agent.agent.state import State
-from react_agent.utils.tool_utils import _ai_tool_call_ids
+from react_agent.agent.tool_calls import extract_tool_call_ids
 
 
 logger = logging.getLogger(__name__)
@@ -20,7 +20,7 @@ def route_model_output(state: State) -> Literal["__end__", "tools", "call_model"
             type(last_message).__name__,
         )
         return "call_model"
-    return "tools" if _ai_tool_call_ids(last_message) else "__end__"
+    return "tools" if extract_tool_call_ids(last_message) else "__end__"
 
 
 def route_after_postprocess(state: State) -> Literal["__end__", "reflection"]:

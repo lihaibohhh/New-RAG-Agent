@@ -4,7 +4,20 @@ from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 from langchain_core.tools import StructuredTool
-from react_agent.utils.tool_helpers import _ok, _err, ExcelInput
+from pydantic import BaseModel, Field
+
+from react_agent.tooling.results import tool_error as _err
+from react_agent.tooling.results import tool_success as _ok
+
+
+class ExcelInput(BaseModel):
+    """Excel 工具自身的输入契约。"""
+
+    filename: str = Field(description="文件名，不需要添加 .xlsx 后缀")
+    headers: list[str] = Field(description="非空表头列表")
+    rows: list[list[Any]] = Field(description="数据行，列顺序与表头一致")
+    sheet_name: str = Field(default="Sheet1", description="工作表名称")
+    mode: str = Field(default="timestamp", description="timestamp/overwrite/append")
 
 
 _OUTPUT_DIR: ContextVar[Path | None] = ContextVar(

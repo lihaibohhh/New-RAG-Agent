@@ -14,6 +14,15 @@ class SearchRequest(BaseModel):
     retrieval_mode: Literal["hybrid", "bm25", "vector"] = "hybrid"
 
 
+class EvaluationSearchRequest(BaseModel):
+    """专用评测检索请求；设计上不提供语义查询缓存开关。"""
+
+    query: str = Field(min_length=1, max_length=2000)
+    top_k: int = Field(default=3, ge=1, le=10)
+    filters: dict[str, Any] | None = None
+    retrieval_mode: Literal["hybrid", "bm25", "vector"] = "hybrid"
+
+
 class WarmupRequest(BaseModel):
     wait_seconds: float = Field(default=20, ge=0, le=120)
     force: bool = False
@@ -31,6 +40,7 @@ class InvalidateRequest(BaseModel):
 
 __all__ = [
     "IngestionRequest",
+    "EvaluationSearchRequest",
     "InvalidateRequest",
     "SearchRequest",
     "WarmupRequest",

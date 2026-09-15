@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from react_agent.mcp_server.responses import clamp_int, mcp_err, mcp_ok
 from react_agent.rag.contracts import RagValidationError, RetrievalResult
-from react_agent.rag.query import RetrievalService
+from react_agent.rag.runtime_ports import RetrievalServicePort
 
 if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
@@ -24,7 +24,7 @@ QUERY_FINANCIAL_REPORTS_DESCRIPTION = (
 )
 
 WarmupCallable = Callable[[int | float], Awaitable[dict[str, Any]]]
-RetrievalServiceProvider = Callable[[], RetrievalService]
+RetrievalServiceProvider = Callable[[], RetrievalServicePort]
 
 
 def register_rag_tools(

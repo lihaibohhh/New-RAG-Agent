@@ -11,45 +11,25 @@ from langgraph.runtime import Runtime
 
 from react_agent.agent.dependencies import AgentDependencies
 from react_agent.agent.state import State
-from react_agent.utils.time_utils import _now_iso_in_tz
-from react_agent.utils.token_utils import _estimate_openai_cost_usd, \
-    _extract_deepseek_v4_usage, bound_tool_payload
-from react_agent.utils.tool_utils import _get_active_tools, _tc_name, _render_tool_catalog, \
-    _extract_recent_tool_messages, find_last_real_human_idx, _ai_tool_call_ids
-from react_agent.utils.tool_helpers import _err
+from react_agent.agent.clock import now_iso_in_timezone
+from react_agent.agent.tool_calls import (
+    SYSTEM_SENTINEL_NAMES,
+    extract_recent_tool_messages,
+    extract_tool_call_ids,
+    find_last_real_human_index,
+    get_tool_call_name,
+)
+from react_agent.agent.tool_policy import (
+    bound_tool_payload,
+    count_successful_rag_calls_in_current_turn,
+    render_tool_catalog,
+)
+from react_agent.agent.usage import estimate_model_cost_usd, extract_model_usage
+from react_agent.tooling.results import tool_error
 
 # FIX-④⑤: 提取公共函数，只统计当前轮次（最后一条真实 HumanMessage 之后）的 RAG 调用次数，
 #           避免扫全量历史消息导致长对话出现"78次"异常
 logger = logging.getLogger(__name__)
-_SYSTEM_SENTINEL_NAMES = {"system_monitor", "system_terminator"}
-
-
-def _count_rag_in_current_turn(messages: list) -> int:
-    """从后往前找最后一条真实 HumanMessage（排除系统哨兵消息），
-    统计其后成功完成的 query_internal_knowledge 调用次数。
-
-    基础设施错误（例如模型计算超时）不消耗有效检索额度，避免瞬时故障
-    直接触发本轮硬上限；返回 ok=True 但无内容的有效检索仍会计数。
-    """
-    last_human_idx = find_last_real_human_idx(messages)
-    if last_human_idx < 0:
-        return 0
-    count = 0
-    for message in messages[last_human_idx:]:
-        if not (
-            isinstance(message, ToolMessage)
-            and getattr(message, "name", None) == "query_internal_knowledge"
-        ):
-            continue
-        try:
-            payload = json.loads(getattr(message, "content", None) or "{}")
-        except (TypeError, ValueError, json.JSONDecodeError):
-            continue
-        if isinstance(payload, dict) and payload.get("ok") is True:
-            count += 1
-    return count
-
-
 def _count_tokens_for_trim(messages) -> int:
     """tiktoken cl100k_base 估算；未安装降级为字符数 // 3。"""
     try:
@@ -90,19 +70,15 @@ def _collapse_consecutive_humans(messages):
 def _sanitize_dangling_tool_calls(messages):
     """为缺应答的 tool_call 补占位 ToolMessage，消除悬空导致的 400。
 
-    检测口径统一走 _ai_tool_call_ids（内部优先用官方 _convert_message_to_dict，
-    与 DeepSeek 实际收到的一致），覆盖 .tool_calls / .invalid_tool_calls / chunk 残留，
-    不会漏掉藏在特殊属性里的隐藏调用。
-
-    注意：相比旧版“转换函数不可用就原样返回”，现在即便 langchain_openai 不可用，
-    _ai_tool_call_ids 也会降级为属性读取继续净化，防线不会整体失效。"""
+    检测口径统一走 extract_tool_call_ids，覆盖 tool_calls、invalid_tool_calls
+    和 additional_kwargs 中的 Provider 原始调用，不依赖第三方私有转换函数。"""
     msgs = list(messages)
     out = []
     i = 0
     while i < len(msgs):
         m = msgs[i]
         out.append(m)
-        need_ids = _ai_tool_call_ids(m)
+        need_ids = extract_tool_call_ids(m)
         if need_ids:
             answered = []
             j = i + 1
@@ -129,7 +105,7 @@ def _prepare_model_messages(messages: list, ctx) -> list:
     # 仅防御历史持久化中的遗留 sentinel；新代码已不再产生
     msgs = [
         m for m in messages
-        if not (isinstance(m, HumanMessage) and getattr(m, "name", None) in _SYSTEM_SENTINEL_NAMES)
+        if not (isinstance(m, HumanMessage) and getattr(m, "name", None) in SYSTEM_SENTINEL_NAMES)
     ]
     if not (ctx.enable_history_truncation and ctx.max_history_tokens > 0):
         return _collapse_consecutive_humans(msgs)
@@ -165,21 +141,20 @@ def _build_model_input(sys_prompt: str, pending: Optional[str], msgs: list) -> l
 async def call_model(state: State, runtime: Runtime[AgentDependencies], config: RunnableConfig = None) -> Dict[str, Any]:
     """调用主模型，并把 AIMessage 追加到 state.messages"""
     dependencies = runtime.context
-    ctx = dependencies.context
+    ctx = dependencies.config
 
     # 1) 初始化模型
-    base_model = dependencies.get_model()
+    base_model = dependencies.resolve_model()
     tools_enabled = bool(getattr(ctx, "enable_tools", True))
-    active_tools, _ = _get_active_tools(ctx, dependencies.tools)
+    active_tools, _ = dependencies.active_tools()
     model = base_model.bind_tools(active_tools) if tools_enabled else base_model
 
     # 2) 系统提示
-    tool_catalog = _render_tool_catalog(
+    tool_catalog = render_tool_catalog(
         active_tools,
         tools_enabled=tools_enabled,
-        web_search_enabled=ctx.enable_web_search,
     )
-    system_time = _now_iso_in_tz(ctx.timezone)
+    system_time = now_iso_in_timezone(ctx.timezone)
     sys_prompt = ctx.system_prompt.format(
         system_time=system_time,
         tool_catalog=tool_catalog,
@@ -211,8 +186,8 @@ async def call_model(state: State, runtime: Runtime[AgentDependencies], config: 
     # 5) Token 统计
     usage_update = {}
     if ctx.enable_cost_tracking:
-        usage = _extract_deepseek_v4_usage(response)
-        cost = _estimate_openai_cost_usd(
+        usage = extract_model_usage(response)
+        cost = estimate_model_cost_usd(
             model_name=ctx.model.split("/")[-1],
             usage=usage,
             price_table=ctx.deepseek_v4_price,
@@ -233,7 +208,7 @@ async def call_model(state: State, runtime: Runtime[AgentDependencies], config: 
 
     # FIX-④⑤: 替换为公共函数，只统计当前轮次的 RAG 调用次数
     msgs_list = list(state.messages)
-    current_turn_rag_count = _count_rag_in_current_turn(msgs_list)
+    current_turn_rag_count = count_successful_rag_calls_in_current_turn(msgs_list)
 
     if current_turn_rag_count >= _RAG_CALL_LIMIT and response.tool_calls:
         # 判断本次想调用的工具里是否还有 RAG
@@ -261,12 +236,12 @@ async def call_model(state: State, runtime: Runtime[AgentDependencies], config: 
             return out
 
     # 注：被禁用工具的拦截统一由 dynamic_tool_node 处理，此处无需重复判断
-    # ⚠️ 检测口径改用 _ai_tool_call_ids：若模型在最后一步产出的是 invalid_tool_calls
+    # ⚠️ 若模型在最后一步产出的是 invalid_tool_calls，普通 tool_calls 会为空，
     #    （非法 JSON 参数），response.tool_calls 为空但仍是一条“带工具调用”的消息。
     #    若不在此拦截，它会被路由到 tools → 多走两步 → 触发 GraphRecursionError。
     #    用替换消息（同 id）覆盖原 response，既安全终止又不留悬空。
-    if state.is_last_step and _ai_tool_call_ids(response):
-        _stopped_tools = [_tc_name(tc) for tc in (response.tool_calls or [])]
+    if state.is_last_step and extract_tool_call_ids(response):
+        _stopped_tools = [get_tool_call_name(tc) for tc in (response.tool_calls or [])]
         _stopped_tools += [
             itc.get("name") for itc in (getattr(response, "invalid_tool_calls", None) or [])
         ]
@@ -321,8 +296,8 @@ async def call_model(state: State, runtime: Runtime[AgentDependencies], config: 
 # ==================== Node: 工具后处理 ====================
 async def postprocess_tools(state: State, runtime: Runtime[AgentDependencies]) -> Dict[str, Any]:
     """解析工具返回，写入 State.tool_runs"""
-    ctx = runtime.context.context
-    tool_msgs = _extract_recent_tool_messages(list(state.messages))
+    ctx = runtime.context.config
+    tool_msgs = extract_recent_tool_messages(list(state.messages))
     if not tool_msgs:
         return {}
 
@@ -355,7 +330,7 @@ async def postprocess_tools(state: State, runtime: Runtime[AgentDependencies]) -
             "ok": run_ok,
             "error": run_error,
             "meta": payload.get("meta"),
-            "ts": _now_iso_in_tz(ctx.timezone),
+            "ts": now_iso_in_timezone(ctx.timezone),
         }
 
         # ✅ FIX: err_inc 之前一直初始化为 0、循环体内从未递增，tool_error_count 是死代码。
@@ -371,9 +346,9 @@ async def postprocess_tools(state: State, runtime: Runtime[AgentDependencies]) -
     # ── 动态推导本轮尾部连续无效 RAG 次数 ──────────────────────────────
     _CONSECUTIVE_FAILURE_THRESHOLD = ctx.consecutive_failure_threshold
 
-    # FIX-④⑤: 使用与 _count_rag_in_current_turn 一致的哨兵排除集，避免全量扫描
+    # 使用与当前轮检索计数一致的哨兵排除集，避免跨轮扫描
     msgs_list = list(state.messages)
-    last_human_idx = find_last_real_human_idx(msgs_list)
+    last_human_idx = find_last_real_human_index(msgs_list)
 
     # 按时间顺序收集本轮所有 RAG ToolMessage 的 has_relevant_content 结果
     turn_rag_results: List[bool] = []
@@ -474,8 +449,8 @@ async def dynamic_tool_node(state: State, config: RunnableConfig, runtime: Runti
     """
     try:
         dependencies = runtime.context
-        ctx = dependencies.context
-        active, active_names = _get_active_tools(ctx, dependencies.tools)
+        ctx = dependencies.config
+        active, active_names = dependencies.active_tools()
 
         # ── 治本：先处理 invalid_tool_calls（参数 JSON 解析失败的调用） ──
         # DeepSeek 返回非法 JSON 参数时，LangChain 会把 tool_call 放进
@@ -494,7 +469,7 @@ async def dynamic_tool_node(state: State, config: RunnableConfig, runtime: Runti
                 invalid_messages.append(ToolMessage(
                     tool_call_id=itc_id,
                     name=itc_name,
-                    content=json.dumps(_err(
+                    content=json.dumps(tool_error(
                         tool_name=itc_name,
                         query=str(itc_args)[:200],
                         code="INVALID_TOOL_CALL",
@@ -517,7 +492,7 @@ async def dynamic_tool_node(state: State, config: RunnableConfig, runtime: Runti
         allowed_calls = []
         if isinstance(last_msg, AIMessage) and last_msg.tool_calls:
             for tc in last_msg.tool_calls:
-                name = _tc_name(tc)
+                name = get_tool_call_name(tc)
                 if name and name not in active_names:
                     blocked_calls.append(tc)
                 else:
@@ -535,12 +510,12 @@ async def dynamic_tool_node(state: State, config: RunnableConfig, runtime: Runti
         blocked_messages = [
             ToolMessage(
                 tool_call_id=tc.get("id", ""),
-                name=_tc_name(tc) or "unknown",
-                content=json.dumps(_err(
-                    tool_name=_tc_name(tc) or "unknown",
+                name=get_tool_call_name(tc) or "unknown",
+                content=json.dumps(tool_error(
+                    tool_name=get_tool_call_name(tc) or "unknown",
                     query=str(tc.get("args", "")),
                     code="TOOL_DISABLED",
-                    message=f"工具 '{_tc_name(tc)}' 在当前配置下已被禁用。可用工具：{sorted(active_names)}。",
+                    message=f"工具 '{get_tool_call_name(tc)}' 在当前配置下已被禁用。可用工具：{sorted(active_names)}。",
                 ), ensure_ascii=False),
             )
             for tc in blocked_calls
@@ -562,7 +537,7 @@ async def dynamic_tool_node(state: State, config: RunnableConfig, runtime: Runti
         return {"messages": _bound_tool_messages(invalid_messages + blocked_messages + tool_result_messages, ctx.max_tool_output_chars)}
     except Exception as e:
         # ══════ 兜底：扫描本轮所有未应答的 tool_call，全部补 ToolMessage ══════
-        # 检测口径统一走 _ai_tool_call_ids（与 DeepSeek 实际收到的一致），同时覆盖
+        # 检测口径统一走 extract_tool_call_ids，同时覆盖
         # .tool_calls 与 .invalid_tool_calls，并且【不假设带工具调用的 AIMessage 在末尾】。
         logger.error(f"[dynamic_tool_node] 未预期异常：{type(e).__name__}: {e}", exc_info=True)
 
@@ -570,7 +545,7 @@ async def dynamic_tool_node(state: State, config: RunnableConfig, runtime: Runti
         target_idx = -1
         need_ids: List[str] = []
         for _idx in range(len(state.messages) - 1, -1, -1):
-            ids = _ai_tool_call_ids(state.messages[_idx])
+            ids = extract_tool_call_ids(state.messages[_idx])
             if ids:
                 target_idx = _idx
                 need_ids = ids
@@ -588,7 +563,7 @@ async def dynamic_tool_node(state: State, config: RunnableConfig, runtime: Runti
                 ToolMessage(
                     tool_call_id=_id,
                     name="unknown",
-                    content=json.dumps(_err(
+                    content=json.dumps(tool_error(
                         tool_name="unknown",
                         query="",
                         code="TOOL_NODE_CRASH",
@@ -602,7 +577,7 @@ async def dynamic_tool_node(state: State, config: RunnableConfig, runtime: Runti
                 logger.error(f"[dynamic_tool_node] 兜底补齐 {len(missing)} 条 ToolMessage")
                 _max_chars = 4000
                 try:
-                    _max_chars = runtime.context.context.max_tool_output_chars
+                    _max_chars = runtime.context.config.max_tool_output_chars
                 except Exception:
                     pass
                 return {"messages": _bound_tool_messages(missing, _max_chars)}

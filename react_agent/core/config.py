@@ -304,6 +304,7 @@ class RagConfig(BaseModel):
 
     max_retries: int = Field(default=2, ge=0)
     max_content_chars: int = Field(default=800, ge=200, le=5000)
+    client_timeout: float = Field(default=150.0, gt=0)
 
     # 兼容旧配置；设置后同时覆盖 CPU/GPU 的 timeout。
     timeout: int | None = Field(default=None, gt=0)
@@ -324,6 +325,7 @@ class RagConfig(BaseModel):
     def _load_from_env(cls, values: Any) -> dict[str, Any]:
         payload = dict(values or {})
         env_mapping = {
+            "client_timeout": "KNOWLEDGE_SERVICE_TIMEOUT",
             "timeout": "RAG_TIMEOUT",
             "cpu_timeout": "RAG_CPU_TIMEOUT",
             "cuda_timeout": "RAG_CUDA_TIMEOUT",

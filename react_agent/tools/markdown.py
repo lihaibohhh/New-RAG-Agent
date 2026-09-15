@@ -4,7 +4,7 @@ Markdown 文档生成工具 — md_tool
 适用场景：分析摘要、会议记录、内部备忘、可在 GitHub/Notion/飞书直接渲染的内容
 
 设计规范：
-  - 与项目其他工具（search / rag / sql / excel）保持一致的 _ok / _err 返回结构
+  - 与项目其他工具保持一致的 ToolResult 返回结构
   - @tool(description=...) 提供 LLM 路由决策所需的触发/禁止条件
   - sections / metadata 接受 Any 类型，在函数体内通过 _doc_common 手动校验和容错，
     避免 @tool 装饰器的 Pydantic 校验在函数体外抛出 ValidationError
@@ -20,7 +20,8 @@ from pathlib import Path
 from typing import Any
 
 from langchain_core.tools import tool
-from react_agent.utils.tool_helpers import _ok, _err
+from react_agent.tooling.results import tool_error as _err
+from react_agent.tooling.results import tool_success as _ok
 from react_agent.tools._doc_common import (
     normalize_sections,
     coerce_metadata,
@@ -177,7 +178,7 @@ def md_tool(
         metadata  : 可选元数据 dict，写在标题下方的信息栏
 
     返回：
-        统一的 _ok / _err 结构
+        统一的 ToolResult 结构
     """
     tool_name = "md_tool"
 

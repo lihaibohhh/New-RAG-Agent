@@ -12,7 +12,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from react_agent.mcp_server.responses import mcp_ok
-from react_agent.rag.operations import RagWarmupManager
+from react_agent.rag.runtime_ports import RagOperationsPort
 
 
 _START_WARMUP_STATUS_BY_STAGE = {
@@ -49,7 +49,7 @@ def _build_start_warmup_data(result: dict[str, Any]) -> tuple[dict[str, Any], st
 def register_warmup_tools(
     server: FastMCP,
     *,
-    manager: RagWarmupManager,
+    manager: RagOperationsPort,
 ) -> None:
     @server.tool(
         description=(

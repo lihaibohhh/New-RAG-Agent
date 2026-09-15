@@ -11,7 +11,6 @@ api/security.py — API Key 鉴权 Depends + 限流 bucket key 解析。
 豁免：本文件只定义 Depends，挂载位置决定豁免范围：
     - 仅挂在 /api/v1/* 业务路由上
     - /health、/api/v1/health、/metrics 路由不引用此 Depends → 自然豁免
-    - 旧版 /chat/* legacy 路由也不挂，维持现状
 
 匿名降级策略（有意设计）：
     免鉴权模式下 api_key 返回空字符串。限流和预算不能对空 key 直接跳过，

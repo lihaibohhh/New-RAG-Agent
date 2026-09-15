@@ -4,7 +4,8 @@ import sqlite3
 import re
 import os
 from langchain_core.tools import tool
-from react_agent.utils.tool_helpers import _ok, _err
+from react_agent.tooling.results import tool_error as _err
+from react_agent.tooling.results import tool_success as _ok
 from react_agent.core.config import settings
 
 
@@ -107,7 +108,7 @@ def sql_tool(query: str) -> str:
     try:
         schema = _get_schema()
 
-        from react_agent.utils.llm import load_chat_model
+        from react_agent.models import load_chat_model
         llm = load_chat_model(model_ref)
 
         sql_prompt = f"""根据以下数据库Schema，将自然语言查询转换为SQL。

@@ -23,7 +23,7 @@ class ChatRequest(BaseModel):
 
 
 class ChatResponse(BaseModel):
-    """非流式响应（/chat/invoke 用）"""
+    """非流式响应（/api/v1/chat/invoke 用）。"""
     content: str
     session_id: str
     thread_id: str

@@ -1,6 +1,6 @@
 # scripts/verify_redis.py
 import asyncio
-from react_agent.utils.redis_client import ping_redis, get_async_redis
+from react_agent.infrastructure.redis import get_async_redis, ping_redis
 
 
 async def main():

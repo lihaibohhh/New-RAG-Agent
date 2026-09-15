@@ -63,7 +63,7 @@ async def check_rate_limit(bucket_key: str, limit_rpm: int) -> None:
     redis_key = f"{_RL_PREFIX}:{key_id}:{minute}"
 
     try:
-        from react_agent.utils.redis_client import get_async_redis
+        from react_agent.infrastructure.redis import get_async_redis
         r = get_async_redis()
 
         count = await r.incr(redis_key)
@@ -110,7 +110,7 @@ async def check_token_budget(bucket_key: str, budget: int) -> None:
     redis_key = f"{_BUDGET_PREFIX}:{key_id}:{today}"
 
     try:
-        from react_agent.utils.redis_client import get_async_redis
+        from react_agent.infrastructure.redis import get_async_redis
         r = get_async_redis()
 
         used_bytes = await r.get(redis_key)
@@ -152,7 +152,7 @@ async def record_token_usage(bucket_key: str, tokens: int) -> None:
     redis_key = f"{_BUDGET_PREFIX}:{key_id}:{today}"
 
     try:
-        from react_agent.utils.redis_client import get_async_redis
+        from react_agent.infrastructure.redis import get_async_redis
         r = get_async_redis()
         await r.incrby(redis_key, tokens)
         await r.expire(redis_key, 90_000)  # 25h TTL

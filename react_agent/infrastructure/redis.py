@@ -1,11 +1,11 @@
-"""Redis client resources with explicit lifecycle support."""
+"""具有显式生命周期的 Redis 客户端资源。"""
 from __future__ import annotations
 
 import logging
 import threading
 
 import redis as sync_redis
-import redis.asyncio as aioredis
+import redis.asyncio as async_redis
 
 from react_agent.core.config import settings
 
@@ -14,25 +14,25 @@ logger = logging.getLogger(__name__)
 
 
 class RedisClientManager:
-    """Own one pair of lazy async/sync Redis connection pools."""
+    """持有一组惰性同步与异步 Redis 连接池。"""
 
     def __init__(self, *, url: str, max_connections: int) -> None:
         self._url = url
         self._max_connections = max_connections
-        self._async_pool: aioredis.ConnectionPool | None = None
+        self._async_pool: async_redis.ConnectionPool | None = None
         self._sync_pool: sync_redis.ConnectionPool | None = None
         self._lock = threading.Lock()
 
-    def get_async(self) -> aioredis.Redis:
+    def get_async(self) -> async_redis.Redis:
         if self._async_pool is None:
             with self._lock:
                 if self._async_pool is None:
-                    self._async_pool = aioredis.ConnectionPool.from_url(
+                    self._async_pool = async_redis.ConnectionPool.from_url(
                         self._url,
                         max_connections=self._max_connections,
                         decode_responses=False,
                     )
-        return aioredis.Redis(connection_pool=self._async_pool)
+        return async_redis.Redis(connection_pool=self._async_pool)
 
     def get_sync(self) -> sync_redis.Redis:
         if self._sync_pool is None:
@@ -46,7 +46,7 @@ class RedisClientManager:
         return sync_redis.Redis(connection_pool=self._sync_pool)
 
     async def close(self) -> None:
-        """Disconnect both pools and make the manager reusable."""
+        """断开两个连接池，并允许实例后续重新建立连接。"""
         with self._lock:
             async_pool = self._async_pool
             sync_pool = self._sync_pool
@@ -64,13 +64,13 @@ _default_manager = RedisClientManager(
 )
 
 
-def get_async_redis() -> aioredis.Redis:
-    """Compatibility provider for non-RAG process-level infrastructure."""
+def get_async_redis() -> async_redis.Redis:
+    """为尚未迁入实例容器的调用方提供兼容客户端。"""
     return _default_manager.get_async()
 
 
 def get_sync_redis() -> sync_redis.Redis:
-    """Compatibility provider for non-RAG process-level infrastructure."""
+    """为尚未迁入实例容器的调用方提供兼容客户端。"""
     return _default_manager.get_sync()
 
 
@@ -84,7 +84,7 @@ async def ping_redis() -> bool:
 
 
 async def close_default_redis() -> None:
-    """Close the compatibility manager used outside explicit RAG scopes."""
+    """关闭进程级兼容连接池。"""
     await _default_manager.close()
 
 

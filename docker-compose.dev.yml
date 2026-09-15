@@ -1,13 +1,15 @@
 # Knowledge Service 与 Agent 的本地开发覆盖配置。
 #
 # 与基础 Compose 文件一起使用：
-#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build knowledge-service agent-app
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d knowledge-service agent-app
 #
 # 这些 bind mount 让运行中的容器直接读取宿主机最新源码，不会修改镜像。
 # Python 源码变化无需重建；依赖、Dockerfile 或系统库变化仍需重新构建镜像。
 services:
   knowledge-service:
     # 开发模式监听两个服务端源码目录；config.yaml 变化仍需显式重启。
+    environment:
+      - KNOWLEDGE_SERVICE_EVALUATION_API_ENABLED=true
     command:
       - python
       - -m
@@ -98,6 +100,30 @@ services:
       - type: bind
         source: ./mcp_rag_server.py
         target: /app/mcp_rag_server.py
+        read_only: true
+        bind:
+          create_host_path: false
+
+  eval-runner:
+    # 一次性评测容器也读取宿主机最新源码；Python 改动无需重建镜像。
+    volumes:
+      - type: bind
+        source: ./react_agent
+        target: /app/react_agent
+        read_only: true
+        bind:
+          create_host_path: false
+
+      - type: bind
+        source: ./eval
+        target: /app/eval
+        read_only: true
+        bind:
+          create_host_path: false
+
+      - type: bind
+        source: ./config.yaml
+        target: /app/config.yaml
         read_only: true
         bind:
           create_host_path: false

@@ -6,7 +6,7 @@ from collections.abc import Callable
 from typing import Any
 
 from react_agent.rag.contracts import RagDocument
-from react_agent.utils.timer_logger import timer
+from react_agent.rag.observability import timer
 
 
 logger = logging.getLogger(__name__)

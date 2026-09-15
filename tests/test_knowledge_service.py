@@ -9,6 +9,8 @@ from asgi_lifespan import LifespanManager
 from knowledge_service.app import create_app
 from knowledge_service.settings import KnowledgeServiceSettings
 from react_agent.rag.contracts import (
+    EvaluationCandidate,
+    EvaluationRetrievalResult,
     IngestionReport,
     RagHealthStatus,
     RetrievedChunk,
@@ -76,6 +78,46 @@ class FakeRetrievalService:
         )
 
 
+class FakeEvaluationRetrievalService:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def search(self, query: str, **kwargs) -> EvaluationRetrievalResult:
+        self.calls.append({"query": query, **kwargs})
+        candidate = EvaluationCandidate(
+            rank=1,
+            chunk_id="chunk-8",
+            source_file="report.pdf",
+            source_page=8,
+            content_chars=4,
+            doc_type="text",
+            industry="半导体",
+        )
+        return EvaluationRetrievalResult(
+            query=query,
+            retrieval_mode=str(kwargs.get("retrieval_mode") or "hybrid"),
+            chunks=(
+                RetrievedChunk(
+                    content="证据正文",
+                    source_file="report.pdf",
+                    source_page=8,
+                    chunk_id="chunk-8",
+                ),
+            ),
+            stages={
+                "bm25": (candidate,),
+                "vector": (),
+                "fusion": (candidate,),
+                "filtered": (candidate,),
+                "reranker_input": (candidate,),
+                "reranked": (candidate,),
+                "final": (candidate,),
+            },
+            timings={"bm25": 0.01, "reranker": 0.02, "evaluation_total": 0.03},
+            configuration={"query_cache_enabled": False, "device": "cpu"},
+        )
+
+
 class FakeAdminService:
     def __init__(self) -> None:
         self.invalidated: list[str] = []
@@ -128,12 +170,18 @@ class FakeRuntime:
     def __init__(self) -> None:
         self.operations = FakeOperations()
         self.retrieval = FakeRetrievalService()
+        self.evaluation_retrieval = FakeEvaluationRetrievalService()
         self.admin = FakeAdminService()
         self.ingestion = FakeIngestionService()
         self.closed = False
 
     def get_retrieval_service(self) -> FakeRetrievalService:
         return self.retrieval
+
+    def get_evaluation_retrieval_service(
+        self,
+    ) -> FakeEvaluationRetrievalService:
+        return self.evaluation_retrieval
 
     def get_admin_service(self) -> FakeAdminService:
         return self.admin
@@ -153,6 +201,7 @@ def service(tmp_path: Path):
         service_settings=KnowledgeServiceSettings(
             api_key="test-secret",
             ingestion_root=tmp_path,
+            evaluation_api_enabled=True,
         ),
     )
     return app, runtime, tmp_path
@@ -190,6 +239,78 @@ async def test_search_requires_key_and_preserves_traceability(service) -> None:
     }
     assert runtime.retrieval.calls[0]["retrieval_mode"] == "hybrid"
     assert runtime.closed is True
+
+
+@pytest.mark.asyncio
+async def test_evaluation_trace_uses_dedicated_authenticated_endpoint(service) -> None:
+    app, runtime, _ = service
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://knowledge.test",
+        ) as client:
+            unauthorized = await client.post(
+                "/api/v1/evaluation/retrieval/trace",
+                json={"query": "台积电资本开支"},
+            )
+            response = await client.post(
+                "/api/v1/evaluation/retrieval/trace",
+                headers={"X-Knowledge-Service-Key": "test-secret"},
+                json={
+                    "query": "台积电资本开支",
+                    "top_k": 3,
+                    "retrieval_mode": "hybrid",
+                },
+            )
+
+    assert unauthorized.status_code == 401
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["chunks"][0]["content"] == "证据正文"
+    assert payload["trace"]["stages"]["bm25"][0] == {
+        "rank": 1,
+        "chunk_id": "chunk-8",
+        "source_file": "report.pdf",
+        "source_page": 8,
+        "content_chars": 4,
+        "doc_type": "text",
+        "industry": "半导体",
+    }
+    assert "content" not in payload["trace"]["stages"]["bm25"][0]
+    assert payload["trace"]["configuration"]["query_cache_enabled"] is False
+    assert runtime.evaluation_retrieval.calls[0]["retrieval_mode"] == "hybrid"
+    assert runtime.retrieval.calls == []
+
+
+@pytest.mark.asyncio
+async def test_evaluation_trace_is_disabled_outside_enabled_profiles(
+    tmp_path: Path,
+) -> None:
+    runtime = FakeRuntime()
+    app = create_app(
+        runtime_factory=lambda: runtime,
+        service_settings=KnowledgeServiceSettings(
+            api_key="test-secret",
+            ingestion_root=tmp_path,
+            evaluation_api_enabled=False,
+        ),
+    )
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://knowledge.test",
+        ) as client:
+            response = await client.post(
+                "/api/v1/evaluation/retrieval/trace",
+                headers={"X-Knowledge-Service-Key": "test-secret"},
+                json={"query": "只有评测才能调用"},
+            )
+
+    assert response.status_code == 404
+    assert runtime.evaluation_retrieval.calls == []
+    assert runtime.retrieval.calls == []
 
 
 @pytest.mark.asyncio
@@ -238,12 +359,19 @@ async def test_remote_runtime_uses_http_service_without_local_chroma(service) ->
             use_query_cache=False,
             retrieval_mode="bm25",
         )
+        traced = await remote.get_evaluation_retrieval_service().search(
+            "评测查询",
+            top_k=3,
+            retrieval_mode="hybrid",
+        )
         health = await remote.get_admin_service().health()
         chunks = await remote.get_admin_service().read_chunks(limit=1)
         report = await remote.get_ingestion_service().ingest("allowed")
         await remote.close()
 
     assert result.chunks[0].chunk_id == "chunk-8"
+    assert traced.stages["bm25"][0].chunk_id == "chunk-8"
+    assert traced.configuration["query_cache_enabled"] is False
     assert result.chunks[0].source_page == 8
     assert health.ready is True
     assert chunks[0].metadata.source_page == 8
@@ -286,6 +414,7 @@ async def test_chunk_store_migrates_legacy_corpus_only_once(tmp_path: Path) -> N
 
 @pytest.mark.asyncio
 async def test_configured_runtime_selects_remote_client(monkeypatch) -> None:
+    monkeypatch.setenv("RAG_RUNTIME_MODE", "remote")
     monkeypatch.setenv("KNOWLEDGE_SERVICE_URL", "http://knowledge.test")
     monkeypatch.setenv("KNOWLEDGE_SERVICE_API_KEY", "test-secret")
 
@@ -293,4 +422,30 @@ async def test_configured_runtime_selects_remote_client(monkeypatch) -> None:
 
     assert isinstance(runtime, RemoteRagRuntime)
     assert not hasattr(runtime, "_embedding_provider")
+    await runtime.close()
+
+
+def test_configured_remote_runtime_requires_service_url(monkeypatch) -> None:
+    monkeypatch.delenv("RAG_RUNTIME_MODE", raising=False)
+    monkeypatch.delenv("KNOWLEDGE_SERVICE_URL", raising=False)
+
+    with pytest.raises(RuntimeError, match="必须配置 KNOWLEDGE_SERVICE_URL"):
+        create_configured_rag_runtime()
+
+
+def test_configured_runtime_rejects_unknown_mode(monkeypatch) -> None:
+    monkeypatch.setenv("RAG_RUNTIME_MODE", "automatic")
+
+    with pytest.raises(ValueError, match="仅支持 remote 或 local"):
+        create_configured_rag_runtime()
+
+
+@pytest.mark.asyncio
+async def test_configured_local_runtime_requires_explicit_mode(monkeypatch) -> None:
+    monkeypatch.setenv("RAG_RUNTIME_MODE", "local")
+    monkeypatch.delenv("KNOWLEDGE_SERVICE_URL", raising=False)
+
+    runtime = create_configured_rag_runtime()
+
+    assert not isinstance(runtime, RemoteRagRuntime)
     await runtime.close()

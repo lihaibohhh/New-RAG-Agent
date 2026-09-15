@@ -10,6 +10,8 @@ import httpx
 
 from react_agent.rag.contracts import (
     ChunkMetadata,
+    EvaluationCandidate,
+    EvaluationRetrievalResult,
     IngestionReport,
     RagHealthStatus,
     RagValidationError,
@@ -153,6 +155,72 @@ class KnowledgeServiceClient:
                 str(key): float(value)
                 for key, value in dict(payload.get("timings") or {}).items()
             },
+        )
+
+    async def evaluation_search(
+        self,
+        query: str,
+        *,
+        top_k: int = 3,
+        filters: dict[str, Any] | None = None,
+        retrieval_mode: str = "hybrid",
+        use_query_cache: bool = False,
+    ) -> EvaluationRetrievalResult:
+        """调用 Knowledge Service 专用评测管道。"""
+        if use_query_cache:
+            raise RagValidationError("评测检索管道不允许使用语义查询缓存")
+        payload = await self._request(
+            "POST",
+            "/api/v1/evaluation/retrieval/trace",
+            json={
+                "query": query,
+                "top_k": top_k,
+                "filters": filters,
+                "retrieval_mode": retrieval_mode,
+            },
+        )
+        chunks = tuple(
+            RetrievedChunk(
+                content=str(item.get("content") or ""),
+                source_file=str(item.get("source_file") or ""),
+                source_page=item.get("source_page"),
+                chunk_id=str(item.get("chunk_id") or ""),
+                score=item.get("score"),
+                doc_type=item.get("doc_type"),
+                industry=item.get("industry"),
+            )
+            for item in payload.get("chunks") or []
+        )
+        trace = dict(payload.get("trace") or {})
+        raw_stages = dict(trace.get("stages") or {})
+        stages = {
+            str(name): tuple(
+                EvaluationCandidate(
+                    rank=int(item.get("rank") or 0),
+                    chunk_id=str(item.get("chunk_id") or ""),
+                    source_file=str(item.get("source_file") or ""),
+                    source_page=item.get("source_page"),
+                    content_chars=int(item.get("content_chars") or 0),
+                    doc_type=item.get("doc_type"),
+                    industry=item.get("industry"),
+                )
+                for item in items or []
+            )
+            for name, items in raw_stages.items()
+        }
+        return EvaluationRetrievalResult(
+            query=str(payload.get("query") or query),
+            retrieval_mode=str(payload.get("retrieval_mode") or retrieval_mode),
+            chunks=chunks,
+            stages=stages,
+            timings={
+                str(key): float(value)
+                for key, value in dict(trace.get("timings") or {}).items()
+            },
+            configuration=dict(trace.get("configuration") or {}),
+            degraded_sources=tuple(
+                str(value) for value in trace.get("degraded_sources") or []
+            ),
         )
 
     async def request_warmup(
@@ -447,6 +515,16 @@ class RemoteIngestionService:
         return self._client.ingest_sync(relative_path)
 
 
+class RemoteEvaluationRetrievalService:
+    """远程评测检索用例，与普通查询客户端分开暴露。"""
+
+    def __init__(self, client: KnowledgeServiceClient) -> None:
+        self._client = client
+
+    async def search(self, query: str, **kwargs: Any) -> EvaluationRetrievalResult:
+        return await self._client.evaluation_search(query, **kwargs)
+
+
 class RemoteRagRuntime:
     """与本地 RagRuntime 同形，但不打开 Chroma、Redis 或模型。"""
 
@@ -467,9 +545,15 @@ class RemoteRagRuntime:
         self.operations = RemoteRagOperations(self._client)
         self._admin = RemoteRagAdminService(self._client)
         self._ingestion = RemoteIngestionService(self._client)
+        self._evaluation = RemoteEvaluationRetrievalService(self._client)
 
     def get_retrieval_service(self) -> KnowledgeServiceClient:
         return self._client
+
+    def get_evaluation_retrieval_service(
+        self,
+    ) -> RemoteEvaluationRetrievalService:
+        return self._evaluation
 
     def get_admin_service(self) -> RemoteRagAdminService:
         return self._admin
@@ -485,6 +569,7 @@ class RemoteRagRuntime:
 __all__ = [
     "KnowledgeServiceClient",
     "RemoteIngestionService",
+    "RemoteEvaluationRetrievalService",
     "RemoteRagAdminService",
     "RemoteRagOperations",
     "RemoteRagRuntime",

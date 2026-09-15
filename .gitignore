@@ -51,3 +51,5 @@ ingestion_metrics.jsonl
 隔离区文档/
 nodes脚本经验总结.md
 旧README(src根目录).md
+
+*.egg-info/
