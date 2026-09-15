@@ -17,6 +17,8 @@ def audit_records(records: list[dict[str, Any]]) -> dict[str, Any]:
     chunk_labelled = 0
     source_fallback = 0
     no_answer = 0
+    evidence_validated = 0
+    review_statuses: Counter[str] = Counter()
 
     for record in records:
         question = str(record.get("question") or "").strip()
@@ -25,6 +27,30 @@ def audit_records(records: list[dict[str, Any]]) -> dict[str, Any]:
         ).strip()
         case_id = str(record.get("case_id") or "").strip()
         answerable = record.get("answerable") is not False
+        try:
+            schema_version = int(record.get("schema_version") or 0)
+        except (TypeError, ValueError):
+            schema_version = 0
+        if schema_version >= 3:
+            review_status = str(record.get("review_status") or "missing").strip()
+            review_statuses[review_status] += 1
+            if review_status != "approved":
+                issues[f"review_status_{review_status}"] += 1
+            validation = record.get("evidence_validation")
+            validation_status = (
+                str(validation.get("status") or "")
+                if isinstance(validation, dict)
+                else ""
+            )
+            if answerable:
+                if validation_status == "passed":
+                    evidence_validated += 1
+                else:
+                    issues["evidence_validation_not_passed"] += 1
+                if not record.get("gold_evidence"):
+                    issues["missing_gold_evidence"] += 1
+            elif validation_status != "needs_review":
+                issues["no_answer_validation_state_invalid"] += 1
 
         if not question:
             issues["missing_question"] += 1
@@ -57,6 +83,8 @@ def audit_records(records: list[dict[str, Any]]) -> dict[str, Any]:
         "chunk_id_labelled": chunk_labelled,
         "source_page_fallback": source_fallback,
         "no_answer_records": no_answer,
+        "evidence_validated": evidence_validated,
+        "review_statuses": dict(sorted(review_statuses.items())),
         "issues": dict(sorted(issues.items())),
     }
 
@@ -84,12 +112,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="审计 RAG JSONL 评测数据集")
     parser.add_argument(
         "--dataset",
-        default=str(Path(__file__).resolve().parent / "dataset" / "eval_dataset.jsonl"),
+        default=str(
+            Path(__file__).resolve().parent
+            / "dataset"
+            / "eval_dataset_docling_v1.jsonl"
+        ),
     )
     parser.add_argument(
         "--strict",
         action="store_true",
-        help="存在无 chunk_id、缺失字段或重复项时返回非零退出码",
+        help="存在兼容页码标签、缺失字段或重复项时返回非零退出码",
     )
     args = parser.parse_args()
 

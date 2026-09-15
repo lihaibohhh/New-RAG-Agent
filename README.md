@@ -110,6 +110,10 @@ flowchart LR
 | 文件 | 职责 |
 |---|---|
 | `react_agent/agent/` | Agent 图、节点、路由、状态、提示词与 `AgentService` 对话用例 |
+| `react_agent/tooling/` | Agent 与工具适配器共享的 ToolResult 信封和重试执行契约 |
+| `react_agent/models/` | LLM Provider 解析、创建与缓存 |
+| `react_agent/infrastructure/` | Redis 等跨用例共享的技术资源适配器 |
+| `react_agent/observability/` | 应用会话用量记录与展示模型 |
 | `react_agent/conversations/contracts.py` | 会话删除结果与持久化错误契约 |
 | `react_agent/conversations/ports.py` | `ConversationRepositoryPort` 出站端口 |
 | `react_agent/conversations/service.py` | 历史读取与会话删除用例 |
@@ -164,11 +168,22 @@ Adapter 都在注册时接收 `RetrievalService` 提供者，只负责协议转�
 
 `knowledge_service/` 是唯一允许直接打开 `CHROMA_DB_PATH` 的进程边界，提供
 检索、预热、真实健康检查、缓存失效、分页 Chunk 读取和受限目录建库 API。
-Agent、MCP、Windows CLI 和评测任务配置 `KNOWLEDGE_SERVICE_URL` 后使用
-`RemoteRagRuntime`，不再加载 embedding/reranker，也不直接读取 HNSW 文件。
-未配置 URL 时仍保留本地 `RagRuntime`，只用于 Knowledge Service 本身和显式
-离线维护。服务端固定单 Worker，避免嵌入式 Chroma 与进程内 BM25 出现多写者或
-多份失效状态。
+Agent、MCP、Windows CLI 和评测任务使用 `RAG_RUNTIME_MODE=remote` 并配置
+`KNOWLEDGE_SERVICE_URL`，通过 `RemoteRagRuntime` 访问服务，不加载
+embedding/reranker，也不直接读取 HNSW 文件。远程模式缺少 URL 时启动会立即失败，
+不会静默回退为本地 Chroma 所有者。`RAG_RUNTIME_MODE=local` 只用于 Knowledge
+Service 本身和显式离线维护。服务端固定单 Worker，避免嵌入式 Chroma 与进程内
+BM25 出现多写者或多份失效状态。
+
+评测任务使用独立的 `POST /api/v1/evaluation/retrieval/trace` 管道，
+不修改普通 `POST /api/v1/retrieval/search` 的请求、返回值或缓存语义。
+专用管道强制绕过查询缓存，除了最终 chunk 外，返回
+`bm25`/`vector`/`fusion`/`filtered`/`reranker_input`/`reranked`/`final`
+各阶段的排名、chunk ID、溯源元数据与耗时。阶段快照不包含正文，
+既能计算召回互补、融合增益和 reranker 损益，又避免报告重复携带大段私有语料。
+该接口仍要求 Knowledge Service API Key，并受
+`KNOWLEDGE_SERVICE_EVALUATION_API_ENABLED` 开关控制：基础 Compose 默认关闭，
+`docker-compose.dev.yml` 仅在开发环境开启。
 
 逻辑 Chunk 同时写入独立 SQLite Chunk Store。旧库首次预热时会从 Chroma
 一次性生成事务型快照；快照完成后，BM25 全量重建和评测分页读取都以 Chunk Store
@@ -207,7 +222,7 @@ FastAPI 与 Streamlit 并存，共享同一套 Agent 实例与持久化存储。
 
 | 能力 | 说明 |
 |---|---|
-| 版本化 API | `/api/v1/*` 为新接口，旧 `/chat/*` 作为 legacy 保留 |
+| 版本化 API | 对话与会话接口统一位于 `/api/v1/*` |
 | token 级流式 | `/api/v1/chat/stream` 基于 `astream_events(version="v2")` 输出 token / tool_call / tool_result / done / error |
 | 断连取消 | 客户端断开后取消并 await upstream task，避免 LLM 继续消耗 |
 | 统一错误 | RFC 7807 风格 problem+json，错误体与响应头均包含 request_id |
@@ -257,9 +272,10 @@ query: 根据内部数据库，2026 年 1 月，国内领先的芯片设计企�
 ```
 
 MCP 启动入口遵循“薄启动”原则：启动阶段不预热 embedding、reranker、Chroma、Redis 等重资源，避免 stdio 握手阶段阻塞。普通业务查询只需调用 `query_financial_reports`；首次查询会自动触发 retriever / reranker 单例预热并进行有限等待。诊断或显式预热场景可设置 `MCP_EXPOSE_ADMIN_TOOLS=1`，再调用 `start_rag_singleton_warmup` / `get_rag_singleton_warmup_status`。
-MCP 启动时根据 `KNOWLEDGE_SERVICE_URL` 创建远程或本地 Runtime；推荐始终配置
-远程地址，使 MCP 只作为客户端。注册函数只接收显式的 Query、Admin 和 Operations
-提供者；关闭 stdio Server 后由入口释放客户端连接，不依赖模块级 RAG 服务单例。
+MCP 启动时根据 `RAG_RUNTIME_MODE` 创建 Runtime；默认 `remote`，此时必须配置
+`KNOWLEDGE_SERVICE_URL`，不会隐式打开本地 Chroma。注册函数只接收显式的 Query、
+Admin 和 Operations 提供者；关闭 stdio Server 后由入口释放客户端连接，不依赖
+模块级 RAG 服务单例。
 
 ---
 
@@ -367,7 +383,11 @@ Service；Agent 只挂载专用的 `data/agent-state` 会话目录，并通过
 mount，但必须停止 Windows 本地 Chroma 进程和旧 Agent 容器，避免同时打开同一
 目录。后续完成备份恢复演练后可把该挂载替换为 Docker named volume。
 混合检索使用 `rank-bm25`，首次生成 Chunk Store 后，Redis 缓存失效会从独立
-SQLite 语料快照重建 BM25。
+SQLite 语料快照重建 BM25。BM25 建库和查询统一使用 Jieba 搜索模式，
+同时执行 NFKC/大小写规范化、金融科技词典和英文数字型号保护。
+分词策略指纹会随 Redis 索引一起保存；旧分词或词典变化后的缓存会被自动拒绝并
+从 Chunk Store 重建。查询最高 BM25 分数不大于 0 时返回空候选，不再把固定语料顺序
+误当作相关结果。
 
 ```powershell
 docker compose config
@@ -385,8 +405,9 @@ curl.exe http://127.0.0.1:8001/api/v1/health/ready
 
 `live` 只说明 HTTP 进程存活；`ready` 会真实打开 Chroma 并统计 Chunk，因此能发现
 HNSW 加载失败。首次启动会在后台预热，并从现有 Chroma 生成
-`data/knowledge/chunks.sqlite3`；25,911 Chunk 的历史实测表明，首次全库读取约
-28 秒、Chunk/BM25 内存构建约 4–5 秒，模型已缓存时 embedding/reranker 约 26 秒。
+`data/knowledge/chunks.sqlite3`。引入中文分词后，28,771 Chunk 的本地独立实测为：
+Chunk Store 读取约 1.8 秒、BM25 全量构建约 56.5 秒；旧的空格分词 4–5 秒数据
+不再具有参考性。Smoke 集纯 BM25 Top-10 的平均查询耗时约 425ms。
 这些阶段部分并行，实际总时长以 `/api/v1/runtime/warmup` 返回的 timings 为准。
 Knowledge Service 默认设置 `HF_HUB_OFFLINE=true` 和
 `TRANSFORMERS_OFFLINE=true`，只使用挂载的模型缓存，避免服务重启时因 Hugging
@@ -486,14 +507,17 @@ pytest tests/api -q
 ### 8.2 RAG 检索与 RAGAS 评测
 
 ```bash
-# 先审计 gold 标签；旧数据集只有来源页标签时会明确报告 fallback
-conda run -n new_agent python -m eval.audit_dataset
+# 从当前知识库分层采样并生成 full/smoke/regression 候选集。
+# 此步骤会将抽样 chunk 发送给配置的外部 LLM，并产生模型费用。
+conda run -n new_agent python -m eval.dataset_generator \
+  --output eval/results/eval_dataset_docling_v1.candidate.jsonl \
+  --max_chunks 150 --n_per_chunk 1 \
+  --multi_chunk_ratio 0.25 --no_answer_count 20
 
-# 将旧数据集按 source/page/chunk_text 保守匹配到当前 chunk_id。
-# 配置 KNOWLEDGE_SERVICE_URL 后，auto 默认只通过服务 API 读取语料；
-# --sqlite-only 仅用于离线迁移或服务不可用时的兼容处理。
-conda run -n new_agent python -m eval.enrich_dataset --source api
-conda run -n new_agent python -m eval.audit_dataset --dataset eval/dataset/eval_dataset_v2.jsonl --strict
+# 审核候选集：核对问题、答案、引文；通过项改为 review_status=approved。
+# 将定稿 full 集复制到 eval/dataset 后再严格审计。
+conda run -n new_agent python -m eval.audit_dataset \
+  --dataset eval/dataset/eval_dataset_docling_v1.jsonl --strict
 
 # 日常检索回归：Hit@K、Precision@K、Recall@K、MRR、nDCG@K，
 # 不调用 LLM，并默认绕过语义查询缓存
@@ -506,7 +530,7 @@ conda run -n new_agent python -m eval.run_eval --deterministic_only --retrieval_
 # 仅检索 RAGAS：调用裁判 LLM 计算 Context Precision/Recall
 conda run -n new_agent python -m eval.run_eval --retrieval_only --n 150
 
-# 端到端：生成答案并计算 Context Precision/Recall/Faithfulness
+# 端到端：生成答案；正样本计算 RAGAS，全部样本执行回答/拒答裁判
 conda run -n new_agent python -m eval.run_eval --n 150
 ```
 
@@ -515,46 +539,60 @@ conda run -n new_agent python -m eval.run_eval --n 150
 只读挂载，报告写入宿主机 `eval/results/`：
 
 ```powershell
-# 首次构建；完整 RAGAS 依赖只安装到 eval-runner 镜像阶段
-docker compose --profile eval build eval-runner
+# 开发阶段合并 dev 配置，eval-runner 直接只读挂载最新源码，无需重建镜像
+$compose = @('-f', 'docker-compose.yml', '-f', 'docker-compose.dev.yml')
 
-# 通过 API 将旧数据集迁移为 v2；输出到 eval/results/eval_dataset_v2.jsonl
-docker compose --profile eval run --rm eval-runner `
-  python -m eval.enrich_dataset --source api `
-  --dataset /app/eval/dataset/eval_dataset.jsonl `
-  --output /app/eval-results/eval_dataset_v2.jsonl
+# 从 Knowledge Service API 读取当前 chunks，生成候选 QA 数据集。
+# 同时导出 full、smoke、regression 和 manifest；无答案项必须人工确认。
+docker compose @compose --profile eval run --rm eval-runner `
+  python -m eval.dataset_generator `
+  --output /app/eval-results/eval_dataset_docling_v1.candidate.jsonl `
+  --max_chunks 150 --n_per_chunk 1 `
+  --multi_chunk_ratio 0.25 --no_answer_count 20
 
-# 审计迁移结果
-docker compose --profile eval run --rm eval-runner `
+# 审核后将定稿文件放入宿主机 eval/dataset/，再严格审计
+docker compose @compose --profile eval run --rm eval-runner `
   python -m eval.audit_dataset `
-  --dataset /app/eval-results/eval_dataset_v2.jsonl --strict
+  --dataset /app/eval/dataset/eval_dataset_docling_v1.jsonl --strict
 
 # 无 LLM、禁用查询缓存的正式混合检索基线
-docker compose --profile eval run --rm eval-runner `
+docker compose @compose --profile eval run --rm eval-runner `
   python -m eval.run_eval `
-  --dataset /app/eval-results/eval_dataset_v2.jsonl `
+  --dataset /app/eval/dataset/eval_dataset_docling_v1.jsonl `
   --deterministic_only --retrieval_mode hybrid --n 150
 ```
+
+`eval.run_eval` 在未传 `--allow_query_cache` 时默认调用上述专用管道，
+并把阶段追踪写入明细 CSV。只有显式允许查询缓存时才回退到普通检索端点，
+此时不生成阶段追踪，不应用于 BM25/Vector/Hybrid 的正式 A/B。
 
 将最后一条命令的 `retrieval_mode` 分别改成 `bm25`、`vector` 即可完成
 三路消融评测。`run_eval` 默认读取 `EVAL_RESULTS_DIR`，也可通过
 `--output-dir` 指定其他可写目录。只有去掉 `--deterministic_only` 时才会加载
-生成和 RAGAS 裁判模型并可能产生外部模型费用。
+生成和 RAGAS 裁判模型并可能产生外部模型费用。端到端模式默认增加结构化
+回答行为裁判；临时排障时可用 `--skip_answerability_judge` 跳过，但正式评测
+不建议关闭。
 
 新生成的数据集包含 `case_id`、`gold_chunk_ids`、`gold_sources`、
-`answerable` 和 `category`。旧版数据集仍可使用 `source_file + page`
-计算兼容指标，但正式 A/B 前应补齐 `gold_chunk_ids`。只有在明确需要且
-真实模型配置齐备时才运行 RAGAS 模式。
+`gold_evidence`、`evidence_validation`、`review_status`、`answerable` 和
+`category`。可回答项会先通过引文、答案数字和多 chunk 覆盖的确定性校验；
+无答案项仍需执行全库检索筛查并人工确认。评测器仍支持 `source_file + page` 的页码级标签，
+但正式 A/B 应优先使用 `gold_chunk_ids`。解析器更换前的历史报告仅作归档，
+不能作为当前 Docling 知识库的基线。只有在明确需要且真实模型配置齐备时
+才运行 RAGAS 模式。
 
-历史已验证指标：
+无答案样本不参与 Recall/MRR/nDCG 或 RAGAS 的正样本均值。检索层单独报告
+`retrieval_abstention_rate`（精排后是否返回空上下文）；端到端回答层报告：
 
-| 指标 | 结果 |
-|---|---:|
-| Context Precision | 0.7517 |
-| Context Recall | 0.7850 |
-| Faithfulness | 0.9011 |
-| 样本规模 | 150 |
-| 行业分组 | 6 |
+- `abstention_accuracy`：无答案问题中正确拒答的比例；
+- `hallucination_rate`：无答案问题中给出无依据答案的比例；
+- `false_refusal_rate`：可回答问题中错误拒答的比例；
+- `negative_label_conflict_rate`：裁判发现检索上下文实际足以回答，提示负样本标签可能错误；
+- `answerability_accuracy`：可回答/不可回答两组的综合行为准确率。
+- `answerability_judge_coverage`：成功完成行为判定的样本占比；批次裁判遗漏的样本会自动单条重试一次。
+
+检索延迟汇总优先使用专用评测管道的 `evaluation_total`，因此 P50/P95
+包含召回、融合和 Reranker；普通检索端点没有该字段时回退到 `total`。
 
 ### 8.3 向量库建库性能
 
@@ -671,7 +709,6 @@ react-agent-main/
     │   ├── ratelimit.py             # Redis 限流与 token 预算
     │   ├── metrics.py               # Prometheus 指标
     │   └── routes/
-    │       ├── chat.py              # legacy chat 路由
     │       └── v1/
     │           ├── chat.py          # v1 token 级 SSE / invoke
     │           └── sessions.py      # 会话历史与删除
@@ -697,6 +734,10 @@ react-agent-main/
     │   │       ├── offline.py       # 显式知识库路径的离线管理服务工厂
     │   │       └── testing.py       # 服务容器与预热状态的测试重置入口
     │   ├── tools/                   # RAG / Search / Excel / Word / Markdown / SQL
+    │   ├── tooling/                 # ToolResult 公共契约与工具重试策略
+    │   ├── models/                  # LLM Provider 工厂
+    │   ├── infrastructure/          # Redis 等共享技术适配器
+    │   ├── observability/           # 应用会话用量与日志
     │   ├── mcp_server/              # MCP 工具注册与 stdio Server 模块
     │   │   ├── app.py               # 创建 MCP Server；默认注册 info/rag，admin 模式注册 health/warmup
     │   │   ├── info_tools.py        # server_info：当前可用工具与能力边界
@@ -704,7 +745,6 @@ react-agent-main/
     │   │   ├── warmup_tools.py      # RAG 单例预热启动 / 状态查询，可选 admin 工具
     │   │   ├── rag_tools.py         # query_financial_reports
     │   │   └── responses.py         # mcp_ok / mcp_err 返回结构
-    │   └── utils/                   # LLM、Redis、token、tool helpers
     ├── eval/                        # RAGAS 评测脚本与数据生成
     ├── scripts/                     # PDF 检查、财务抽取、Redis 检查、历史管理
     ├── tests/                       # Streamlit 入口与 API 回归测试

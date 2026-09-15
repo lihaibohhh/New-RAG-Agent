@@ -17,16 +17,15 @@ from react_agent.conversations.infrastructure.langgraph_repository import (
 from react_agent.conversations.service import ConversationService
 from react_agent.core.config import settings
 from react_agent.rag.runtime import (
-    RagRuntimePort,
     create_configured_rag_runtime,
-    get_rag_runtime_profile,
 )
+from react_agent.rag.runtime_ports import AgentRagRuntimePort
 from react_agent.tools.excel import create_excel_tool
 from react_agent.tools.make_docx import create_docx_tool
 from react_agent.tools.markdown import create_markdown_tool
 from react_agent.tools.rag import create_rag_tool
 from react_agent.tools.search import create_search_tool
-from react_agent.utils.llm import load_chat_model
+from react_agent.models import load_chat_model
 
 
 @dataclass(frozen=True)
@@ -38,7 +37,7 @@ class ApplicationServices:
     conversation_persistence: ConversationPersistenceConfig
     effective_checkpoint_backend: str
     _checkpointer_factory: CheckpointerFactory = field(repr=False, compare=False)
-    _rag_runtime: RagRuntimePort = field(repr=False, compare=False)
+    _rag_runtime: AgentRagRuntimePort = field(repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -74,14 +73,13 @@ async def create_application_services(
 
 def _compose_agent_dependencies(
     agent_context: AgentContext,
-    rag_runtime: RagRuntimePort,
+    rag_runtime: AgentRagRuntimePort,
 ) -> AgentDependencies:
     """Select the model adapter and the exact tool set injected into Agent."""
-    rag_profile = get_rag_runtime_profile()
     rag_tool = create_rag_tool(
         retrieval_service_provider=rag_runtime.get_retrieval_service,
         max_retries=settings.tools.rag.max_retries,
-        timeout=rag_profile.timeout,
+        timeout=settings.tools.rag.client_timeout,
     )
     search_tool = create_search_tool(
         client_provider=_create_tavily_client,
@@ -106,7 +104,7 @@ def _compose_agent_dependencies(
         markdown_tool,
     )
     return AgentDependencies(
-        context=agent_context,
+        config=agent_context,
         model_provider=partial(load_chat_model, agent_context.model),
         tools=tools,
     )

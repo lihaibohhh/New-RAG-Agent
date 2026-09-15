@@ -8,7 +8,11 @@
 
 主要目录与入口：
 
-- `react_agent/agent/`：Agent 状态、节点、路由、图编译、执行上下文与对话用例。
+- `react_agent/agent/`：Agent 状态、节点、路由、工具策略、用量计算、图编译、执行上下文与对话用例。
+- `react_agent/tooling/`：Agent 与工具适配器共享的 ToolResult 信封和重试执行契约。
+- `react_agent/models/`：LLM Provider 解析、创建与缓存；由 Runtime、评测和显式脚本消费。
+- `react_agent/infrastructure/`：Redis 等跨用例共享的技术资源适配器，不得反向依赖 Agent。
+- `react_agent/observability/`：应用会话用量记录与展示；RAG 专属计时归 `react_agent/rag/observability.py`。
 - `react_agent/conversations/`：会话契约、管理用例、Repository Port 与 Checkpointer 基础设施。
 - `react_agent/runtime/`：选择并注入 LLM、Agent Tools、Conversation 与共享 Checkpointer，管理应用实例生命周期。
 - `react_agent/core/`：当前仍在使用的全局配置；Agent 编排代码不得放回此目录。

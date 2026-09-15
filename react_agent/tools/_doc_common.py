@@ -8,7 +8,7 @@
 
 职责边界：
   - 只放「文档生成工具专属」的输入标准化与容错逻辑
-  - 不放 _ok / _err / with_retry 这类全工具通用基础设施（那些在 utils/tool_helpers.py）
+  - 不放工具结果信封或重试基础设施（这些由 tooling 包管理）
 
 包含三个工具函数：
   - normalize_sections : 将 LLM 传入的多形态 sections 参数统一为 list[dict]

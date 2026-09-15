@@ -87,7 +87,7 @@ class AgentContext:
     Agent 上下文（可配置参数集合）
 
     设计理念：
-    - “可变参数”全部集中在这里；graph/tools/state 通过 runtime.context 读取
+    - “可变参数”全部集中在这里；图节点通过 runtime.context.config 读取
     - 默认值面向中文用户使用场景
     - 允许用环境变量覆盖（字段名大写），例如：
       - MODEL="openai/gpt-4o-mini"

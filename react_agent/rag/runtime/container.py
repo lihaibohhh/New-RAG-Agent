@@ -15,7 +15,7 @@ from react_agent.rag.operations import RagWarmupManager
 from react_agent.rag.infrastructure.models import EmbeddingProviderAdapter
 from react_agent.rag.ports import HybridRetrieverPort, RagCacheInvalidatorPort
 from react_agent.rag.query import RetrievalService
-from react_agent.utils.redis_client import RedisClientManager
+from react_agent.infrastructure.redis import RedisClientManager
 
 
 logger = logging.getLogger(__name__)
@@ -28,6 +28,7 @@ class RagRuntime:
         from react_agent.core.config import settings
 
         self._retrieval_service: RetrievalService | None = None
+        self._evaluation_retrieval_service = None
         self._ingestion_service: IngestionService | None = None
         self._admin_service: RagAdminService | None = None
         self._document_parsing_service: DocumentParsingService | None = None
@@ -115,6 +116,33 @@ class RagRuntime:
                     retriever_provider=self._current_hybrid_retriever,
                 )
         return self._retrieval_service
+
+    def get_evaluation_retrieval_service(self):
+        """返回只供 eval-runner 使用的无缓存分阶段检索用例。"""
+        if self._evaluation_retrieval_service is not None:
+            return self._evaluation_retrieval_service
+
+        self.get_retrieval_service()
+        with self._lock:
+            if self._evaluation_retrieval_service is None:
+                from react_agent.core.config import settings
+                from react_agent.rag.evaluation import EvaluationRetrievalService
+                from react_agent.rag.runtime.device import get_rag_runtime_profile
+
+                if self._hybrid_retriever is None or self._reranker is None:
+                    raise RuntimeError("评测检索依赖尚未完成组装")
+                profile = get_rag_runtime_profile()
+                self._evaluation_retrieval_service = EvaluationRetrievalService(
+                    retriever=self._hybrid_retriever,
+                    reranker=self._reranker,
+                    max_content_chars=settings.tools.rag.max_content_chars,
+                    rerank_candidates=profile.rerank_candidates,
+                    production_rerank_top_n=profile.rerank_top_n,
+                    device=profile.device,
+                    source_top_k=10,
+                    rrf_rank_constant=60,
+                )
+        return self._evaluation_retrieval_service
 
     def get_ingestion_service(self) -> IngestionService:
         if self._ingestion_service is not None:
@@ -383,6 +411,7 @@ class RagRuntime:
             except Exception:
                 logger.exception("[RAG] 关闭资源失败 resource=%s", name)
         self._retrieval_service = None
+        self._evaluation_retrieval_service = None
         self._ingestion_service = None
         self._admin_service = None
         self._document_parsing_service = None

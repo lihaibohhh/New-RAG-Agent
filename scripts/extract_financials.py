@@ -6,7 +6,7 @@ import pathlib
 import time
 
 from itertools import groupby
-from react_agent.utils.llm import load_chat_model
+from react_agent.models import load_chat_model
 from react_agent.core.config import settings
 
 

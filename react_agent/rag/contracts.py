@@ -402,6 +402,45 @@ class RetrievalResult:
 
 
 @dataclass(frozen=True)
+class CandidateRetrievalTrace:
+    """BM25/向量候选与融合结果，仅供评测管道消费。"""
+
+    retrieval_mode: str
+    bm25_candidates: tuple[RagDocument, ...] = ()
+    vector_candidates: tuple[RagDocument, ...] = ()
+    fusion_candidates: tuple[RagDocument, ...] = ()
+    filtered_candidates: tuple[RagDocument, ...] = ()
+    degraded_sources: tuple[str, ...] = ()
+    timings: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class EvaluationCandidate:
+    """评测阶段的轻量候选快照，不携带原始正文。"""
+
+    rank: int
+    chunk_id: str
+    source_file: str
+    source_page: int | None
+    content_chars: int
+    doc_type: str | None = None
+    industry: str | None = None
+
+
+@dataclass(frozen=True)
+class EvaluationRetrievalResult:
+    """专用评测检索结果；不进入 Agent/MCP 公共查询契约。"""
+
+    query: str
+    retrieval_mode: str
+    chunks: tuple[RetrievedChunk, ...] = ()
+    stages: dict[str, tuple[EvaluationCandidate, ...]] = field(default_factory=dict)
+    timings: dict[str, float] = field(default_factory=dict)
+    configuration: dict[str, Any] = field(default_factory=dict)
+    degraded_sources: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class IngestionReport:
     """建库服务的结构化执行结果。"""
 

@@ -17,7 +17,7 @@ class AgentService:
 
     def __init__(self, dependencies: AgentDependencies, graph: Any):
         self._dependencies = dependencies
-        self.ctx = dependencies.context
+        self.ctx = dependencies.config
         self._graph = graph
         self._initialized = True
 
@@ -101,31 +101,3 @@ class AgentService:
             version="v2",
         ):
             yield event
-
-    async def stream(self, messages: List[Any], thread_id: Optional[str] = None):
-        """流式调用（支持实时输出）"""
-        if not self._initialized:
-            await self.initialize()
-
-        # FIX-1: 未传 thread_id 时打警告并抛出 ValueError，禁止回落到共享 "default" thread
-        tid = thread_id or self.ctx.default_thread_id
-        if not tid:
-            _logger.warning(
-                "[Agent] stream() 调用时未传 thread_id，且 AgentContext.default_thread_id 为 None。"
-                "请调用方传入 user:{username} 格式的 thread_id 以保证数据隔离。"
-            )
-            raise ValueError(
-                "thread_id 不能为空。请传入 user:{username} 格式的 thread_id。"
-            )
-
-        config = {
-            "recursion_limit": self.ctx.recursion_limit,
-            "configurable": {"thread_id": tid}
-        }
-
-        async for chunk in self._graph.astream(
-                {"messages": messages},
-                context=self._dependencies,
-                config=config
-        ):
-            yield chunk

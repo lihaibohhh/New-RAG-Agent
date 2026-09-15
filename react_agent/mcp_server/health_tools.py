@@ -8,13 +8,13 @@ from collections.abc import Callable
 from typing import Any
 from mcp.server.fastmcp import FastMCP
 from react_agent.mcp_server.responses import mcp_err, mcp_ok
-from react_agent.rag.admin import RagAdminService
+from react_agent.rag.runtime_ports import RagAdminServicePort
 
 
 def register_health_tools(
     server: FastMCP,
     *,
-    service_provider: Callable[[], RagAdminService],
+    service_provider: Callable[[], RagAdminServicePort],
 ) -> None:
     """
     注册知识库健康检查工具。

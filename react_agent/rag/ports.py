@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from react_agent.rag.contracts import (
+    CandidateRetrievalTrace,
     ParseRequest,
     ParseResult,
     RagDocument,
@@ -43,6 +44,18 @@ class HybridRetrieverPort(Protocol):
     async def warmup(self) -> None: ...
 
     async def invalidate(self) -> None: ...
+
+
+class EvaluationHybridRetrieverPort(Protocol):
+    """只在评测用例中暴露候选阶段，不扩展线上检索端口。"""
+
+    async def retrieve_with_trace(
+        self,
+        query: str,
+        *,
+        filters: dict[str, Any] | None = None,
+        mode: str = "hybrid",
+    ) -> CandidateRetrievalTrace: ...
 
 
 class RerankerPort(Protocol):

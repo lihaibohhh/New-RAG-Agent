@@ -59,7 +59,7 @@ async def get_agent() -> AgentService:
     注入 Agent 对话用例。保留函数名以兼容现有 FastAPI Depends。
 
     用法：
-        @router.post("/chat/stream")
+        @router.post("/api/v1/chat/stream")
         async def chat_stream(req: ChatRequest, agent: AgentService = Depends(get_agent)):
             ...
     """

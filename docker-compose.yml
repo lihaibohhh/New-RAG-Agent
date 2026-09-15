@@ -61,6 +61,7 @@ services:
       - CHROMA_DB_PATH=/app/chroma_db
       - HASH_RECORD_PATH=/app/chroma_db/file_hashes.json
       - CHUNK_STORE_PATH=/app/data/knowledge/chunks.sqlite3
+      - RAG_RUNTIME_MODE=local
       - RAG_DEVICE=cpu
       - PYTHONPATH=/app
       - HF_ENDPOINT=${HF_ENDPOINT:-https://huggingface.co}
@@ -73,6 +74,7 @@ services:
       - KNOWLEDGE_SERVICE_REQUIRE_API_KEY=${KNOWLEDGE_SERVICE_REQUIRE_API_KEY:-true}
       - KNOWLEDGE_SERVICE_INGESTION_ROOT=/app/FinancialResearchReportData
       - KNOWLEDGE_SERVICE_WARMUP_ON_START=${KNOWLEDGE_SERVICE_WARMUP_ON_START:-true}
+      - KNOWLEDGE_SERVICE_EVALUATION_API_ENABLED=${KNOWLEDGE_SERVICE_EVALUATION_API_ENABLED:-false}
       - DOCLING_BASE_URL=http://docling:5001
       - DOCLING_STRICT_MODE=${DOCLING_STRICT_MODE:-true}
       - DOCLING_MAX_PAGES_PER_TASK=${DOCLING_MAX_PAGES_PER_TASK:-3}
@@ -124,6 +126,7 @@ services:
       - POSTGRES_DB_URL=${POSTGRES_DOCKER_DB_URL:-${POSTGRES_DB_URL:-}}
       - LANGGRAPH_STRICT_MSGPACK=true
       - PYTHONPATH=/app
+      - RAG_RUNTIME_MODE=remote
       - KNOWLEDGE_SERVICE_URL=http://knowledge-service:8001
       - KNOWLEDGE_SERVICE_API_KEY=${KNOWLEDGE_SERVICE_API_KEY:-}
       - KNOWLEDGE_SERVICE_TIMEOUT=${KNOWLEDGE_SERVICE_TIMEOUT:-150}
@@ -149,6 +152,7 @@ services:
       - ./eval/results:/app/eval-results
     environment:
       - PYTHONPATH=/app
+      - RAG_RUNTIME_MODE=remote
       - KNOWLEDGE_SERVICE_URL=http://knowledge-service:8001
       - KNOWLEDGE_SERVICE_API_KEY=${KNOWLEDGE_SERVICE_API_KEY:-}
       - KNOWLEDGE_SERVICE_TIMEOUT=${KNOWLEDGE_SERVICE_TIMEOUT:-150}

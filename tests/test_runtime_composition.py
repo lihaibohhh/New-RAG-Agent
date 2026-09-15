@@ -21,6 +21,7 @@ from react_agent.rag.contracts import (
 )
 from react_agent.rag.operations import RagWarmupManager
 from react_agent.rag.runtime import create_rag_runtime
+from react_agent.rag.runtime_ports import AgentRagRuntimePort
 from react_agent.runtime import container
 from react_agent.runtime.container import (
     close_application_services,
@@ -35,16 +36,24 @@ from react_agent.tools.search import create_search_tool
 class _FakeGraph:
     def __init__(self) -> None:
         self.context = None
+        self.config = None
+        self.version = None
 
     async def ainvoke(self, inputs, *, context, config):
         self.context = context
         return {"messages": list(inputs["messages"]), "config": config}
 
+    async def astream_events(self, inputs, *, context, config, version):
+        self.context = context
+        self.config = config
+        self.version = version
+        yield {"event": "on_chat_model_stream", "data": {"inputs": inputs}}
+
 
 @pytest.mark.asyncio
 async def test_agent_service_passes_injected_dependencies_to_graph() -> None:
     dependencies = AgentDependencies(
-        context=AgentContext(),
+        config=AgentContext(),
         model_provider=lambda: object(),
         tools=(),
     )
@@ -54,6 +63,30 @@ async def test_agent_service_passes_injected_dependencies_to_graph() -> None:
     await service.invoke([], thread_id="user:test")
 
     assert graph.context is dependencies
+
+
+@pytest.mark.asyncio
+async def test_agent_service_stream_events_preserves_v1_streaming_contract() -> None:
+    dependencies = AgentDependencies(
+        config=AgentContext(recursion_limit=7),
+        model_provider=lambda: object(),
+        tools=(),
+    )
+    graph = _FakeGraph()
+    service = AgentService(dependencies, graph)
+
+    events = [
+        event
+        async for event in service.stream_events([], thread_id="user:stream")
+    ]
+
+    assert events[0]["event"] == "on_chat_model_stream"
+    assert graph.context is dependencies
+    assert graph.config == {
+        "recursion_limit": 7,
+        "configurable": {"thread_id": "user:stream"},
+    }
+    assert graph.version == "v2"
 
 
 @pytest.mark.asyncio
@@ -199,11 +232,6 @@ async def test_admin_health_composition_does_not_build_query_pipeline() -> None:
 def test_runtime_selects_model_and_tool_catalog(monkeypatch) -> None:
     monkeypatch.setattr(
         container,
-        "get_rag_runtime_profile",
-        lambda: SimpleNamespace(timeout=2),
-    )
-    monkeypatch.setattr(
-        container,
         "load_chat_model",
         lambda model_ref: ("model", model_ref),
     )
@@ -213,7 +241,7 @@ def test_runtime_selects_model_and_tool_catalog(monkeypatch) -> None:
         create_rag_runtime(),
     )
 
-    assert dependencies.get_model() == ("model", "provider/model")
+    assert dependencies.resolve_model() == ("model", "provider/model")
     assert [tool.name for tool in dependencies.tools] == [
         "search",
         "make_excel_table",
@@ -221,6 +249,39 @@ def test_runtime_selects_model_and_tool_catalog(monkeypatch) -> None:
         "docx_tool",
         "md_tool",
     ]
+
+
+def test_agent_dependencies_manage_an_immutable_active_tool_catalog() -> None:
+    dependencies = AgentDependencies(
+        config=AgentContext(enable_web_search=False),
+        model_provider=lambda: object(),
+        tools=[
+            SimpleNamespace(name="search"),
+            SimpleNamespace(name="query_internal_knowledge"),
+        ],
+    )
+
+    active, active_names = dependencies.active_tools()
+
+    assert isinstance(dependencies.tools, tuple)
+    assert [tool.name for tool in active] == ["query_internal_knowledge"]
+    assert active_names == frozenset({"query_internal_knowledge"})
+
+
+def test_agent_dependencies_reject_duplicate_or_unnamed_tools() -> None:
+    with pytest.raises(ValueError, match="不能重复"):
+        AgentDependencies(
+            config=AgentContext(),
+            model_provider=lambda: object(),
+            tools=[SimpleNamespace(name="same"), SimpleNamespace(name="same")],
+        )
+
+    with pytest.raises(ValueError, match="非空 name"):
+        AgentDependencies(
+            config=AgentContext(),
+            model_provider=lambda: object(),
+            tools=[SimpleNamespace(name="")],
+        )
 
 
 @pytest.mark.asyncio
@@ -245,8 +306,10 @@ async def test_checkpointer_lifecycle_is_instance_scoped() -> None:
 
 @pytest.mark.asyncio
 async def test_application_services_report_effective_backend(monkeypatch) -> None:
+    monkeypatch.setenv("RAG_RUNTIME_MODE", "local")
+    monkeypatch.delenv("KNOWLEDGE_SERVICE_URL", raising=False)
     dependencies = AgentDependencies(
-        context=AgentContext(),
+        config=AgentContext(),
         model_provider=lambda: object(),
         tools=(),
     )
@@ -257,7 +320,7 @@ async def test_application_services_report_effective_backend(monkeypatch) -> Non
     )
 
     services = await create_application_services(
-        agent_context=dependencies.context,
+        agent_context=dependencies.config,
         conversation_config=ConversationPersistenceConfig(
             checkpoint_backend="memory"
         ),
@@ -278,8 +341,34 @@ def test_agent_and_rag_adapter_have_no_runtime_service_locator_imports() -> None
     mcp_adapter = (package_root / "mcp_server" / "rag_tools.py").read_text(
         encoding="utf-8"
     )
+    application_runtime = (package_root / "runtime" / "container.py").read_text(
+        encoding="utf-8"
+    )
 
     assert "react_agent.utils.llm" not in agent_nodes
     assert "react_agent.tools" not in agent_nodes
-    assert "react_agent.rag.runtime" not in rag_adapter
-    assert "react_agent.rag.runtime" not in mcp_adapter
+    assert "from react_agent.rag.runtime import" not in rag_adapter
+    assert "from react_agent.rag.runtime import" not in mcp_adapter
+    assert "get_rag_runtime_profile" not in application_runtime
+
+
+def test_agent_rag_runtime_port_exposes_only_query_lifecycle_capabilities() -> None:
+    public_members = AgentRagRuntimePort.__dict__
+
+    assert "operations" in public_members["__annotations__"]
+    assert "get_retrieval_service" in public_members
+    assert "close" in public_members
+    assert "get_admin_service" not in public_members
+    assert "get_ingestion_service" not in public_members
+    assert "get_evaluation_retrieval_service" not in public_members
+
+
+def test_legacy_agent_stream_and_chat_router_are_removed() -> None:
+    package_root = Path(container.__file__).parent.parent
+    project_root = package_root.parent
+    api_main = (project_root / "api" / "main.py").read_text(encoding="utf-8")
+
+    assert "stream" not in AgentService.__dict__
+    assert "api.routes.chat" not in api_main
+    assert "include_router(chat_router)" not in api_main
+    assert not (project_root / "api" / "routes" / "chat.py").exists()

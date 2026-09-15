@@ -24,7 +24,7 @@ from react_agent.rag.ports import (
     RagCacheInvalidatorPort,
     VectorIndexWriterPort,
 )
-from react_agent.utils.timer_logger import summarize_last_run
+from react_agent.rag.observability import summarize_last_run
 
 
 logger = logging.getLogger(__name__)

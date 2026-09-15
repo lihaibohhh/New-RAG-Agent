@@ -11,13 +11,19 @@ from typing import Any, Callable
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 
 from knowledge_service.models import (
+    EvaluationSearchRequest,
     IngestionRequest,
     InvalidateRequest,
     SearchRequest,
     WarmupRequest,
 )
 from knowledge_service.settings import KnowledgeServiceSettings
-from react_agent.rag.contracts import RagValidationError, RetrievalResult, StoredChunk
+from react_agent.rag.contracts import (
+    EvaluationRetrievalResult,
+    RagValidationError,
+    RetrievalResult,
+    StoredChunk,
+)
 from react_agent.rag.runtime import RagRuntime, create_rag_runtime
 
 
@@ -35,6 +41,25 @@ def _retrieval_payload(result: RetrievalResult) -> dict[str, Any]:
         "reranked_count": result.reranked_count,
         "top_score": result.top_score,
         "timings": dict(result.timings),
+    }
+
+
+def _evaluation_retrieval_payload(
+    result: EvaluationRetrievalResult,
+) -> dict[str, Any]:
+    return {
+        "query": result.query,
+        "retrieval_mode": result.retrieval_mode,
+        "chunks": [asdict(chunk) for chunk in result.chunks],
+        "trace": {
+            "stages": {
+                name: [asdict(candidate) for candidate in candidates]
+                for name, candidates in result.stages.items()
+            },
+            "timings": dict(result.timings),
+            "configuration": dict(result.configuration),
+            "degraded_sources": list(result.degraded_sources),
+        },
     }
 
 
@@ -166,6 +191,28 @@ def create_app(
             retrieval_mode=body.retrieval_mode,
         )
         return _retrieval_payload(result)
+
+    @app.post(
+        "/api/v1/evaluation/retrieval/trace",
+        dependencies=protected,
+        tags=["evaluation"],
+    )
+    async def evaluation_retrieval_trace(
+        body: EvaluationSearchRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        if not request.app.state.knowledge_settings.evaluation_api_enabled:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Evaluation retrieval API 未启用",
+            )
+        result = await runtime(request).get_evaluation_retrieval_service().search(
+            body.query,
+            top_k=body.top_k,
+            filters=body.filters,
+            retrieval_mode=body.retrieval_mode,
+        )
+        return _evaluation_retrieval_payload(result)
 
     @app.get(
         "/api/v1/runtime/warmup",

@@ -13,7 +13,6 @@ RETRIEVAL_METRIC_KEYS = (
     "mrr",
     "ndcg_at_k",
     "source_page_recall",
-    "no_answer_accuracy",
 )
 
 
@@ -63,7 +62,7 @@ def gold_chunk_ids(record: Mapping[str, Any]) -> tuple[str, ...]:
 
 
 def gold_source_pages(record: Mapping[str, Any]) -> tuple[tuple[str, int | None], ...]:
-    """读取来源页标签；旧数据集回退到 source_file/page。"""
+    """读取来源页标签；兼容顶层 source_file/page 字段。"""
     labels: list[tuple[str, int | None]] = []
     raw_sources = _values(record.get("gold_sources"))
     for raw in raw_sources:
@@ -132,14 +131,19 @@ def evaluate_retrieval(
             "mrr": None,
             "ndcg_at_k": None,
             "source_page_recall": None,
-            "no_answer_accuracy": 1.0 if not ranked else 0.0,
+            # 这只描述检索层是否返回上下文，不能代表 Agent 是否正确拒答。
+            "retrieval_abstained": not ranked,
         }
 
     if chunk_labels:
         gold_ids = set(chunk_labels)
         relevant = [_retrieved_chunk_id(item) in gold_ids for item in ranked]
         matched_count = len(
-            {_retrieved_chunk_id(item) for item in ranked if _retrieved_chunk_id(item) in gold_ids}
+            {
+                _retrieved_chunk_id(item)
+                for item in ranked
+                if _retrieved_chunk_id(item) in gold_ids
+            }
         )
         gold_count = len(gold_ids)
         label_mode = "chunk_id"
@@ -203,12 +207,22 @@ def evaluate_retrieval(
         "mrr": 1.0 / first_rank if first_rank else 0.0,
         "ndcg_at_k": dcg / ideal_dcg if ideal_dcg else 0.0,
         "source_page_recall": source_page_recall,
-        "no_answer_accuracy": None,
+        "retrieval_abstained": None,
     }
 
 
 def aggregate_retrieval_metrics(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """聚合确定性指标，同时保留实际参与计算的样本数。"""
+    no_answer_records = [
+        record
+        for record in records
+        if record.get("retrieval_label_mode") == "no_answer"
+    ]
+    completed_no_answer = [
+        record
+        for record in no_answer_records
+        if record.get("retrieve_ok") is not False
+    ]
     summary: dict[str, Any] = {
         "retrieval_evaluable_count": sum(
             bool(record.get("retrieval_evaluable")) for record in records
@@ -216,8 +230,18 @@ def aggregate_retrieval_metrics(records: Sequence[Mapping[str, Any]]) -> dict[st
         "retrieval_missing_label_count": sum(
             record.get("retrieval_label_mode") == "missing" for record in records
         ),
-        "no_answer_count": sum(
-            record.get("retrieval_label_mode") == "no_answer" for record in records
+        "no_answer_count": len(no_answer_records),
+        "no_answer_retrieval_error_count": (
+            len(no_answer_records) - len(completed_no_answer)
+        ),
+        "retrieval_abstention_rate": (
+            round(
+                sum(bool(record.get("retrieval_abstained")) for record in completed_no_answer)
+                / len(completed_no_answer),
+                4,
+            )
+            if completed_no_answer
+            else None
         ),
     }
     for key in RETRIEVAL_METRIC_KEYS:

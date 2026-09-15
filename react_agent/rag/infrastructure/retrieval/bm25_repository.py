@@ -8,13 +8,17 @@ import pickle
 from collections.abc import Callable
 from typing import Any
 
-from react_agent.utils.redis_client import get_sync_redis
+from react_agent.rag.infrastructure.retrieval.bm25_tokenizer import (
+    bm25_tokenizer_fingerprint,
+)
+from react_agent.infrastructure.redis import get_sync_redis
 
 
 logger = logging.getLogger(__name__)
 _INDEX_KEY = "rag:bm25_index"
 _COUNT_KEY = "rag:bm25_doc_count"
 _HMAC_KEY = "rag:bm25_hmac"
+_VERSION_KEY = "rag:bm25_index_version"
 
 
 class RedisBm25Repository:
@@ -42,6 +46,21 @@ class RedisBm25Repository:
             redis = self._redis_provider()
             data = redis.get(_INDEX_KEY)
             if not data:
+                return None
+            raw_version = redis.get(_VERSION_KEY)
+            version = (
+                raw_version.decode("utf-8")
+                if isinstance(raw_version, bytes)
+                else str(raw_version or "")
+            )
+            expected_version = bm25_tokenizer_fingerprint()
+            if version != expected_version:
+                logger.info(
+                    "[RAG] BM25 Redis 缓存分词版本不兼容，将重建 "
+                    "cached=%s expected=%s",
+                    version or "legacy",
+                    expected_version,
+                )
                 return None
             raw_signature = redis.get(_HMAC_KEY)
             if not raw_signature:
@@ -73,6 +92,11 @@ class RedisBm25Repository:
             pipeline.set(_INDEX_KEY, data, ex=self._ttl)
             pipeline.set(_COUNT_KEY, str(document_count), ex=self._ttl)
             pipeline.set(_HMAC_KEY, self._sign(data), ex=self._ttl)
+            pipeline.set(
+                _VERSION_KEY,
+                bm25_tokenizer_fingerprint(),
+                ex=self._ttl,
+            )
             pipeline.execute()
             logger.info(
                 "[RAG] BM25 索引写入 Redis documents=%s ttl=%s",
@@ -84,7 +108,12 @@ class RedisBm25Repository:
 
     def clear(self) -> None:
         try:
-            self._redis_provider().delete(_INDEX_KEY, _COUNT_KEY, _HMAC_KEY)
+            self._redis_provider().delete(
+                _INDEX_KEY,
+                _COUNT_KEY,
+                _HMAC_KEY,
+                _VERSION_KEY,
+            )
         except Exception as exc:
             raise RuntimeError("BM25 Redis 缓存清理失败") from exc
 

@@ -14,7 +14,6 @@ request_id_ctx: ContextVar[str] = ContextVar("request_id", default="")
 
 # 旧版路径（响应头注入 Deprecation: true）
 _DEPRECATED_EXACT: frozenset[str] = frozenset({"/health"})
-_DEPRECATED_PREFIXES: tuple[str, ...] = ("/chat/",)
 
 
 # ── JSON 日志 Formatter ────────────────────────────────────────────────────────
@@ -80,7 +79,7 @@ class RequestIDMiddleware:
     1. 读取 X-Request-Id 请求头，若无则生成 UUID4。
     2. 写入 request_id_ctx ContextVar（供 JsonFormatter 和 errors.py 消费）。
     3. 拦截 http.response.start 消息，注入 X-Request-Id 响应头；
-       旧版路径（/health、/chat/*）同步注入 Deprecation: true。
+       旧版健康检查路径 /health 同步注入 Deprecation: true。
     4. 请求结束时打一条结构化 summary 日志（包含 method/path/status/duration_ms）。
     """
 
@@ -106,10 +105,7 @@ class RequestIDMiddleware:
         start = time.perf_counter()
         status_code: int = 0
 
-        is_deprecated = (
-            path in _DEPRECATED_EXACT
-            or any(path.startswith(p) for p in _DEPRECATED_PREFIXES)
-        )
+        is_deprecated = path in _DEPRECATED_EXACT
 
         # ── 包装 send：抓 http.response.start 注入响应头 ─────────────────
         async def _send(message) -> None:
