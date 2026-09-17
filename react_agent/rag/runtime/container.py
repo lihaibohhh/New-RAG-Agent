@@ -25,7 +25,7 @@ class RagRuntime:
     """Create, connect and own one isolated RAG object graph."""
 
     def __init__(self) -> None:
-        from react_agent.core.config import settings
+        from react_agent.configuration.settings import settings
 
         self._retrieval_service: RetrievalService | None = None
         self._evaluation_retrieval_service = None
@@ -53,7 +53,7 @@ class RagRuntime:
 
         with self._lock:
             if self._retrieval_service is None:
-                from react_agent.core.config import settings
+                from react_agent.configuration.settings import settings
                 from react_agent.rag.infrastructure.cache.semantic_cache import (
                     RedisSemanticCacheAdapter,
                 )
@@ -73,12 +73,14 @@ class RagRuntime:
                 embedding_provider = self._get_embedding_provider(profile.device)
                 logger.info(
                     "[RAG] runtime profile device=%s timeout=%ss "
-                    "rerank_candidates=%s rerank_top_n=%s reranker_concurrency=%s",
+                    "rerank_candidates=%s rerank_top_n=%s reranker_concurrency=%s "
+                    "reranker_batch_size=%s",
                     profile.device,
                     profile.timeout,
                     profile.rerank_candidates,
                     profile.rerank_top_n,
                     profile.reranker_concurrency,
+                    profile.reranker_batch_size,
                 )
                 cache = RedisSemanticCacheAdapter(
                     redis_provider=self._redis_resources.get_async,
@@ -99,6 +101,7 @@ class RagRuntime:
                 reranker = RerankerProviderAdapter(
                     device=profile.device,
                     inference_concurrency=profile.reranker_concurrency,
+                    batch_size=profile.reranker_batch_size,
                 )
                 self._reranker = reranker
                 self._retrieval_service = RetrievalService(
@@ -125,7 +128,7 @@ class RagRuntime:
         self.get_retrieval_service()
         with self._lock:
             if self._evaluation_retrieval_service is None:
-                from react_agent.core.config import settings
+                from react_agent.configuration.settings import settings
                 from react_agent.rag.evaluation import EvaluationRetrievalService
                 from react_agent.rag.runtime.device import get_rag_runtime_profile
 
@@ -138,6 +141,7 @@ class RagRuntime:
                     max_content_chars=settings.tools.rag.max_content_chars,
                     rerank_candidates=profile.rerank_candidates,
                     production_rerank_top_n=profile.rerank_top_n,
+                    reranker_batch_size=profile.reranker_batch_size,
                     device=profile.device,
                     source_top_k=10,
                     rrf_rank_constant=60,
@@ -153,7 +157,7 @@ class RagRuntime:
 
         with self._lock:
             if self._ingestion_service is None:
-                from react_agent.core.config import settings
+                from react_agent.configuration.settings import settings
                 from react_agent.rag.infrastructure.parsing.docling_parser import (
                     DoclingServiceAdapter,
                 )
@@ -209,7 +213,7 @@ class RagRuntime:
         return self._document_parsing_service
 
     def _build_document_parsing_service(self) -> DocumentParsingService:
-        from react_agent.core.config import settings
+        from react_agent.configuration.settings import settings
         from react_agent.rag.infrastructure.parsing.basic_document_parser import (
             BasicDocumentParserAdapter,
         )
@@ -292,7 +296,7 @@ class RagRuntime:
             return self._vector_retriever
         with self._lock:
             if self._vector_retriever is None:
-                from react_agent.core.config import settings
+                from react_agent.configuration.settings import settings
                 from react_agent.rag.infrastructure.retrieval.chroma_retriever import (
                     ChromaCandidateRetriever,
                 )
@@ -309,7 +313,7 @@ class RagRuntime:
             return self._chunk_store
         with self._lock:
             if self._chunk_store is None:
-                from react_agent.core.config import settings
+                from react_agent.configuration.settings import settings
                 from react_agent.rag.infrastructure.storage.sqlite_chunk_store import (
                     SQLiteChunkStoreAdapter,
                 )
@@ -328,7 +332,7 @@ class RagRuntime:
                     ChromaCorpusReaderAdapter,
                     MigratingChunkCorpusAdapter,
                 )
-                from react_agent.core.config import settings
+                from react_agent.configuration.settings import settings
 
                 self._chunk_corpus = MigratingChunkCorpusAdapter(
                     store=self._get_chunk_store(),
@@ -349,7 +353,7 @@ class RagRuntime:
         return self._hybrid_retriever
 
     def _create_cache_invalidator(self) -> RagCacheInvalidatorPort:
-        from react_agent.core.config import settings
+        from react_agent.configuration.settings import settings
         from react_agent.rag.infrastructure.cache.semantic_cache import (
             RedisSemanticCacheAdapter,
         )

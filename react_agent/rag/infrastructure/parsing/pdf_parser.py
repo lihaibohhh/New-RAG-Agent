@@ -24,7 +24,7 @@ from typing import List, Tuple
 
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from react_agent.core.config import settings
+from react_agent.configuration.settings import settings
 
 # ──────────────────────────────────────────────
 # 内部常量

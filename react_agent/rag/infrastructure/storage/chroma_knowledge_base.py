@@ -38,7 +38,7 @@ class ChromaKnowledgeBaseAdapter:
         if self._chroma_dir:
             return str(Path(self._chroma_dir))
 
-        from react_agent.core.config import settings
+        from react_agent.configuration.settings import settings
 
         return str(settings.tools.vector_store.CHROMA_DB_PATH)
 

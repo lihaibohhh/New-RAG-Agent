@@ -21,7 +21,7 @@ from react_agent.rag.contracts import (
 
 def build_vector_db(data_dir: str | None = None) -> IngestionReport:
     """兼容原同步建库入口，内部统一交给 IngestionService。"""
-    from react_agent.core.config import settings
+    from react_agent.configuration.settings import settings
     from react_agent.rag.runtime import (
         RemoteRagRuntime,
         create_configured_rag_runtime,

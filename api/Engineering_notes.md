@@ -6,6 +6,10 @@
 >
 > **怎么用**:面试前通读一遍;被问到某个 Phase 时,讲「踩坑」和「验证证据」那两块——具体的 bug 和具体的数字最能压场,泛泛的「我用了 FastAPI」最廉价。
 
+> 说明：下文 Phase 1–5 的美元金额、早期测试数和 API 覆盖率是历史记录，
+> 不代表当前工作区的计价和回归状态。当前费用单位为 CNY，指标名为
+> `llm_cost_cny_total`；实际验证结果以本次运行的测试输出为准。
+
 ---
 
 ## 0. 一句话定位
@@ -47,7 +51,7 @@
 **关键决策 / 踩坑(这是 Phase 1 的灵魂,面试重点讲)**
 - **头号 bug——token 不冒泡**。根因:Python 3.10 的 async 下,callback 不走 contextvar 自动传播,内层 `model.ainvoke` 收不到 `astream_events` 装的回调句柄,`on_chat_model_stream` 自然出不来。**修法**:在节点函数 `call_model` 签名里显式声明 `config: RunnableConfig`,框架才会注入,再手动 `config=config` 透传给 `model.ainvoke`。这是 LangChain 官方点名的 3.10 async 限制,定位到这一行靠的是用 `GenericFakeChatModel` 做探针确认事件有没有冒出来。
 - **断连即取消,而且要真掐掉上游**。Queue+Task 架构有个陷阱:客户端断开后 generator 不再读队列,但 **producer task 不会因为没人读就自己停**——「我不发了」≠「LLM 停了、不计费了」。正确做法:`finally` 里对 producer task **`cancel()` 且 `await`**(吞掉 CancelledError),让取消信号真传进 `astream_events` 的 `aclose` 一路到底层 httpx。
-- **第二个 bug——cost 静默归零**。用 `ctx.model`(配置别名)当 key 查价表会 miss,静默返回 0、不报错(最阴险的一类 bug)。改成读 `response_metadata.model_name`(API 回传的真实型号)。
+- **第二个 bug——cost 静默归零**。用配置中的 `model_ref` 当 key 查价表会 miss，静默返回 0、不报错（最阴险的一类 bug）。改成优先读 `response_metadata.model_name`（API 回传的真实型号）。
 - **第三个 bug——streaming 下用量抽空**。`extract_model_usage` 的标准字段在流式模式拿不到,加了读 `usage_metadata` 的 fallback。非流式测过不代表流式没问题,两种模式 usage 格式不同。
 - `X-Accel-Buffering: no` 关掉 Nginx 缓冲,否则反代攒一批才下发,逐 token 效果在生产消失;Queue `maxsize=100` 做背压。
 
@@ -84,16 +88,16 @@
 
 **起点**:Phase 1 的 ttft/tokens/cost、Phase 2 的 429/401 都是「算完就扔」,要接进 `/metrics`。
 
-**做了什么**:`/api/v1/metrics`(豁免 auth、`include_in_schema=False`、自身排除出 `http_requests_total`);8 个指标——HTTP 请求数/延迟/in-flight + `llm_ttft_seconds` / `llm_tokens_total{type,model}` / `llm_cost_usd_total{model}` / `rate_limit_rejections_total{reason}` / `auth_failures_total`。
+**当前实现**:`/api/v1/metrics` 豁免 auth、`include_in_schema=False`、自身排除出 `http_requests_total`；费用指标已统一为人民币 `llm_cost_cny_total{model}`，旧的 `llm_cost_usd_total` 已停用。其他指标包括 HTTP 请求数/延迟/in-flight、`llm_ttft_seconds`、`llm_tokens_total{type,model}`、`rate_limit_rejections_total{reason}` 和 `auth_failures_total`。
 
 **关键决策 / 踩坑**
 - **path label 必须用路由模板,不能用原始 URL**——否则 session_id 进 label 会指标基数爆炸。踩到版本差异:**Starlette 0.52.1 的 `scope["route"]` 不被填充**,改用 `scope["endpoint"]` 反查模板(`register_routes` 建映射 + `get_path_template`)。这是「只能真拉一次 /metrics 看 label 是不是 `/api/v1/chat/stream`」才能发现的坑。
 - **Histogram 自定义 buckets**。默认桶顶 10s,但实测 TTFT 6.8s、总时长 34s,真实请求会全落进 `+Inf` 桶、p95/p99 失效。给 TTFT 加 7.5(到 ~30s)、给 duration 加 20/45(到 ~60s)。按真实分布调桶,体现「知道自己在量什么」。
-- **指标与计费同源**:LLM 指标直接复用 done 帧已算好的 ttft/tokens/cost,model label 用同一个 `response_metadata.model_name`,三处口径(done 帧 / Prometheus / 扣费)对齐,不重算。
+- **指标与计量同源**:流式和非流式均复用 `react_agent.metering` 的单次模型用量归一化；token 进入 Redis 每日预算，已知人民币费用进入 `llm_cost_cny_total`。未知价格不进入费用 Counter，而通过 SSE 的 `cost_status` 与 `unpriced_model_count` 明示。
 - **in-flight 在 `finally` 减回**,断连/超时也减,否则只增不减泄漏。
 
 **验证证据(本轮实测质量最高)**
-- **cost 三处对账**:Counter 增量 `0.00055552` → `round(6)` = `0.000556` = done 帧 `total_cost`。同一个 Python 变量,Prometheus 拿原始 float、done 帧做 6 位展示截断,无口径分裂。
+- **历史验证记录**:旧美元计价路径曾以 Counter 增量 `0.00055552`、done 帧 `0.000556` 对账；该数值不代表当前人民币价格卡的实测结果。当前实现用离线回归测试验证流式逐次计量、done 帧及 Redis token 扣减。
 - path label 实测为 `/api/v1/chat/stream`(模板,非 unmatched)。
 - in-flight:流式中 2.0(stream + scrape)→ 断连后稳定 1.0(只剩 scrape 自己)→ 无泄漏。
 
@@ -143,8 +147,9 @@
 **1. 「断连省钱」与「半截状态自愈」是同一条 session 上的同一套机制**(Phase 1 + Phase 3 + 既有入口)
 断连 → 上游 LLM 被 cancel+await 真掐掉(省钱,LangSmith pending 为证)→ 但这一步 checkpoint 没落、可能留下悬空 tool_call → 下一轮同 session 进来,入口 `_sanitize_dangling_tool_calls` 自愈、不炸 400。一个动作的省钱面和它的副作用善后,被同一套设计兜住。*(注:自愈这半段待 Phase 3 后真验,见上。)*
 
-**2. cost 口径三处对账**(Phase 1 → 2 → 4)
-done 帧展示、per-user 预算扣费、Prometheus counter,三处必须是同一个变量、同一个真实 model 名。这条能扛住「你这成本数字可信吗」的追问——一路追到同一个 Python float。
+**2. 当前用量口径**(Phase 1 → 2 → 4)
+流式 done 帧与 Prometheus 的已知费用均为 CNY；Redis 每日预算累计的是 token 数，
+不是货币金额。未知价格单独标记，不混入“零费用”；非流式按当前轮所有模型调用计数。
 
 **3. 配置别名 ≠ 运行时真实名**(Phase 1 的 cost 归零 bug)
 用配置里的 model 别名查价表会静默 miss → cost=0 不报错。教训:凡是「配置名」和「上游真实回传名」可能不一致的地方,计费/计量一律以回传为准。这是个能体现 debug 嗅觉的小故事。

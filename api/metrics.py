@@ -41,7 +41,7 @@ http_requests_in_flight = Gauge(
 )
 
 # ── LLM 专项 ─────────────────────────────────────────────────────────────────
-# 数据源与 Phase 1 done 帧、Phase 2 record_token_usage 完全同口径，三处数字对齐
+# token 与 SSE、Redis 预算共用计量口径；已知费用按 CNY 记录。
 
 llm_ttft_seconds = Histogram(
     "llm_ttft_seconds",
@@ -56,9 +56,9 @@ llm_tokens_total = Counter(
     ["type", "model"],  # type: prompt | completion
 )
 
-llm_cost_usd_total = Counter(
-    "llm_cost_usd_total",
-    "LLM 推理费用累计（美元）",
+llm_cost_cny_total = Counter(
+    "llm_cost_cny_total",
+    "LLM 已知价格的推理费用累计（人民币）",
     ["model"],
 )
 

@@ -6,10 +6,11 @@ v1 Chat routes — Phase 1: token 级流式 SSE；Phase 2: auth + 限流 + 预�
 - asyncio.Task + Queue 解耦生产与消费，使 is_disconnected() 可以在帧间轮询
 - 手动 deadline 实现总预算超时（Python 3.10 无 asyncio.timeout）
 - error 帧与 errors.py problem+json 同构（含 request_id）
-- usage/cost 使用 Agent 公开的用量归一化与费用计算契约
+- usage/cost 使用独立 metering 包的统一用量与费用契约
 - Phase 2: Depends(require_api_key) → check_rate_limit → check_token_budget → 处理 → record_token_usage
 - 扣费点：generator finally（断连/超时/正常完成均记实际 token，不按预估）
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -27,10 +28,9 @@ from api.models import ChatRequest, ChatResponse
 from api.security import require_api_key, get_rate_limit_key
 from api.ratelimit import check_rate_limit, check_token_budget, record_token_usage
 from react_agent.agent import AgentService
-from react_agent.agent.usage import (
-    estimate_model_cost_usd,
-    extract_model_usage,
-)
+from react_agent.agent.modeling.history import latest_turn_ai_messages
+from react_agent.metering.model_usage import meter_model_call
+from react_agent.metering.pricing import estimate_configured_model_cost
 
 _logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/chat", tags=["chat v1"])
@@ -46,7 +46,7 @@ def _map_event(ev: dict, state: dict, agent: AgentService, start: float) -> str 
     """
     把 astream_events v2 原始事件映射为 SSE 帧字符串。
     返回 None 表示不需要推送。
-    state 是可变 dict，跨帧共享 ttft_ms / total_tokens / total_cost。
+    state 是可变 dict，跨帧共享 TTFT、逐模型用量和人民币费用。
     """
     name = ev["event"]
     data = ev.get("data", {})
@@ -59,10 +59,13 @@ def _map_event(ev: dict, state: dict, agent: AgentService, start: float) -> str 
             return _sse("token", {"delta": chunk.content})
 
     elif name == "on_tool_start":
-        return _sse("tool_call", {
-            "name": ev.get("name", ""),
-            "args": data.get("input", {}),
-        })
+        return _sse(
+            "tool_call",
+            {
+                "name": ev.get("name", ""),
+                "args": data.get("input", {}),
+            },
+        )
 
     elif name == "on_tool_end":
         out = data.get("output", "")
@@ -76,11 +79,14 @@ def _map_event(ev: dict, state: dict, agent: AgentService, start: float) -> str 
                 ok = bool(parsed.get("ok", True))
             except Exception:
                 pass
-        return _sse("tool_result", {
-            "name": ev.get("name", ""),
-            "ok": ok,
-            "meta": str(out)[:300] if out else "",
-        })
+        return _sse(
+            "tool_result",
+            {
+                "name": ev.get("name", ""),
+                "ok": ok,
+                "meta": str(out)[:300] if out else "",
+            },
+        )
 
     elif name == "on_chat_model_end":
         output = data.get("output")
@@ -94,27 +100,37 @@ def _map_event(ev: dict, state: dict, agent: AgentService, start: float) -> str 
                 g = g[0]
             msg = getattr(g, "message", output)
 
-        usage = extract_model_usage(msg)
-        # 优先用 response_metadata.model_name（API 返回的真实型号，如 "deepseek-v4-flash"）
-        # ctx.model 是配置名（"deepseek/deepseek-chat"），不一定与价格表 key 匹配
-        rm = getattr(msg, "response_metadata", None) or {}
-        model_name = rm.get("model_name") or agent.context.model.split("/")[-1]
-        cost = estimate_model_cost_usd(
-            model_name=model_name,
-            usage=usage,
-            price_table=agent.context.deepseek_v4_price,
+        metered = meter_model_call(
+            msg,
+            model_ref=agent.model_ref,
+            cost_estimator=estimate_configured_model_cost,
         )
+        usage = metered.usage
+        model_name = metered.model_name
+        cost = metered.cost
+        amount = cost.amount if cost.status == "estimated" else None
         state["total_tokens"] += usage.get("total_tokens", 0)
-        state["prompt_tokens"] += usage.get("prompt_tokens", 0)
-        state["completion_tokens"] += usage.get("completion_tokens", 0)
-        state["total_cost"] += cost
-        if not state["model_name"]:
-            state["model_name"] = model_name
-        return _sse("usage", {
-            "prompt_tokens": usage.get("prompt_tokens", 0),
-            "completion_tokens": usage.get("completion_tokens", 0),
-            "cost": cost,
-        })
+        if amount is not None:
+            state["total_cost"] += amount
+        else:
+            state["unpriced_model_count"] += 1
+        model_totals = state["models"].setdefault(
+            model_name,
+            {"prompt_tokens": 0, "completion_tokens": 0, "cost_cny": 0.0},
+        )
+        model_totals["prompt_tokens"] += usage["prompt_tokens"]
+        model_totals["completion_tokens"] += usage["completion_tokens"]
+        model_totals["cost_cny"] += amount or 0.0
+        return _sse(
+            "usage",
+            {
+                "prompt_tokens": usage.get("prompt_tokens", 0),
+                "completion_tokens": usage.get("completion_tokens", 0),
+                "cost": amount,
+                "currency": cost.currency,
+                "cost_status": cost.status,
+            },
+        )
 
     return None
 
@@ -155,12 +171,13 @@ async def _stream_v1_generator(
     state: dict = {
         "ttft_ms": None,
         "total_tokens": 0,
-        "prompt_tokens": 0,
-        "completion_tokens": 0,
         "total_cost": 0.0,
-        "model_name": "",  # response_metadata 真实型号，与 Prometheus label 口径一致
+        "unpriced_model_count": 0,
+        "models": {},
     }
-    q: asyncio.Queue[str | None] = asyncio.Queue(maxsize=100)  # 背压：防止生产者跑太快撑爆内存
+    q: asyncio.Queue[str | None] = asyncio.Queue(
+        maxsize=100
+    )  # 背压：防止生产者跑太快撑爆内存
 
     # ── 生产者 Task ────────────────────────────────────────────────────────────
     async def _fill_task() -> None:
@@ -179,13 +196,18 @@ async def _stream_v1_generator(
             raise
         except Exception as exc:
             _logger.exception("stream error | session=%s: %s", session_id, exc)
-            await q.put(_sse("error", {
-                "type": "about:blank",
-                "title": "Internal Error",
-                "status": 500,
-                "detail": "Agent 内部错误，请稍后重试",
-                "request_id": request_id,
-            }))
+            await q.put(
+                _sse(
+                    "error",
+                    {
+                        "type": "about:blank",
+                        "title": "Internal Error",
+                        "status": 500,
+                        "detail": "Agent 内部错误，请稍后重试",
+                        "request_id": request_id,
+                    },
+                )
+            )
         finally:
             await q.put(None)  # 哨兵，通知消费者流结束
 
@@ -205,13 +227,16 @@ async def _stream_v1_generator(
                 _logger.warning(
                     "stream_timeout | session=%s timeout_s=%s", session_id, _timeout_s
                 )
-                yield _sse("error", {
-                    "type": "about:blank",
-                    "title": "Stream Timeout",
-                    "status": 504,
-                    "detail": f"LLM 响应超时（{_timeout_s}s），请重试",
-                    "request_id": request_id,
-                })
+                yield _sse(
+                    "error",
+                    {
+                        "type": "about:blank",
+                        "title": "Stream Timeout",
+                        "status": 504,
+                        "detail": f"LLM 响应超时（{_timeout_s}s），请重试",
+                        "request_id": request_id,
+                    },
+                )
                 break
 
             # 等待下一帧（0.1s 超时，给 disconnect 检查留窗口）
@@ -227,7 +252,9 @@ async def _stream_v1_generator(
                     except asyncio.CancelledError:
                         pass
                     _logger.info(
-                        "stream_cancelled | session=%s request_id=%s", session_id, request_id
+                        "stream_cancelled | session=%s request_id=%s",
+                        session_id,
+                        request_id,
                     )
                     return  # 断连：直接退出，不发 done
                 continue
@@ -245,7 +272,9 @@ async def _stream_v1_generator(
                 except asyncio.CancelledError:
                     pass
                 _logger.info(
-                    "stream_cancelled | session=%s request_id=%s", session_id, request_id
+                    "stream_cancelled | session=%s request_id=%s",
+                    session_id,
+                    request_id,
                 )
                 return
 
@@ -270,31 +299,41 @@ async def _stream_v1_generator(
                 await task
             except asyncio.CancelledError:
                 pass
-        # 扣费：无论正常完成/超时/断连，均按实际产生的 token 记录（不按预估）
-        # 断连时 state["total_tokens"] 是截至断点已处理的 usage 事件累计值
+        # 预算记账：正常完成/超时/断连均记录已收到的模型结束事件用量。
+        # 若进行中的调用被取消且上游未返回 usage，该调用无法精确计入。
         await record_token_usage(bucket_key, state["total_tokens"])
 
-        # Prometheus LLM 指标：与 done 帧、record_token_usage 同口径，三处数字对齐
-        from api.metrics import llm_ttft_seconds, llm_tokens_total, llm_cost_usd_total
-        _model = state["model_name"] or "unknown"
+        # Prometheus 按真实模型名汇总；token 与 Redis、done 同源，费用以 CNY 记录。
+        from api.metrics import llm_ttft_seconds, llm_tokens_total, llm_cost_cny_total
+
         if state["ttft_ms"] is not None:
             llm_ttft_seconds.observe(state["ttft_ms"] / 1000)
-        if state["prompt_tokens"]:
-            llm_tokens_total.labels(type="prompt", model=_model).inc(state["prompt_tokens"])
-        if state["completion_tokens"]:
-            llm_tokens_total.labels(type="completion", model=_model).inc(state["completion_tokens"])
-        if state["total_cost"]:
-            llm_cost_usd_total.labels(model=_model).inc(state["total_cost"])
+        for model_name, totals in state["models"].items():
+            if totals["prompt_tokens"]:
+                llm_tokens_total.labels(type="prompt", model=model_name).inc(
+                    totals["prompt_tokens"]
+                )
+            if totals["completion_tokens"]:
+                llm_tokens_total.labels(type="completion", model=model_name).inc(
+                    totals["completion_tokens"]
+                )
+            if totals["cost_cny"]:
+                llm_cost_cny_total.labels(model=model_name).inc(totals["cost_cny"])
 
     # ── done 帧（正常完成 or 超时均发；断连 return 不到这里）────────────────────
     total_ms = round((time.perf_counter() - start) * 1000)
-    yield _sse("done", {
-        "session_id": session_id,
-        "ttft_ms": state["ttft_ms"],
-        "total_ms": total_ms,
-        "total_tokens": state["total_tokens"],
-        "total_cost": round(state["total_cost"], 6),
-    })
+    yield _sse(
+        "done",
+        {
+            "session_id": session_id,
+            "ttft_ms": state["ttft_ms"],
+            "total_ms": total_ms,
+            "total_tokens": state["total_tokens"],
+            "total_cost": round(state["total_cost"], 6),
+            "currency": "CNY",
+            "unpriced_model_count": state["unpriced_model_count"],
+        },
+    )
 
 
 # ── 路由 ──────────────────────────────────────────────────────────────────────
@@ -310,8 +349,8 @@ Token 级 Server-Sent Events 推送。
 | `token` | `{delta}` 单个 token 增量文本 |
 | `tool_call` | `{name, args}` Agent 决定调用工具 |
 | `tool_result` | `{name, ok, meta}` 工具执行完毕 |
-| `usage` | `{prompt_tokens, completion_tokens, cost}` 本次模型调用用量 |
-| `done` | `{session_id, ttft_ms, total_ms, total_tokens, total_cost}` 流结束 |
+| `usage` | `{prompt_tokens, completion_tokens, cost, currency, cost_status}` 本次模型调用用量；未知价格时 cost 为 null |
+| `done` | `{session_id, ttft_ms, total_ms, total_tokens, total_cost, currency, unpriced_model_count}` 流结束；total_cost 仅含已计价调用 |
 | `error` | RFC 7807 problem+json（含 request_id）|
 """,
 )
@@ -326,16 +365,21 @@ async def chat_stream(
     # 与 sessions.py 的查找逻辑保持一致：user:{bucket_key}:{session_id}
     bucket_key = get_rate_limit_key(api_key, request)
     thread_id = f"user:{bucket_key}:{session_id}"
-    _logger.info("[v1] stream | session=%s | new=%s | msg=%.50s", session_id, is_new, req.message)
+    _logger.info(
+        "[v1] stream | session=%s | new=%s | msg=%.50s", session_id, is_new, req.message
+    )
 
     # auth → rate limit → budget（任一不过直接短路，不启动 agent）
     from api.settings import APISettings
+
     _s = APISettings()
     await check_rate_limit(bucket_key, _s.rate_limit_rpm)
     await check_token_budget(bucket_key, _s.daily_token_budget)
 
     return StreamingResponse(
-        _stream_v1_generator(request, agent, req.message, thread_id, session_id, bucket_key),
+        _stream_v1_generator(
+            request, agent, req.message, thread_id, session_id, bucket_key
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -361,9 +405,12 @@ async def chat_invoke(
     # 与 chat_stream 保持一致：thread_id 含 bucket_key（IDOR 防护）
     bucket_key = get_rate_limit_key(api_key, request)
     thread_id = f"user:{bucket_key}:{session_id}"
-    _logger.info("[v1] invoke | session=%s | new=%s | msg=%.50s", session_id, is_new, req.message)
+    _logger.info(
+        "[v1] invoke | session=%s | new=%s | msg=%.50s", session_id, is_new, req.message
+    )
 
     from api.settings import APISettings
+
     _s = APISettings()
     await check_rate_limit(bucket_key, _s.rate_limit_rpm)
     await check_token_budget(bucket_key, _s.daily_token_budget)
@@ -383,10 +430,29 @@ async def chat_invoke(
     ai_msgs = [m for m in msgs if isinstance(m, AIMessage) and m.content]
     content = ai_msgs[-1].content if ai_msgs else ""
 
-    # 记录实际 token 消耗（从最后一条 AI 消息的 usage_metadata 读取）
-    if ai_msgs:
-        um = getattr(ai_msgs[-1], "usage_metadata", None) or {}
-        invoke_tokens = int(um.get("total_tokens", 0))
-        await record_token_usage(bucket_key, invoke_tokens)
+    # 同流式路径一样，逐次计入当前轮所有模型调用（含工具规划和最终总结）。
+    from api.metrics import llm_tokens_total, llm_cost_cny_total
+
+    invoke_tokens = 0
+    for message in latest_turn_ai_messages(msgs):
+        metered = meter_model_call(
+            message,
+            model_ref=agent.model_ref,
+            cost_estimator=estimate_configured_model_cost,
+        )
+        usage = metered.usage
+        model_name = metered.model_name
+        invoke_tokens += usage["total_tokens"]
+        if usage["prompt_tokens"]:
+            llm_tokens_total.labels(type="prompt", model=model_name).inc(
+                usage["prompt_tokens"]
+            )
+        if usage["completion_tokens"]:
+            llm_tokens_total.labels(type="completion", model=model_name).inc(
+                usage["completion_tokens"]
+            )
+        if metered.cost.status == "estimated" and metered.cost.amount:
+            llm_cost_cny_total.labels(model=model_name).inc(metered.cost.amount)
+    await record_token_usage(bucket_key, invoke_tokens)
 
     return ChatResponse(content=content, session_id=session_id, thread_id=thread_id)

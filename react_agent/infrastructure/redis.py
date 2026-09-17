@@ -7,7 +7,7 @@ import threading
 import redis as sync_redis
 import redis.asyncio as async_redis
 
-from react_agent.core.config import settings
+from react_agent.configuration.settings import settings
 
 
 logger = logging.getLogger(__name__)

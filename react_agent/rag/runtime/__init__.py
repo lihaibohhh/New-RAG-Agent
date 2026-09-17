@@ -20,7 +20,7 @@ from react_agent.rag.runtime_ports import (
 )
 
 if TYPE_CHECKING:
-    from react_agent.core.config import RagProfile
+    from react_agent.configuration.settings import RagProfile
 def get_rag_runtime_profile(requested: str | None = None) -> "RagProfile":
     """延迟解析设备档位，避免导入 Runtime 时立即导入 Torch。"""
     from react_agent.rag.runtime.device import get_rag_runtime_profile as resolve

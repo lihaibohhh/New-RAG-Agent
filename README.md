@@ -95,9 +95,12 @@ flowchart LR
 用户请求
   → Streamlit / FastAPI
   → AgentService
+  → 初始化当前轮模型/工具/恢复预算
   → LangGraph ReAct 循环
   → 工具调用：RAG / Search / Excel / Word / Markdown
-  → 反思与结果整理
+  → 工具结果整理与失败恢复
+  → 预算耗尽时闭合未执行的 tool calls
+  → 无工具 finalize_model 生成最终答复
   → 带来源、工具轨迹、token / cost 信息的响应
 ```
 
@@ -109,26 +112,65 @@ flowchart LR
 
 | 文件 | 职责 |
 |---|---|
-| `react_agent/agent/` | Agent 图、节点、路由、状态、提示词与 `AgentService` 对话用例 |
+| `react_agent/agent/application/` | 对外 Agent 对话用例；校验 `thread_id`，封装 invoke / stream |
+| `react_agent/agent/workflow/` | LangGraph 拓扑、条件路由与节点适配层；`nodes/` 按生命周期、模型和工具节点拆分 |
+| `react_agent/agent/contracts/` | 图状态与运行时依赖契约，不包含模型或工具实现 |
+| `react_agent/agent/configuration/` | 仅管理图内行为的 `AgentContext`，以及环境变量覆盖与类型转换 |
+| `react_agent/agent/policies/` | 模型轮次、工具批次、重试和递归安全预算的纯策略判断 |
+| `react_agent/agent/modeling/` | 模型绑定/调用、消息历史清洗与截断，以及当前对话轮次的模型消息选择；不解析价格卡 |
+| `react_agent/agent/prompting/` | 默认系统提示词，以及失败恢复/主动收口的瞬态控制指令 |
+| `react_agent/agent/tool_flow/` | Agent 内部工具调用解析、执行、结果归一化、限幅与预算统计 |
+| `react_agent/agent/support/` | 时间等不包含业务决策的通用辅助能力 |
+| `react_agent/agent/__init__.py` | 稳定公共 API；根目录不再存放实现或旧模块兼容门面 |
+| `react_agent/configuration/` | 应用级配置模型、环境/YAML 加载及非敏感工具默认值、价格卡；不负责 Agent 图内行为 |
 | `react_agent/tooling/` | Agent 与工具适配器共享的 ToolResult 信封和重试执行契约 |
 | `react_agent/models/` | LLM Provider 解析、创建与缓存 |
+| `react_agent/metering/` | 统一模型 token 归一化、人民币计价及累计状态的轮次用量差值；不决定 Agent 对话边界 |
 | `react_agent/infrastructure/` | Redis 等跨用例共享的技术资源适配器 |
-| `react_agent/observability/` | 应用会话用量记录与展示模型 |
+| `react_agent/observability/` | 已计算用量的结构化日志、会话汇总与界面展示；不负责重新计量或计价 |
 | `react_agent/conversations/contracts.py` | 会话删除结果与持久化错误契约 |
 | `react_agent/conversations/ports.py` | `ConversationRepositoryPort` 出站端口 |
 | `react_agent/conversations/service.py` | 历史读取与会话删除用例 |
 | `react_agent/conversations/infrastructure/` | LangGraph Checkpointer Adapter 及 PostgreSQL / SQLite / Memory 工厂 |
 | `react_agent/runtime/container.py` | 选择 LLM Adapter 与 Agent 工具集，创建共享 Checkpointer，完成依赖注入并管理实例生命周期 |
 
+全局配置入口是 `react_agent/configuration/settings.py`。工具默认值和价格卡随
+`react_agent.configuration` 一起打包；`.env` / `.env.example` 留在应用根目录，
+供本地运行和 Docker Compose 注入环境变量。`pyproject.toml`、Compose 文件与
+`pytest.ini` 保留在根目录，供相应构建、部署和测试工具发现。
+
 `AgentService` 不提供历史读取或删除接口；FastAPI Chat 路由只注入
 `AgentService`，Sessions 路由只注入 `ConversationService`。两者不互相依赖，
-由 Composition Root 共享同一个 Checkpointer。Agent 执行参数由 `AgentContext`
-管理，模型提供者与工具集合由 `AgentDependencies` 显式传入，Agent 节点不再
-自行导入模型工厂或全局工具表。会话后端与数据库路径由
+由 Composition Root 共享同一个 Checkpointer。`AgentContext` 只管理提示词、
+能力开关、业务预算、上下文控制和图安全熔断。模型选择/推理参数由
+`LLMConfig` 管理，具体工具参数由各工具配置管理；模型提供者、计价策略与工具
+集合通过 `AgentDependencies` 显式传入，Agent 节点不再自行导入模型工厂或
+全局工具表。会话标识由调用方提供，会话后端与数据库路径由
 `ConversationPersistenceConfig` 独立管理；FastAPI 和 Streamlit 都通过
 `create_application_services(...)` 完成组装，并把返回的服务实例传给
 `close_application_services(...)` 精确释放本实例资源。健康检查展示的是实际
 生效后端，因此 SQLite/PostgreSQL 降级到 Memory 时不会继续误报原配置值。
+FastAPI 与 Streamlit 均通过 `load_conversation_persistence_config()` 读取
+`CHECKPOINT_BACKEND` 和 `CHECKPOINT_DB_PATH`；未配置 backend 时安全回退到
+SQLite，不再由各启动入口分别硬编码持久化后端。
+当显式配置 `CHECKPOINT_BACKEND=postgres` 时，依赖缺失、连接串缺失、连接超时
+或建表失败都会终止应用启动，不会再静默降级到易失的 MemorySaver。SQLite
+初始化失败时仍保留面向本地开发的 MemorySaver 降级能力。
+`/api/v1/health/ready` 比较请求与实际启用的后端：例如请求 SQLite 却降级
+MemorySaver 时返回 503；显式 Memory 模式则正常就绪。原有 `/api/v1/health`
+和 `/health` 保留存活检查语义，不因后端不一致而返回 503。
+
+Agent 包内部依赖方向固定为：`application → workflow → policies / modeling / tool_flow`
+，其中 `contracts` 和 `configuration` 是被依赖的契约与配置层。模型、工具和
+持久化的具体 Adapter 只能由 `react_agent/runtime/` 注入，禁止反向导入到
+Agent 包。内部调用方统一使用子包路径；外部入口统一从 `react_agent.agent`
+导入公共对象。旧的根目录模块路径已经移除，LangGraph 显式节点名称保持不变。
+
+Agent 的正常终止由 `MAX_MODEL_ROUNDS`、`MAX_TOOL_BATCHES` 和
+`MAX_TOOL_RETRIES` 控制；`RECURSION_LIMIT` 只作为图异常循环的最后熔断器，
+并在 `AgentContext` 初始化时校验其足以覆盖所配置的业务预算。若模型在预算
+耗尽时已经生成工具调用，图会先写入 `TOOL_BUDGET_EXHAUSTED` ToolMessage
+闭合调用协议，再进入不绑定工具的 `finalize_model`，避免持久化悬空调用。
 
 ### 5.2 RAG：私有知识库检索
 
@@ -317,6 +359,16 @@ curl -N -X POST http://localhost:8000/api/v1/chat/stream \
 token | tool_call | tool_result | usage | done | error
 ```
 
+`usage.cost` 是本次模型调用的人民币估算值；未计价时为 `null`，并通过
+`cost_status` 标明状态。`done.total_cost` 仅累计已计价调用，新增的
+`currency=CNY` 与 `unpriced_model_count` 用于避免把未知价格误认为零费用。
+流式和非流式均按当前轮全部模型调用累计 token，再写入 API 每日 token 预算。
+流式请求若在模型返回 usage 前断连，进行中调用的精确 token 数可能不可得；
+预算仅记录截至断连已收到的模型结束事件用量。
+Prometheus 费用指标为 `llm_cost_cny_total`；原 USD 指标已停用，已有监控面板
+需要切换查询名。旧 Checkpoint 中的 `estimated_cost_usd` 仅作为兼容字段保留，
+新调用只写入 `estimated_cost_cny`。
+
 ### Prometheus 指标
 
 ```bash
@@ -351,7 +403,7 @@ cp .env.example .env
 根据自己的模型和工具服务填写：
 
 ```env
-LLM_PROVIDER=deepseek
+MODEL=deepseek/deepseek-flash
 DEEPSEEK_API_KEY=your_deepseek_api_key
 
 TAVILY_API_KEY=your_tavily_api_key
@@ -370,6 +422,12 @@ POSTGRES_DOCKER_DB_URL=postgresql://user:password@host.docker.internal:5432/fina
 
 连接串只保存在本地 `.env`，不要提交 GitHub。`data_sql/financials.db`
 仍是 SQL 工具的旧实验数据源，不属于 Agent 会话库；当前保留但不迁移，后续可独立重构或废弃。
+
+DeepSeek 费用估算由 `react_agent/configuration/deepseek_pricing.yaml` 独立管理。价格卡使用人民币、
+按北京时间区分峰时与闲时，并把旧模型名归一化到实际计费模型。API 返回未知模型
+时费用会显示为“未计价”并写入告警，不会静默记为零。修改价格卡后重启
+`agent-app` 即可生效；模型名变化仍通过 `.env` 的 `MODEL` 配置，并使用
+`docker compose ... up -d --force-recreate agent-app` 让新环境变量进入容器。
 
 ### 7.3 使用 Docker Compose 启动应用
 
@@ -506,17 +564,23 @@ pytest tests/api -q
 
 ### 8.2 RAG 检索与 RAGAS 评测
 
+评测实现按职责分为两个子包：`eval/dataset/` 负责数据模型、Chunk 数据源、
+分层抽样、证据校验、问答生成和数据集 Bundle；`eval/pipeline/` 负责检索、
+回答生成、回答行为裁判、RAGAS、聚合与报告。`eval.run_eval` 仅保留 CLI、
+运行配置解析和各评测阶段的顺序编排。数据集生成和审核分别使用
+`python -m eval.dataset` 与 `python -m eval.dataset.audit`。
+
 ```bash
 # 从当前知识库分层采样并生成 full/smoke/regression 候选集。
 # 此步骤会将抽样 chunk 发送给配置的外部 LLM，并产生模型费用。
-conda run -n new_agent python -m eval.dataset_generator \
+conda run -n new_agent python -m eval.dataset \
   --output eval/results/eval_dataset_docling_v1.candidate.jsonl \
   --max_chunks 150 --n_per_chunk 1 \
   --multi_chunk_ratio 0.25 --no_answer_count 20
 
 # 审核候选集：核对问题、答案、引文；通过项改为 review_status=approved。
 # 将定稿 full 集复制到 eval/dataset 后再严格审计。
-conda run -n new_agent python -m eval.audit_dataset \
+conda run -n new_agent python -m eval.dataset.audit \
   --dataset eval/dataset/eval_dataset_docling_v1.jsonl --strict
 
 # 日常检索回归：Hit@K、Precision@K、Recall@K、MRR、nDCG@K，
@@ -545,14 +609,14 @@ $compose = @('-f', 'docker-compose.yml', '-f', 'docker-compose.dev.yml')
 # 从 Knowledge Service API 读取当前 chunks，生成候选 QA 数据集。
 # 同时导出 full、smoke、regression 和 manifest；无答案项必须人工确认。
 docker compose @compose --profile eval run --rm eval-runner `
-  python -m eval.dataset_generator `
+  python -m eval.dataset `
   --output /app/eval-results/eval_dataset_docling_v1.candidate.jsonl `
   --max_chunks 150 --n_per_chunk 1 `
   --multi_chunk_ratio 0.25 --no_answer_count 20
 
 # 审核后将定稿文件放入宿主机 eval/dataset/，再严格审计
 docker compose @compose --profile eval run --rm eval-runner `
-  python -m eval.audit_dataset `
+  python -m eval.dataset.audit `
   --dataset /app/eval/dataset/eval_dataset_docling_v1.jsonl --strict
 
 # 无 LLM、禁用查询缓存的正式混合检索基线
@@ -716,7 +780,10 @@ react-agent-main/
     │   ├── agent/                   # Agent 图、节点、路由、状态、提示词和对话用例
     │   ├── conversations/           # 会话契约、Repository Port、管理用例和持久化 Adapter
     │   ├── runtime/                 # LLM、Tools、Agent、Conversations 与生命周期的应用级 Composition Root
-    │   ├── core/                    # 尚未迁出的全局配置
+    │   ├── configuration/           # 全局配置加载、校验与非敏感 YAML 默认值
+    │   │   ├── settings.py          # 环境变量、路径、配置模型与聚合入口
+    │   │   ├── config.yaml          # 工具层非敏感默认配置
+    │   │   └── deepseek_pricing.yaml # DeepSeek 价格卡
     │   ├── rag/                     # 独立 RAG 业务边界
     │   │   ├── contracts.py         # 来源、元数据、解析、查询、建库与健康状态契约
     │   │   ├── ports.py             # 解析、缓存、召回、精排、建库、知识库只读端口
@@ -736,8 +803,9 @@ react-agent-main/
     │   ├── tools/                   # RAG / Search / Excel / Word / Markdown / SQL
     │   ├── tooling/                 # ToolResult 公共契约与工具重试策略
     │   ├── models/                  # LLM Provider 工厂
+    │   ├── metering/                # 模型用量归一化、人民币计价与轮次投影
     │   ├── infrastructure/          # Redis 等共享技术适配器
-    │   ├── observability/           # 应用会话用量与日志
+    │   ├── observability/           # 已计算用量的日志与界面展示
     │   ├── mcp_server/              # MCP 工具注册与 stdio Server 模块
     │   │   ├── app.py               # 创建 MCP Server；默认注册 info/rag，admin 模式注册 health/warmup
     │   │   ├── info_tools.py        # server_info：当前可用工具与能力边界
@@ -748,7 +816,6 @@ react-agent-main/
     ├── eval/                        # RAGAS 评测脚本与数据生成
     ├── scripts/                     # PDF 检查、财务抽取、Redis 检查、历史管理
     ├── tests/                       # Streamlit 入口与 API 回归测试
-    ├── config.yaml                  # 运行时配置
     ├── mcp_rag_server.py            # MCP stdio 薄启动入口：关闭 tracing / 日志 / create_mcp_server
     ├── pyproject.toml
     ├── .env.example

@@ -7,7 +7,7 @@
 # Python 源码变化无需重建；依赖、Dockerfile 或系统库变化仍需重新构建镜像。
 services:
   knowledge-service:
-    # 开发模式监听两个服务端源码目录；config.yaml 变化仍需显式重启。
+    # 开发模式监听两个服务端源码目录；配置 YAML 变化仍需显式重启。
     environment:
       - KNOWLEDGE_SERVICE_EVALUATION_API_ENABLED=true
     command:
@@ -35,13 +35,6 @@ services:
       - type: bind
         source: ./knowledge_service
         target: /app/knowledge_service
-        read_only: true
-        bind:
-          create_host_path: false
-
-      - type: bind
-        source: ./config.yaml
-        target: /app/config.yaml
         read_only: true
         bind:
           create_host_path: false
@@ -88,14 +81,6 @@ services:
         bind:
           create_host_path: false
 
-      # 非敏感运行配置；修改后应重启容器。
-      - type: bind
-        source: ./config.yaml
-        target: /app/config.yaml
-        read_only: true
-        bind:
-          create_host_path: false
-
       # MCP stdio 薄启动入口。
       - type: bind
         source: ./mcp_rag_server.py
@@ -117,13 +102,6 @@ services:
       - type: bind
         source: ./eval
         target: /app/eval
-        read_only: true
-        bind:
-          create_host_path: false
-
-      - type: bind
-        source: ./config.yaml
-        target: /app/config.yaml
         read_only: true
         bind:
           create_host_path: false

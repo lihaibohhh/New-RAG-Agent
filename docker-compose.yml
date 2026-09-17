@@ -110,7 +110,7 @@ services:
       knowledge-service:
         condition: service_healthy
     volumes:
-      # Agent 只持有自己的 SQLite 会话状态；知识库与模型缓存归 Knowledge Service。
+      # SQLite 是未配置 PostgreSQL 时的本地持久化后端；知识库归 Knowledge Service。
       - ./data/agent-state:/app/data/agent-state
       - ./outputs:/app/outputs
       # SQL 工具只读查询结构化财务库，不把数据库烘焙进镜像。
@@ -120,6 +120,7 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379/0
       - SQL_DB_PATH=/app/data_sql/financials.db
+      - CHECKPOINT_BACKEND=${CHECKPOINT_BACKEND:-sqlite}
       - CHECKPOINT_DB_PATH=/app/data/agent-state/agent_checkpoints.sqlite3
       - OUTPUT_DIR=/app/outputs
       # 本机 Python 使用 POSTGRES_DB_URL；容器优先使用 host.docker.internal 版本。

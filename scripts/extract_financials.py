@@ -7,7 +7,7 @@ import time
 
 from itertools import groupby
 from react_agent.models import load_chat_model
-from react_agent.core.config import settings
+from react_agent.configuration.settings import settings
 
 
 DB_PATH = pathlib.Path(settings.tools.sql_store.DB_PATH)

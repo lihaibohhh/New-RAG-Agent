@@ -1,17 +1,26 @@
 from __future__ import annotations
 
-import json
 import ast
+import json
+from dataclasses import fields
 from pathlib import Path
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.tools import StructuredTool
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import StateGraph
 
-from react_agent.agent.tool_calls import extract_tool_call_ids
-from react_agent.agent.tool_policy import (
-    bound_tool_payload,
+from react_agent.agent.configuration.context import AgentContext
+from react_agent.agent.contracts.dependencies import AgentDependencies
+from react_agent.agent.contracts.state import InputState, State
+from react_agent.agent.tool_flow.budget import (
     count_successful_rag_calls_in_current_turn,
 )
+from react_agent.agent.tool_flow.calls import extract_tool_call_ids
+from react_agent.agent.tool_flow.payload import bound_tool_payload
+from react_agent.agent.workflow.graph import build_base_graph
+from react_agent.agent.workflow.nodes import call_model
 from react_agent.tooling.results import tool_error, tool_success
 from react_agent.tooling.retry import with_retry
 
@@ -20,21 +29,373 @@ def test_tool_call_ids_cover_valid_invalid_and_provider_payloads() -> None:
     valid = AIMessage(
         content="",
         tool_calls=[{"id": "valid-1", "name": "search", "args": {}}],
-        invalid_tool_calls=[
-            {"id": "invalid-1", "name": "search", "args": "{"}
-        ],
+        invalid_tool_calls=[{"id": "invalid-1", "name": "search", "args": "{"}],
     )
     provider_payload = AIMessage(
         content="",
         additional_kwargs={
-            "tool_calls": [
-                {"id": "raw-1", "type": "function", "function": {}}
-            ]
+            "tool_calls": [{"id": "raw-1", "type": "function", "function": {}}]
         },
     )
 
     assert extract_tool_call_ids(valid) == ["valid-1", "invalid-1"]
     assert extract_tool_call_ids(provider_payload) == ["raw-1"]
+
+
+@pytest.mark.asyncio
+async def test_last_step_tool_call_returns_a_mergeable_fallback() -> None:
+    class LastStepToolCallingModel:
+        def bind_tools(self, _tools):
+            return self
+
+        async def ainvoke(self, _messages, config=None):
+            return AIMessage(
+                id="last-step-tool-call",
+                content="",
+                tool_calls=[
+                    {
+                        "id": "call-1",
+                        "name": "query_internal_knowledge",
+                        "args": {"query": "仍需检索"},
+                    }
+                ],
+                usage_metadata={
+                    "input_tokens": 5,
+                    "output_tokens": 2,
+                    "total_tokens": 7,
+                },
+            )
+
+    dependencies = AgentDependencies(
+        config=AgentContext(
+            enable_history_truncation=False,
+        ),
+        model_provider=LastStepToolCallingModel,
+        tools=(),
+    )
+    builder = StateGraph(
+        State,
+        input_schema=InputState,
+        context_schema=AgentDependencies,
+    )
+    builder.add_node("call_model", call_model)
+    builder.add_edge("__start__", "call_model")
+    builder.add_edge("call_model", "__end__")
+    graph = builder.compile()
+
+    result = await graph.ainvoke(
+        {"messages": [HumanMessage(content="测试最后一步兜底")]},
+        context=dependencies,
+        config={"recursion_limit": 2},
+    )
+
+    assert "未继续执行新的工具调用" in result["messages"][-1].content
+    assert result["messages"][-1].usage_metadata["total_tokens"] == 7
+    assert len(result["debug_log"]) == 1
+    assert result["debug_log"][0].startswith("[call_model] is_last_step=True;")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recursion_limit", [11, 12, 13, 14])
+async def test_business_budget_closes_tool_calls_before_finalizing(
+    recursion_limit: int,
+) -> None:
+    class BoundToolCallingModel:
+        async def ainvoke(self, _messages, config=None):
+            return AIMessage(
+                id="budgeted-tool-call",
+                content="",
+                tool_calls=[
+                    {
+                        "id": "budget-call-1",
+                        "name": "query_internal_knowledge",
+                        "args": {"query": "继续检索"},
+                    }
+                ],
+            )
+
+    class FinalizingModel:
+        def __init__(self) -> None:
+            self.finalizer_messages = None
+
+        def bind_tools(self, _tools):
+            return BoundToolCallingModel()
+
+        async def ainvoke(self, messages, config=None):
+            self.finalizer_messages = messages
+            return AIMessage(content="根据现有信息生成的最终回答。")
+
+    model = FinalizingModel()
+    context = AgentContext(
+        recursion_limit=recursion_limit,
+        max_model_rounds=1,
+        max_tool_batches=1,
+        max_tool_retries=1,
+        enable_history_truncation=False,
+    )
+    dependencies = AgentDependencies(
+        config=context,
+        model_provider=lambda: model,
+        tools=(),
+    )
+    graph = build_base_graph().compile()
+
+    result = await graph.ainvoke(
+        {"messages": [HumanMessage(content="需要多次检索的问题")]},
+        context=dependencies,
+        config={"recursion_limit": context.recursion_limit},
+    )
+
+    messages = result["messages"]
+    assert isinstance(messages[-2], ToolMessage)
+    closed_payload = json.loads(messages[-2].content)
+    assert messages[-2].tool_call_id == "budget-call-1"
+    assert closed_payload["error"]["code"] == "TOOL_BUDGET_EXHAUSTED"
+    assert messages[-1].content == "根据现有信息生成的最终回答。"
+    assert result["termination_reason"] == "MODEL_ROUND_BUDGET_EXHAUSTED"
+    assert model.finalizer_messages is not None
+    assert any(
+        isinstance(message, ToolMessage) and message.tool_call_id == "budget-call-1"
+        for message in model.finalizer_messages
+    )
+
+
+def test_recursion_limit_must_cover_business_budget() -> None:
+    with pytest.raises(ValueError, match="recursion_limit 不足"):
+        AgentContext(recursion_limit=20)
+
+
+def test_agent_context_environment_loading_is_an_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MAX_MODEL_ROUNDS", "7")
+    monkeypatch.setenv("ENABLE_WEB_SEARCH", "false")
+
+    context = AgentContext()
+    explicit = AgentContext(max_model_rounds=9)
+
+    assert context.max_model_rounds == 7
+    assert context.enable_web_search is False
+    assert explicit.max_model_rounds == 9
+
+
+def test_agent_context_contains_only_agent_behavior_configuration() -> None:
+    assert {data_field.name for data_field in fields(AgentContext)} == {
+        "system_prompt",
+        "language",
+        "timezone",
+        "enable_tools",
+        "enable_web_search",
+        "max_tool_output_chars",
+        "recursion_limit",
+        "max_model_rounds",
+        "max_tool_batches",
+        "max_tool_retries",
+        "rag_call_limit",
+        "consecutive_failure_threshold",
+        "max_history_tokens",
+        "enable_history_truncation",
+    }
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_state_survives_graph_recompilation() -> None:
+    class RecordingModel:
+        def __init__(self) -> None:
+            self.calls: list[list[object]] = []
+
+        def bind_tools(self, _tools):
+            return self
+
+        async def ainvoke(self, messages, config=None):
+            self.calls.append(list(messages))
+            return AIMessage(content=f"answer-{len(self.calls)}")
+
+    model = RecordingModel()
+    context = AgentContext(
+        enable_history_truncation=False,
+    )
+    dependencies = AgentDependencies(
+        config=context,
+        model_provider=lambda: model,
+        tools=(),
+    )
+    checkpointer = MemorySaver()
+    run_config = {
+        "recursion_limit": context.recursion_limit,
+        "configurable": {"thread_id": "checkpoint-module-migration"},
+    }
+
+    first_graph = build_base_graph().compile(checkpointer=checkpointer)
+    await first_graph.ainvoke(
+        {"messages": [HumanMessage(content="first-question")]},
+        context=dependencies,
+        config=run_config,
+    )
+
+    second_graph = build_base_graph().compile(checkpointer=checkpointer)
+    result = await second_graph.ainvoke(
+        {"messages": [HumanMessage(content="second-question")]},
+        context=dependencies,
+        config=run_config,
+    )
+
+    assert result["messages"][-1].content == "answer-2"
+    second_input = model.calls[-1]
+    assert any(
+        isinstance(message, HumanMessage) and message.content == "first-question"
+        for message in second_input
+    )
+    assert any(
+        isinstance(message, AIMessage) and message.content == "answer-1"
+        for message in second_input
+    )
+
+
+@pytest.mark.asyncio
+async def test_rag_miss_is_finalized_by_tool_free_model() -> None:
+    class BoundRagCallingModel:
+        async def ainvoke(self, _messages, config=None):
+            return AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "rag-miss-1",
+                        "name": "query_internal_knowledge",
+                        "args": {"query": "不存在的资料"},
+                    }
+                ],
+            )
+
+    class FinalizingModel:
+        def __init__(self) -> None:
+            self.bind_count = 0
+
+        def bind_tools(self, _tools):
+            self.bind_count += 1
+            return BoundRagCallingModel()
+
+        async def ainvoke(self, _messages, config=None):
+            return AIMessage(content="知识库没有提供足够证据，当前无法确认。")
+
+    def query_internal_knowledge(query: str) -> str:
+        return json.dumps(
+            tool_success(
+                tool_name="query_internal_knowledge",
+                query=query,
+                data={"results": []},
+                meta={"has_relevant_content": False},
+            ),
+            ensure_ascii=False,
+        )
+
+    rag_tool = StructuredTool.from_function(
+        func=query_internal_knowledge,
+        name="query_internal_knowledge",
+        description="测试用知识库工具",
+    )
+    model = FinalizingModel()
+    context = AgentContext(
+        recursion_limit=20,
+        max_model_rounds=3,
+        max_tool_batches=2,
+        max_tool_retries=1,
+        consecutive_failure_threshold=1,
+        enable_history_truncation=False,
+    )
+    dependencies = AgentDependencies(
+        config=context,
+        model_provider=lambda: model,
+        tools=(rag_tool,),
+    )
+
+    result = (
+        await build_base_graph()
+        .compile()
+        .ainvoke(
+            {"messages": [HumanMessage(content="查询不存在的资料")]},
+            context=dependencies,
+            config={"recursion_limit": context.recursion_limit},
+        )
+    )
+
+    assert result["termination_reason"] == "RAG_CONSECUTIVE_MISS"
+    assert result["turn_tool_batches"] == 1
+    assert result["messages"][-1].content == "知识库没有提供足够证据，当前无法确认。"
+    assert model.bind_count == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_tool_batch_uses_bounded_recovery_path() -> None:
+    class RecoveringModel:
+        def __init__(self) -> None:
+            self.agent_calls = 0
+
+        def bind_tools(self, _tools):
+            return self
+
+        async def ainvoke(self, _messages, config=None):
+            self.agent_calls += 1
+            if self.agent_calls == 1:
+                return AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "id": "failed-tool-1",
+                            "name": "failing_tool",
+                            "args": {"query": "bad input"},
+                        }
+                    ],
+                )
+            return AIMessage(content="工具失败，当前无法完成该操作。")
+
+    def failing_tool(query: str) -> str:
+        return json.dumps(
+            tool_error(
+                tool_name="failing_tool",
+                query=query,
+                code="BAD_INPUT",
+                message="参数无效",
+            ),
+            ensure_ascii=False,
+        )
+
+    model = RecoveringModel()
+    context = AgentContext(
+        recursion_limit=20,
+        max_model_rounds=3,
+        max_tool_batches=2,
+        max_tool_retries=1,
+        enable_history_truncation=False,
+    )
+    dependencies = AgentDependencies(
+        config=context,
+        model_provider=lambda: model,
+        tools=(
+            StructuredTool.from_function(
+                func=failing_tool,
+                name="failing_tool",
+                description="始终返回结构化错误的测试工具",
+            ),
+        ),
+    )
+
+    result = (
+        await build_base_graph()
+        .compile()
+        .ainvoke(
+            {"messages": [HumanMessage(content="执行失败工具")]},
+            context=dependencies,
+            config={"recursion_limit": context.recursion_limit},
+        )
+    )
+
+    assert result["turn_model_rounds"] == 2
+    assert result["turn_tool_batches"] == 1
+    assert result["turn_tool_retries"] == 1
+    assert result["termination_reason"] is None
+    assert result["last_tool_batch_errors"][0]["tool"] == "failing_tool"
+    assert result["messages"][-1].content == "工具失败，当前无法完成该操作。"
 
 
 def test_rag_call_policy_counts_only_successes_in_current_turn() -> None:
@@ -174,6 +535,118 @@ def test_agent_does_not_depend_on_outbound_adapter_implementations() -> None:
         ]
         if imports:
             violations[str(path.relative_to(package_root))] = imports
+    assert violations == {}
+
+
+def test_agent_nodes_remain_thin_orchestration_adapters() -> None:
+    project_root = Path(__file__).parent.parent
+    nodes_root = project_root / "react_agent" / "agent" / "workflow" / "nodes"
+    forbidden_dependencies = (
+        "langgraph.prebuilt",
+        "react_agent.tooling",
+        "tiktoken",
+    )
+
+    imports = [
+        imported
+        for nodes_path in _python_sources(nodes_root)
+        for prefix in forbidden_dependencies
+        for imported in _imports_from(nodes_path, prefix)
+    ]
+
+    assert imports == []
+
+
+def test_agent_root_contains_only_public_package_api() -> None:
+    project_root = Path(__file__).parent.parent
+    agent_root = project_root / "react_agent" / "agent"
+    allowed_root_modules = {"__init__.py"}
+
+    assert {path.name for path in agent_root.glob("*.py")} == allowed_root_modules
+
+
+def test_removed_agent_module_paths_are_not_imported() -> None:
+    project_root = Path(__file__).parent.parent
+    removed_modules = {
+        "react_agent.agent.context",
+        "react_agent.agent.dependencies",
+        "react_agent.agent.graph",
+        "react_agent.agent.nodes",
+        "react_agent.agent.prompts",
+        "react_agent.agent.service",
+        "react_agent.agent.state",
+        "react_agent.agent.tool_calls",
+        "react_agent.agent.tool_policy",
+        "react_agent.agent.usage",
+    }
+    violations: dict[str, list[str]] = {}
+
+    for source_path in _python_sources(project_root):
+        imports = [
+            imported
+            for removed in removed_modules
+            for imported in _imports_from(source_path, removed)
+            if imported == removed or imported.startswith(f"{removed}.")
+        ]
+        if imports:
+            violations[str(source_path.relative_to(project_root))] = imports
+
+    assert violations == {}
+
+
+def test_agent_subpackages_follow_dependency_direction() -> None:
+    project_root = Path(__file__).parent.parent
+    agent_root = project_root / "react_agent" / "agent"
+    constraints = {
+        "application": (
+            "react_agent.agent.modeling",
+            "react_agent.agent.tool_flow",
+            "react_agent.agent.workflow",
+        ),
+        "contracts": (
+            "react_agent.agent.modeling",
+            "react_agent.agent.tool_flow",
+            "react_agent.agent.workflow",
+        ),
+        "configuration": (
+            "react_agent.agent.contracts",
+            "react_agent.agent.modeling",
+            "react_agent.agent.tool_flow",
+            "react_agent.agent.workflow",
+        ),
+        "policies": (
+            "react_agent.agent.configuration",
+            "react_agent.agent.contracts",
+            "react_agent.agent.modeling",
+            "react_agent.agent.tool_flow",
+            "react_agent.agent.workflow",
+        ),
+        "prompting": (
+            "react_agent.agent.configuration",
+            "react_agent.agent.contracts",
+            "react_agent.agent.modeling",
+            "react_agent.agent.policies",
+            "react_agent.agent.tool_flow",
+            "react_agent.agent.workflow",
+        ),
+        "modeling": ("react_agent.agent.workflow",),
+        "tool_flow": (
+            "react_agent.agent.modeling",
+            "react_agent.agent.workflow",
+        ),
+    }
+    violations: dict[str, list[str]] = {}
+
+    for package_name, forbidden_prefixes in constraints.items():
+        for source_path in _python_sources(agent_root / package_name):
+            imports = [
+                imported
+                for prefix in forbidden_prefixes
+                for imported in _imports_from(source_path, prefix)
+            ]
+            if imports:
+                violations[str(source_path.relative_to(project_root))] = imports
+
     assert violations == {}
 
 

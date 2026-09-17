@@ -5,10 +5,12 @@ import sys
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
+
 load_dotenv()
 
 # ── JSON 日志必须最先装配，确保后续所有 logger 都输出 JSON ──────────────────────
 from api.middleware import setup_json_logging
+
 setup_json_logging()
 
 from fastapi import FastAPI
@@ -16,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import ValidationError
 
 from api.settings import APISettings
-from api.errors import register_exception_handlers
+from api.errors import AppError, register_exception_handlers
 from api.middleware import RequestIDMiddleware
 from api.dependencies import get_runtime_status, shutdown_services, startup_init
 from api.metrics import register_routes
@@ -80,6 +82,7 @@ app.include_router(v1_chat_router, prefix="/api/v1")
 # v1 会话 CRUD：/api/v1/sessions/{id}/history、DELETE /api/v1/sessions/{id}
 app.include_router(v1_sessions_router, prefix="/api/v1")
 
+
 # ── 健康检查 ───────────────────────────────────────────────────────────────────
 async def _health_data() -> HealthResponse:
     status = await get_runtime_status()
@@ -94,6 +97,27 @@ async def _health_data() -> HealthResponse:
 async def health_v1():
     """规范健康检查端点"""
     return await _health_data()
+
+
+@app.get("/api/v1/health/ready", response_model=HealthResponse, tags=["system"])
+async def health_ready():
+    """Readiness fails when the requested checkpoint backend is unavailable."""
+    status = await get_runtime_status()
+    if not status.ready:
+        raise AppError(
+            status=503,
+            title="Service Unavailable",
+            detail=(
+                "Agent 尚未就绪：请求的会话存储后端为 "
+                f"{status.requested_checkpoint_backend}，实际后端为 "
+                f"{status.checkpoint_backend}。"
+            ),
+        )
+    return HealthResponse(
+        status="ok",
+        agent_initialized=status.agent_initialized,
+        checkpoint_backend=status.checkpoint_backend,
+    )
 
 
 @app.get("/health", response_model=HealthResponse, tags=["system"])
@@ -116,6 +140,7 @@ register_routes(app)
 # ── 本地启动（开发用） ──────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(
         "api.main:app",
         host="0.0.0.0",

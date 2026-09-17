@@ -20,7 +20,8 @@ def _score_with_gate(
     reranker: Any,
     pairs: list[tuple[str, str]],
     gate: threading.BoundedSemaphore,
-) -> tuple[list[float], float, float, int]:
+    batch_size: int,
+) -> tuple[list[float], float, float, int, int]:
     """在指定并发闸门内执行同步评分。"""
     global _inference_pending
     queued_at = time.perf_counter()
@@ -31,9 +32,14 @@ def _score_with_gate(
         gate.acquire()
         queue_wait = time.perf_counter() - queued_at
         inference_started = time.perf_counter()
-        scores = [float(score) for score in reranker.score(pairs)]
+        scores: list[float] = []
+        batch_count = 0
+        for start in range(0, len(pairs), batch_size):
+            batch = pairs[start : start + batch_size]
+            scores.extend(float(score) for score in reranker.score(batch))
+            batch_count += 1
         inference_elapsed = time.perf_counter() - inference_started
-        return scores, queue_wait, inference_elapsed, pending
+        return scores, queue_wait, inference_elapsed, pending, batch_count
     finally:
         gate.release()
         with _inference_pending_lock:
@@ -48,6 +54,7 @@ class RerankerProviderAdapter:
         *,
         device: str,
         inference_concurrency: int,
+        batch_size: int,
         model_name: str | None = None,
         threshold: float | None = None,
     ) -> None:
@@ -55,12 +62,15 @@ class RerankerProviderAdapter:
             raise ValueError("Reranker device 不能为空")
         if inference_concurrency < 1:
             raise ValueError("Reranker inference_concurrency 必须大于 0")
+        if batch_size < 1:
+            raise ValueError("Reranker batch_size 必须大于 0")
         self._device = device
         self._model_name = model_name or os.getenv(
             "RERANKER_MODEL",
             "BAAI/bge-reranker-v2-m3",
         )
         self._threshold = threshold
+        self._batch_size = batch_size
         self._model: Any | None = None
         self._model_lock = threading.Lock()
         self._gate = threading.BoundedSemaphore(inference_concurrency)
@@ -93,11 +103,14 @@ class RerankerProviderAdapter:
 
     async def warmup(self) -> None:
         model = await asyncio.to_thread(self._get_model)
-        _, queue_wait, inference_elapsed, pending = await asyncio.to_thread(
-            _score_with_gate,
-            model,
-            [("知识库检索预热", "这是用于初始化精排模型计算图的预热文本。")],
-            self._gate,
+        _, queue_wait, inference_elapsed, pending, _batch_count = (
+            await asyncio.to_thread(
+                _score_with_gate,
+                model,
+                [("知识库检索预热", "这是用于初始化精排模型计算图的预热文本。")],
+                self._gate,
+                self._batch_size,
+            )
         )
         logger.info(
             "[RAG] Reranker warmup queue_wait=%.3fs inference=%.3fs pending=%s",
@@ -119,16 +132,21 @@ class RerankerProviderAdapter:
         try:
             model = await asyncio.to_thread(self._get_model)
             pairs = [(query, document.content) for document in documents]
-            scores, queue_wait, inference_elapsed, pending = await asyncio.to_thread(
-                _score_with_gate,
-                model,
-                pairs,
-                self._gate,
+            scores, queue_wait, inference_elapsed, pending, batch_count = (
+                await asyncio.to_thread(
+                    _score_with_gate,
+                    model,
+                    pairs,
+                    self._gate,
+                    self._batch_size,
+                )
             )
             logger.info(
-                "[RAG] Reranker scored pairs=%s queue_wait=%.3fs "
-                "inference=%.3fs pending=%s",
+                "[RAG] Reranker scored pairs=%s batches=%s batch_size=%s "
+                "queue_wait=%.3fs inference=%.3fs pending=%s",
                 len(pairs),
+                batch_count,
+                self._batch_size,
                 queue_wait,
                 inference_elapsed,
                 pending,

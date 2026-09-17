@@ -10,7 +10,7 @@ from multiprocessing import Pool, cpu_count
 from pathlib import Path
 from typing import Any
 
-from react_agent.core.config import settings
+from react_agent.configuration.settings import settings
 from react_agent.rag.contracts import IngestionReport, RagDocument
 from react_agent.rag.ingestion.document_service import (
     SUPPORTED_EXTENSIONS,

@@ -14,25 +14,27 @@ import os
 
 # TAVILY_API_KEY 通过 .env / 系统环境变量提供（load_dotenv() 已加载），不在源码中硬编码
 if not os.environ.get("TAVILY_API_KEY"):
-    logging.getLogger(__name__).warning("[启动] 未检测到 TAVILY_API_KEY 环境变量，search 工具可能不可用")
+    logging.getLogger(__name__).warning(
+        "[启动] 未检测到 TAVILY_API_KEY 环境变量，search 工具可能不可用"
+    )
 
 from react_agent.agent import AgentContext
-from react_agent.conversations import ConversationPersistenceConfig
+from react_agent.conversations import load_conversation_persistence_config
 from react_agent.runtime import (
     close_application_services,
     create_application_services,
     warmup_application_services,
 )
-from react_agent.observability import (
-    log_usage,
-    extract_cumulative_snapshot,
-    format_usage_for_user,
+from react_agent.observability.display import (
     SessionUsageTracker,
+    format_cost_cny,
+    format_usage_for_user,
 )
+from react_agent.metering.turn import extract_cumulative_snapshot, extract_usage
+from react_agent.observability import log_usage
 
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
@@ -68,14 +70,8 @@ def get_services_and_loop():
 
     services = run(
         create_application_services(
-            agent_context=AgentContext(model="deepseek/deepseek-v4-flash"),
-            conversation_config=ConversationPersistenceConfig(
-                checkpoint_backend="postgres",
-                checkpoint_db_path=os.getenv(
-                    "CHECKPOINT_DB_PATH",
-                    "./data/agent-state/agent_checkpoints.sqlite3",
-                ),
-            ),
+            agent_context=AgentContext(),
+            conversation_config=load_conversation_persistence_config(),
         )
     )
 
@@ -115,6 +111,9 @@ if "messages" not in st.session_state:
 # ▸ 新增：会话级用量追踪器
 if "usage_tracker" not in st.session_state:
     st.session_state.usage_tracker = SessionUsageTracker()
+elif not hasattr(st.session_state.usage_tracker, "total_cost_cny"):
+    # 开发热重载时丢弃旧版美元计价 Tracker，避免旧会话对象缺少新字段。
+    st.session_state.usage_tracker = SessionUsageTracker()
 
 # ▸ 新增：最近一轮的用量展示数据（供侧边栏渲染）
 if "last_turn_display" not in st.session_state:
@@ -136,7 +135,13 @@ def render_stats(placeholder):
 
         col1, col2 = st.columns(2)
         col1.metric("对话轮数", f"{tracker.turn_count}")
-        col2.metric("累计成本", f"¥{tracker.total_cost_usd * 7.2:.2f}")
+        col2.metric(
+            "累计成本",
+            format_cost_cny(
+                tracker.total_cost_cny,
+                unpriced_count=tracker.total_unpriced_model_calls,
+            ),
+        )
 
         col3, col4 = st.columns(2)
         col3.metric("模型调用", f"{tracker.total_llm_calls} 次")
@@ -145,16 +150,19 @@ def render_stats(placeholder):
         with st.expander("查看每轮明细"):
             for turn in tracker.turn_usages:
                 latency = turn["latency_ms"]
-                cost = turn.get("estimated_cost_usd", 0)
+                cost_text = format_cost_cny(
+                    turn.get("estimated_cost_cny", 0),
+                    unpriced_count=int(turn.get("unpriced_model_count", 0)),
+                )
                 tokens = turn.get("total_tokens", 0)
                 st.text(
                     f"第 {turn['turn']} 轮 | "
                     f"{latency / 1000:.1f}s | "
                     f"{tokens:,} tokens | "
-                    f"¥{cost * 7.2:.3f}"
+                    f"{cost_text}"
                 )
 
-        warning = tracker.check_budget(limit_usd=1.0)
+        warning = tracker.check_budget(limit_cny=7.2)
         if warning:
             st.warning(warning)
 
@@ -191,14 +199,12 @@ if prompt := st.chat_input("请输入您的问题..."):
 
     with st.chat_message("assistant"):
         with st.spinner("Agent 正在思考并调度工具..."):
-
             # ▸ 新增：计时
             t0 = time.perf_counter()
 
             result = run_async(
                 agent.invoke(
-                    [HumanMessage(content=prompt)],
-                    thread_id=st.session_state.thread_id
+                    [HumanMessage(content=prompt)], thread_id=st.session_state.thread_id
                 )
             )
 
@@ -207,14 +213,16 @@ if prompt := st.chat_input("请输入您的问题..."):
             final_ai_msg = result["messages"][-1].content
 
             # ▸ 新增：三层用量处理
-            # 第一层 (运维)：写入结构化日志（传入上一轮快照做差值）
-            usage = log_usage(
-                result,
+            # 第一层 (计量)：根据上一轮快照计算增量
+            usage = extract_usage(result, st.session_state.prev_usage_snapshot)
+
+            # 第二层 (观测)：只记录已计算的用量
+            log_usage(
+                usage,
                 username=st.session_state.username,
                 thread_id=st.session_state.thread_id,
                 question=prompt,
                 latency_ms=latency_ms,
-                prev_snapshot=st.session_state.prev_usage_snapshot,
             )
 
             # ▸ 保存本轮结束时的累计快照，供下一轮做差值
@@ -222,20 +230,18 @@ if prompt := st.chat_input("请输入您的问题..."):
             snapshot["tool_runs_count"] = len(result.get("tool_runs", []))
             st.session_state.prev_usage_snapshot = snapshot
 
-            # 第二层 (业务)：累计到会话级追踪器
+            # 第三层 (界面)：累计到会话级追踪器
             st.session_state.usage_tracker.record_turn(usage, latency_ms)
             render_stats(stats_placeholder)  # ← 本轮数据写入后立即刷新侧边栏
 
-            # 第三层 (用户)：生成展示文本
+            # 第四层 (用户)：生成展示文本
             usage_display = format_usage_for_user(usage, latency_ms)
             st.session_state.last_turn_display = usage_display
-
 
             def stream_data(text):
                 for char in text:
                     yield char
                     time.sleep(0.015)
-
 
             st.write_stream(stream_data(final_ai_msg))
 
@@ -248,8 +254,10 @@ if prompt := st.chat_input("请输入您的问题..."):
             parts = [f"{k}: {v}" for k, v in usage_display.items()]
             st.caption(" · ".join(parts))
 
-    st.session_state.messages.append({
-        "role": "assistant",
-        "content": final_ai_msg,
-        "usage_display": usage_display,  # ▸ 随消息存储，翻阅历史时仍可见
-    })
+    st.session_state.messages.append(
+        {
+            "role": "assistant",
+            "content": final_ai_msg,
+            "usage_display": usage_display,  # ▸ 随消息存储，翻阅历史时仍可见
+        }
+    )

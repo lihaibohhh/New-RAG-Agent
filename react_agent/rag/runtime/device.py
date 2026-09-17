@@ -7,7 +7,7 @@ import os
 
 import torch
 
-from react_agent.core.config import RagProfile, settings
+from react_agent.configuration.settings import RagProfile, settings
 
 
 logger = logging.getLogger(__name__)
