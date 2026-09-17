@@ -5,21 +5,19 @@ from types import SimpleNamespace
 
 import pytest
 
-import eval.run_eval as eval_runner
-from eval.answerability_metrics import (
+import eval.pipeline.ragas_runner as ragas_runner
+from eval.dataset.audit import audit_records
+from eval.pipeline.answer_judge import judge_answerability_sync
+from eval.pipeline.metrics import (
     aggregate_answerability_metrics,
+    aggregate_retrieval_metrics,
     evaluate_answer_behavior,
+    evaluate_retrieval,
 )
-from eval.audit_dataset import audit_records
-from eval.run_eval import (
-    _judge_answerability_sync,
+from eval.pipeline.reporting import (
     compute_summary,
     write_csv_detail,
     write_json_summary,
-)
-from eval.retrieval_metrics import (
-    aggregate_retrieval_metrics,
-    evaluate_retrieval,
 )
 
 
@@ -246,7 +244,7 @@ def test_answerability_judge_compares_behavior_with_dataset_label() -> None:
         },
     ]
 
-    judged = _judge_answerability_sync(records, _FakeAnswerabilityJudge())
+    judged = judge_answerability_sync(records, _FakeAnswerabilityJudge())
 
     assert judged[0]["answerability_outcome"] == "correct_answer"
     assert judged[1]["answerability_outcome"] == "correct_abstention"
@@ -271,7 +269,7 @@ def test_answerability_judge_retries_a_missing_case_individually() -> None:
     ]
     judge = _OmittingAnswerabilityJudge()
 
-    judged = _judge_answerability_sync(records, judge)
+    judged = judge_answerability_sync(records, judge)
 
     assert judge.invoke_count == 2
     assert judged[0]["answerability_outcome"] == "correct_answer"
@@ -339,16 +337,16 @@ def test_build_ragas_llm_uses_deepseek_openai_compatible_client(
         ),
         llm=SimpleNamespace(llm_timeout=60, llm_retries=2),
     )
-    monkeypatch.setattr(eval_runner, "settings", fake_settings)
-    monkeypatch.setattr(eval_runner, "AsyncOpenAI", fake_async_openai)
+    monkeypatch.setattr(ragas_runner, "settings", fake_settings)
+    monkeypatch.setattr(ragas_runner, "AsyncOpenAI", fake_async_openai)
     monkeypatch.setattr(
-        eval_runner,
+        ragas_runner,
         "ragas_llm_factory",
         fake_llm_factory,
         raising=False,
     )
 
-    result = eval_runner._build_ragas_llm("deepseek/deepseek-chat")
+    result = ragas_runner.build_ragas_llm("deepseek/deepseek-chat")
 
     assert result is ragas_llm
     assert captured["client_kwargs"] == {
@@ -384,28 +382,28 @@ async def test_ragas_collections_only_score_answerable_records(monkeypatch) -> N
             calls[self.name].append(kwargs)
             return SimpleNamespace(value=self.value)
 
-    monkeypatch.setattr(eval_runner, "_RAGAS_OK", True)
+    monkeypatch.setattr(ragas_runner, "_RAGAS_OK", True)
     monkeypatch.setattr(
-        eval_runner,
+        ragas_runner,
         "ContextPrecision",
         lambda **_kwargs: FakeMetric("context_precision", 1.0),
         raising=False,
     )
     monkeypatch.setattr(
-        eval_runner,
+        ragas_runner,
         "ContextRecall",
         lambda **_kwargs: FakeMetric("context_recall", 0.75),
         raising=False,
     )
     monkeypatch.setattr(
-        eval_runner,
+        ragas_runner,
         "Faithfulness",
         lambda **_kwargs: FakeMetric("faithfulness", 0.9),
         raising=False,
     )
     monkeypatch.setattr(
-        eval_runner,
-        "_build_ragas_llm",
+        ragas_runner,
+        "build_ragas_llm",
         lambda model_ref: captured.setdefault("model_ref", model_ref)
         and evaluator_llm,
     )
@@ -426,7 +424,7 @@ async def test_ragas_collections_only_score_answerable_records(monkeypatch) -> N
         },
     ]
 
-    evaluated = await eval_runner._run_ragas_async(
+    evaluated = await ragas_runner.run_ragas(
         records,
         "deepseek/deepseek-chat",
         retrieval_only=False,
@@ -475,28 +473,28 @@ async def test_ragas_metric_failure_is_recorded_without_stopping_batch(
         async def ascore(self, **_kwargs):
             raise RuntimeError("synthetic metric failure")
 
-    monkeypatch.setattr(eval_runner, "_RAGAS_OK", True)
-    monkeypatch.setattr(eval_runner, "_build_ragas_llm", lambda _model_ref: object())
+    monkeypatch.setattr(ragas_runner, "_RAGAS_OK", True)
+    monkeypatch.setattr(ragas_runner, "build_ragas_llm", lambda _model_ref: object())
     monkeypatch.setattr(
-        eval_runner,
+        ragas_runner,
         "ContextPrecision",
         lambda **_kwargs: FailingMetric(),
         raising=False,
     )
     monkeypatch.setattr(
-        eval_runner,
+        ragas_runner,
         "ContextRecall",
         lambda **_kwargs: SuccessfulMetric(),
         raising=False,
     )
     monkeypatch.setattr(
-        eval_runner,
+        ragas_runner,
         "Faithfulness",
         lambda **_kwargs: SuccessfulMetric(),
         raising=False,
     )
 
-    evaluated = await eval_runner._run_ragas_async(
+    evaluated = await ragas_runner.run_ragas(
         [
             {
                 "question": "测试问题",

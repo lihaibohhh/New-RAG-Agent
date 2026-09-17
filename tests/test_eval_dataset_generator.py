@@ -5,7 +5,7 @@ import json
 import pytest
 from langchain_core.documents import Document
 
-from eval.dataset_generator import (
+from eval.dataset import (
     EvidenceQuote,
     EvidenceUnit,
     QAPair,
