@@ -44,7 +44,7 @@ class APISettings(BaseSettings):
 
         由 main.py 在 app 构造前显式调用，不在 import 时自动执行。
         """
-        from react_agent.core.config import settings as _s
+        from react_agent.configuration.settings import settings as _s
 
         model: str = (_s.llm.model or "").strip()
         provider = model.split("/")[0].lower() if "/" in model else model.lower()

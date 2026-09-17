@@ -7,13 +7,17 @@ from typing import Any
 
 _LAZY_SUBPACKAGES = {
     "agent",
+    "configuration",
     "conversations",
-    "core",
+    "infrastructure",
     "mcp_server",
+    "metering",
+    "models",
+    "observability",
     "rag",
     "runtime",
+    "tooling",
     "tools",
-    "utils",
 }
 
 

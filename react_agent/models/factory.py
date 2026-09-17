@@ -6,7 +6,7 @@ from functools import lru_cache
 
 from langchain_core.language_models.chat_models import BaseChatModel
 
-from react_agent.core.config import settings
+from react_agent.configuration.settings import settings
 
 
 @dataclass(frozen=True)
@@ -23,13 +23,13 @@ def _parse_model_ref(model_ref: str) -> tuple[str, str]:
     model_ref = (model_ref or "").strip()
     if not model_ref or "/" not in model_ref:
         raise ValueError(
-            "AgentContext.model 必须是 'provider/model-name' 格式，"
+            "模型引用必须是 'provider/model-name' 格式，"
             "例如 'openai/gpt-4.1-mini'"
         )
     provider, model_name = (part.strip() for part in model_ref.split("/", 1))
     provider = provider.lower()
     if not provider or not model_name:
-        raise ValueError("AgentContext.model 的 provider 和 model-name 均不能为空")
+        raise ValueError("模型引用中的 provider 和 model-name 均不能为空")
     return provider, model_name
 
 

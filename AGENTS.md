@@ -15,7 +15,7 @@
 - `react_agent/observability/`：应用会话用量记录与展示；RAG 专属计时归 `react_agent/rag/observability.py`。
 - `react_agent/conversations/`：会话契约、管理用例、Repository Port 与 Checkpointer 基础设施。
 - `react_agent/runtime/`：选择并注入 LLM、Agent Tools、Conversation 与共享 Checkpointer，管理应用实例生命周期。
-- `react_agent/core/`：当前仍在使用的全局配置；Agent 编排代码不得放回此目录。
+- `react_agent/configuration/`：应用级配置模型、环境/YAML 加载与非敏感默认配置文件；Agent 编排代码不得放入此目录。
 - `react_agent/rag/`：Query、Ingestion、Operations 用例以及 PDF 解析、BM25/向量召回、精排和缓存适配器；实例由 `rag/runtime/` 组装。
 - `react_agent/tools/`：RAG、搜索、Excel、Word、Markdown 和 SQL 协议适配器；Agent 实际工具集合由 `react_agent/runtime/container.py` 组装。
 - `react_agent/mcp_server/`：MCP Server 和工具注册；根目录的 `mcp_rag_server.py` 是 stdio 薄启动入口。
@@ -24,7 +24,7 @@
 - `tests/test_agent.py`：Streamlit 应用入口，不是普通单元测试。
 - `eval/`：RAGAS 数据集生成与评测，可能访问真实模型、知识库和外部服务。
 - `scripts/`：数据检查、财务数据抽取、Redis 验证和调试脚本。
-- `config.yaml`、`.env`：工具/核心参数与运行环境配置。
+- `react_agent/configuration/config.yaml`、`react_agent/configuration/deepseek_pricing.yaml`：非敏感工具默认值与价格卡；根目录 `.env`：本地运行环境配置。
 
 ## 环境与命令约定
 
@@ -44,8 +44,8 @@
 
 - 从 `.env.example` 复制本地 `.env`，按需配置 DeepSeek/OpenAI、Tavily、Redis、PostgreSQL 等服务。
 - 不读取、输出、记录或提交 `.env` 中的真实密钥；日志、异常消息、测试夹具和示例中也不得泄露凭据。
-- 项目配置入口是 `react_agent/core/config.py`。配置优先级为：Conda/系统环境变量 > `.env` > 代码默认值 > `config.yaml` 默认值。
-- 新增配置时同步更新配置模型和 `.env.example`；只有工具层的非敏感默认值适合放入 `config.yaml`。
+- 项目配置入口是 `react_agent/configuration/settings.py`。工具配置优先级为：Conda/系统环境变量 > `.env` > `react_agent/configuration/config.yaml` > 代码默认值。
+- 新增配置时同步更新配置模型和 `.env.example`；只有工具层的非敏感默认值适合放入 `react_agent/configuration/config.yaml`。
 - 测试应使用假密钥和 mock/fake 依赖。不要为普通回归测试调用真实 LLM、Tavily、Redis、PostgreSQL 或外网服务。
 
 ## 实现约定

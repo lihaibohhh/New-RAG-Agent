@@ -6,11 +6,11 @@
 
 生成当前知识库的候选数据集：
 
-``conda run -n new_agent python -m eval.dataset_generator``
+``conda run -n new_agent python -m eval.dataset``
 
 数据集标签审计：
 
-``conda run -n new_agent python -m eval.audit_dataset --strict``
+``conda run -n new_agent python -m eval.dataset.audit --strict``
 
 端到端评测会运行 RAGAS 和回答/拒答裁判并访问真实模型，仅在配置齐备且
 明确需要时运行：

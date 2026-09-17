@@ -1,9 +1,11 @@
 from __future__ import annotations
 import asyncio
 import logging
-import os
 from react_agent.agent import AgentContext, AgentService
-from react_agent.conversations import ConversationPersistenceConfig, ConversationService
+from react_agent.conversations import (
+    ConversationService,
+    load_conversation_persistence_config,
+)
 from react_agent.runtime import (
     ApplicationServices,
     ApplicationStatus,
@@ -31,16 +33,8 @@ async def _get_services() -> ApplicationServices:
         _services_lock = asyncio.Lock()
     async with _services_lock:
         if _services is None:
-            agent_context = AgentContext(
-                model="deepseek/deepseek-chat",
-            )
-            conversation_config = ConversationPersistenceConfig(
-                checkpoint_backend="sqlite",
-                checkpoint_db_path=os.getenv(
-                    "CHECKPOINT_DB_PATH",
-                    "./data/agent-state/agent_checkpoints.sqlite3",
-                ),
-            )
+            agent_context = AgentContext()
+            conversation_config = load_conversation_persistence_config()
             _services = await create_application_services(
                 agent_context=agent_context,
                 conversation_config=conversation_config,

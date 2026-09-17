@@ -38,7 +38,8 @@ redis_data/
 # Private datasets / evaluation outputs
 data/
 FinancialResearchReportData/
-eval/dataset/
+eval/dataset/*
+!eval/dataset/*.py
 eval/results/
 ingestion_metrics.jsonl
 

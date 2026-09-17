@@ -1,21 +1,25 @@
 """Application composition root for process-level services and adapters."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any
 
-from react_agent.agent.context import AgentContext
-from react_agent.agent.dependencies import AgentDependencies
-from react_agent.agent.graph import compile_agent_graph
-from react_agent.agent.service import AgentService
+from react_agent.agent.configuration.context import AgentContext
+from react_agent.agent.contracts.dependencies import AgentDependencies
+from react_agent.agent.workflow.graph import compile_agent_graph
+from react_agent.agent.application.service import AgentService
+from react_agent.conversations.configuration import normalize_checkpoint_backend
 from react_agent.conversations.contracts import ConversationPersistenceConfig
-from react_agent.conversations.infrastructure.checkpointer_factory import CheckpointerFactory
+from react_agent.conversations.infrastructure.checkpointer_factory import (
+    CheckpointerFactory,
+)
 from react_agent.conversations.infrastructure.langgraph_repository import (
     LangGraphConversationRepository,
 )
 from react_agent.conversations.service import ConversationService
-from react_agent.core.config import settings
+from react_agent.configuration.settings import settings
 from react_agent.rag.runtime import (
     create_configured_rag_runtime,
 )
@@ -26,6 +30,7 @@ from react_agent.tools.markdown import create_markdown_tool
 from react_agent.tools.rag import create_rag_tool
 from react_agent.tools.search import create_search_tool
 from react_agent.models import load_chat_model
+from react_agent.metering.pricing import estimate_configured_model_cost
 
 
 @dataclass(frozen=True)
@@ -45,7 +50,15 @@ class ApplicationStatus:
     """Read-only process status exposed to health-check adapters."""
 
     agent_initialized: bool
+    requested_checkpoint_backend: str
     checkpoint_backend: str
+
+    @property
+    def ready(self) -> bool:
+        """Only report ready when the selected persistence backend is active."""
+        return self.agent_initialized and (
+            self.requested_checkpoint_backend == self.checkpoint_backend
+        )
 
 
 async def create_application_services(
@@ -65,7 +78,9 @@ async def create_application_services(
             LangGraphConversationRepository(checkpointer)
         ),
         conversation_persistence=conversation_config,
-        effective_checkpoint_backend=checkpointer_factory.effective_backend(checkpointer),
+        effective_checkpoint_backend=checkpointer_factory.effective_backend(
+            checkpointer
+        ),
         _checkpointer_factory=checkpointer_factory,
         _rag_runtime=rag_runtime,
     )
@@ -83,7 +98,7 @@ def _compose_agent_dependencies(
     )
     search_tool = create_search_tool(
         client_provider=_create_tavily_client,
-        max_results=agent_context.max_search_results,
+        max_results=settings.tools.search.max_search_results,
         api_key_configured=bool(settings.secrets.TAVILY_API_KEY.strip()),
         max_retries=settings.tools.search.max_retries,
         timeout=settings.tools.search.timeout,
@@ -105,8 +120,10 @@ def _compose_agent_dependencies(
     )
     return AgentDependencies(
         config=agent_context,
-        model_provider=partial(load_chat_model, agent_context.model),
+        model_provider=partial(load_chat_model, settings.llm.model),
         tools=tools,
+        model_ref=settings.llm.model,
+        cost_estimator=estimate_configured_model_cost,
     )
 
 
@@ -121,6 +138,9 @@ def get_application_status(services: ApplicationServices) -> ApplicationStatus:
     """Project the object graph to the minimal health-check contract."""
     return ApplicationStatus(
         agent_initialized=services.agent.initialized,
+        requested_checkpoint_backend=normalize_checkpoint_backend(
+            services.conversation_persistence.checkpoint_backend
+        ),
         checkpoint_backend=services.effective_checkpoint_backend,
     )
 

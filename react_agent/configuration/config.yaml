@@ -1,0 +1,39 @@
+# 工具层非敏感默认配置；环境变量可覆盖相应字段。
+tools:
+  rag:
+    max_retries: 2
+    max_content_chars: 800
+    # Agent/MCP 调用 Knowledge Service 的客户端预算，与服务端 CPU/CUDA 档位无关。
+    client_timeout: 150
+    # CPU 档面向 6 核/16GB 个人开发机：单精排、较长预算、适中候选池。
+    cpu_timeout: 120
+    cpu_rerank_candidates: 12
+    cpu_reranker_concurrency: 1
+    cpu_reranker_batch_size: 2
+    # CUDA 档保留更宽候选池；个人项目默认也只运行一个精排任务。
+    cuda_timeout: 45
+    cuda_rerank_candidates: 20
+    cuda_reranker_concurrency: 1
+    cuda_reranker_batch_size: 32
+    rerank_top_n: 5
+
+  excel:
+    # 默认工作模式 (可选: timestamp, overwrite, append)
+    mode: "timestamp"
+    # 是否保留时间戳备份
+    keep_backup: false
+
+  search:
+    max_retries: 2
+    timeout: 15
+    max_search_results: 10
+
+  vector_store:
+    data_dir: "./data"
+    CHROMA_DB_PATH: "./chroma_db"
+    CHUNK_STORE_PATH: "./data/knowledge/chunks.sqlite3"
+    HASH_RECORD_PATH: "./chroma_db/file_hashes.json"
+
+  sql_store:
+    DB_PATH: "./data_sql/financials.db"
+

@@ -1,0 +1,34 @@
+# DeepSeek 费用估算价格卡；具体解析与计算由 observability 负责。
+schema_version: 1
+rate_card_version: "2026-08-17"
+currency: CNY
+unit_tokens: 1000000
+timezone: Asia/Shanghai
+
+models:
+  deepseek-flash:
+    display_version: DeepSeek-V4.1-Flash
+    aliases:
+      # DeepSeek 官方仍接受的旧 Flash 名称。
+      - deepseek-v4-flash
+      - deepseek-v4-flash-vision-exp
+      # 项目迁移前使用的旧名称；应尽快把 MODEL 改为 deepseek/deepseek-flash。
+      - deepseek-chat
+    effective_from: "2026-08-17T00:00:00+08:00"
+    rates:
+      off_peak:
+        cache_hit_input: "0.02"
+        cache_miss_input: "1.00"
+        output: "4.00"
+      peak:
+        cache_hit_input: "0.04"
+        cache_miss_input: "2.00"
+        output: "8.00"
+    peak_windows:
+      # ISO weekday：1=周一，7=周日。
+      weekdays: [1, 2, 3, 4, 5]
+      ranges:
+        - start: "09:00"
+          end: "12:00"
+        - start: "14:00"
+          end: "18:00"

@@ -119,6 +119,7 @@ async def test_evaluation_pipeline_is_cache_free_and_returns_lightweight_trace()
         max_content_chars=800,
         rerank_candidates=12,
         production_rerank_top_n=5,
+        reranker_batch_size=2,
         device="cpu",
     )
 
@@ -133,6 +134,7 @@ async def test_evaluation_pipeline_is_cache_free_and_returns_lightweight_trace()
     assert not hasattr(result.stages["bm25"][0], "content")
     assert result.configuration["query_cache_enabled"] is False
     assert result.configuration["device"] == "cpu"
+    assert result.configuration["reranker_batch_size"] == 2
     assert reranker.top_n == 2
 
     with pytest.raises(ValueError, match="不允许使用语义查询缓存"):

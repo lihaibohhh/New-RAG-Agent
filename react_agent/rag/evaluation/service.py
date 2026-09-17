@@ -26,6 +26,7 @@ class EvaluationRetrievalService:
         max_content_chars: int,
         rerank_candidates: int,
         production_rerank_top_n: int,
+        reranker_batch_size: int,
         device: str,
         source_top_k: int = 10,
         rrf_rank_constant: int = 60,
@@ -38,6 +39,7 @@ class EvaluationRetrievalService:
             1,
             min(int(production_rerank_top_n), 20),
         )
+        self._reranker_batch_size = max(1, int(reranker_batch_size))
         self._device = str(device or "unknown")
         self._source_top_k = max(1, int(source_top_k))
         self._rrf_rank_constant = max(1, int(rrf_rank_constant))
@@ -117,6 +119,7 @@ class EvaluationRetrievalService:
                 "rrf_rank_constant": self._rrf_rank_constant,
                 "rerank_candidates": self._rerank_candidates,
                 "production_rerank_top_n": self._production_rerank_top_n,
+                "reranker_batch_size": self._reranker_batch_size,
                 "final_top_k": request.top_k,
             },
             degraded_sources=candidate_trace.degraded_sources,

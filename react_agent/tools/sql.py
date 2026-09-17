@@ -6,7 +6,7 @@ import os
 from langchain_core.tools import tool
 from react_agent.tooling.results import tool_error as _err
 from react_agent.tooling.results import tool_success as _ok
-from react_agent.core.config import settings
+from react_agent.configuration.settings import settings
 
 
 DB_PATH = settings.tools.sql_store.DB_PATH

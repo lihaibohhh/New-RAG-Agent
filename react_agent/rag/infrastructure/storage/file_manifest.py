@@ -6,7 +6,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from react_agent.core.config import settings
+from react_agent.configuration.settings import settings
 
 
 class JsonIngestionManifestAdapter:

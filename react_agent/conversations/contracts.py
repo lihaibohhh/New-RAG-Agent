@@ -1,4 +1,5 @@
 """Public contracts for conversation management."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -24,3 +25,7 @@ class ConversationDeleteStatus(str, Enum):
 
 class ConversationRepositoryError(RuntimeError):
     """Raised when the configured conversation store cannot complete an operation."""
+
+
+class ConversationPersistenceInitializationError(RuntimeError):
+    """Raised when a required durable conversation backend cannot start."""

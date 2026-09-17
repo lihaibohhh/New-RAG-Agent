@@ -5,11 +5,15 @@ import hashlib
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional, Protocol, Tuple
+from typing import Any, Dict, NoReturn, Optional, Protocol, Tuple
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
-from react_agent.core.config import resolve_app_path, settings
+from react_agent.conversations.configuration import normalize_checkpoint_backend
+from react_agent.conversations.contracts import (
+    ConversationPersistenceInitializationError,
+)
+from react_agent.configuration.settings import resolve_app_path, settings
 
 
 class CheckpointConfig(Protocol):
@@ -17,6 +21,7 @@ class CheckpointConfig(Protocol):
 
     checkpoint_backend: str
     checkpoint_db_path: Optional[str]
+
 
 # 安全默认值：若调用方没有显式覆盖，限制 Checkpoint 反序列化类型。
 os.environ.setdefault("LANGGRAPH_STRICT_MSGPACK", "true")
@@ -45,14 +50,14 @@ class CheckpointerFactory:
     3. 精确 cache key：在锁外预计算含连接参数的 key（如 "postgres:postgresql://..."），
        锁内做精确 dict.get 查询，杜绝前缀扫描 + 字典无锁迭代的竞态问题。
 
-    4. 统一降级：所有 backend 失败时共享同一个 MemorySaver 实例（"memory" key），
-       避免多次降级创建独立实例、thread_id 相同但状态分裂的问题。
+    4. 持久化语义：显式请求 PostgreSQL 时初始化失败即终止启动，禁止降级到
+       MemorySaver；SQLite 失败仍可在本地开发场景共享同一个 MemorySaver。
 
     5. 生命周期解耦：context manager / connection pool 通过独立注册表 _lifecycle 管理，
        不给第三方对象打补丁（猴子补丁污染命名空间且脆弱）。
 
-    6. 双 key 缓存：backend 降级后，同时在原始 key 下缓存 fallback 实例，
-       防止后续请求重复尝试已知失败的 backend。
+    6. 双 key 缓存：允许降级的 backend 同时在原始 key 下缓存 fallback 实例，
+       防止后续请求重复尝试已知失败的 SQLite backend。
     """
 
     _logger = logging.getLogger(__name__)
@@ -84,14 +89,7 @@ class CheckpointerFactory:
         getattr(self._logger, level, self._logger.info)(msg)
 
     def _normalize_backend(self, backend: str) -> str:
-        b = (backend or "").strip().lower()
-        aliases: Dict[str, str] = {
-            "": "memory", "mem": "memory", "memory": "memory",
-            "sqlite": "sqlite", "sqlite3": "sqlite", "aiosqlite": "sqlite",
-            "postgres": "postgres", "postgresql": "postgres", "pg": "postgres",
-            "none": "none", "off": "none", "false": "none", "0": "none",
-        }
-        return aliases.get(b, b)
+        return normalize_checkpoint_backend(backend)
 
     def _sqlite_db_path(self, ctx: CheckpointConfig) -> Path:
         raw = getattr(ctx, "checkpoint_db_path", None) or self._DEFAULT_SQLITE_PATH
@@ -142,7 +140,9 @@ class CheckpointerFactory:
                         await cm.__aexit__(None, None, None)
                         self._log(f"[Checkpointer] 已关闭 CM: {key}")
                     except Exception as e:
-                        self._log(f"[Checkpointer] 关闭 CM 失败 ({key}): {e}", "warning")
+                        self._log(
+                            f"[Checkpointer] 关闭 CM 失败 ({key}): {e}", "warning"
+                        )
 
                 pool = resources.get("pool")
                 if pool is not None:
@@ -150,7 +150,9 @@ class CheckpointerFactory:
                         await pool.close()
                         self._log(f"[Checkpointer] 已关闭连接池: {key}")
                     except Exception as e:
-                        self._log(f"[Checkpointer] 关闭连接池失败 ({key}): {e}", "warning")
+                        self._log(
+                            f"[Checkpointer] 关闭连接池失败 ({key}): {e}", "warning"
+                        )
 
             self._instances.clear()
             self._lifecycle.clear()
@@ -182,13 +184,15 @@ class CheckpointerFactory:
             if inst is not None:
                 return inst
 
-            instance, effective_key = await self._create_instance(backend, ctx, cache_key)
+            instance, effective_key = await self._create_instance(
+                backend, ctx, cache_key
+            )
 
             if instance is not None and effective_key:
                 self._instances[effective_key] = instance
                 self._effective_backends[id(instance)] = effective_key.split(":", 1)[0]
-                # 若发生了降级（effective_key != cache_key），同时在原始 key 下缓存，
-                # 防止后续请求重复尝试已知失败的 backend（如每次请求都重试超时的 Postgres）
+                # 允许降级的 backend 同时在原始 key 下缓存，避免重复初始化。
+                # PostgreSQL 初始化失败会抛出异常，不会进入此分支。
                 if effective_key != cache_key:
                     self._instances[cache_key] = instance
 
@@ -218,6 +222,7 @@ class CheckpointerFactory:
     def _create_memory(self) -> Optional[BaseCheckpointSaver]:
         try:
             from langgraph.checkpoint.memory import MemorySaver
+
             self._log(
                 "[Checkpointer] 使用 MemorySaver（仅限本地调试，"
                 "无持久化，高并发存在 OOM 风险，禁止用于生产环境）",
@@ -236,8 +241,8 @@ class CheckpointerFactory:
         """
         统一降级入口（必须在锁内调用）。
 
-        所有 backend 失败共享同一个 MemorySaver 实例（"memory" key），
-        避免多次降级各自创建独立实例导致同一 thread_id 看到不同会话历史。
+        仅供允许降级的本地 backend 使用。显式请求 PostgreSQL 时不得调用本方法。
+        多次 SQLite 降级共享同一个实例，避免同一 thread_id 状态分裂。
         """
         self._log(f"[Checkpointer] ⚠️ {reason}，降级到 MemorySaver", "warning")
         existing = self._instances.get("memory")
@@ -245,6 +250,22 @@ class CheckpointerFactory:
             return existing, "memory"
         inst = self._create_memory()
         return (inst, "memory") if inst is not None else (None, "")
+
+    def _raise_postgres_unavailable(
+        self,
+        reason: str,
+        *,
+        cause: BaseException | None = None,
+    ) -> NoReturn:
+        message = (
+            f"PostgreSQL Checkpointer 不可用：{reason}。"
+            "已禁止降级到 MemorySaver，应用启动已终止。"
+        )
+        self._log(f"[Checkpointer] ❌ {message}", "error")
+        error = ConversationPersistenceInitializationError(message)
+        if cause is not None:
+            raise error from cause
+        raise error
 
     async def _create_sqlite(
         self, ctx: CheckpointConfig, ok_key: str
@@ -285,13 +306,13 @@ class CheckpointerFactory:
             or AsyncConnectionPool is None
             or dict_row is None
         ):
-            return self._fallback_to_memory(
+            self._raise_postgres_unavailable(
                 "缺少依赖：pip install langgraph-checkpoint-postgres psycopg[binary,pool]"
             )
 
         conn_str = self._postgres_conn_str()
         if not conn_str:
-            return self._fallback_to_memory("POSTGRES_DB_URL 未配置")
+            self._raise_postgres_unavailable("POSTGRES_DB_URL 未配置")
 
         pg_cfg = settings.postgres
         min_size = pg_cfg.POSTGRES_POOL_MIN_SIZE
@@ -326,8 +347,8 @@ class CheckpointerFactory:
                     await pool.close()
                 except Exception:
                     pass
-            return self._fallback_to_memory(
-                f"Postgres 连接池初始化超时（{connect_timeout}s），请检查 POSTGRES_DB_URL 和网络连通性"
+            self._raise_postgres_unavailable(
+                f"连接池初始化超时（{connect_timeout}s），请检查连接配置和网络连通性"
             )
         except Exception as e:
             if pool is not None:
@@ -335,8 +356,7 @@ class CheckpointerFactory:
                     await pool.close()
                 except Exception:
                     pass
-            self._log(
-                f"[Checkpointer] ❌ Postgres 初始化失败: {type(e).__name__}: {e}", "error"
+            self._raise_postgres_unavailable(
+                f"初始化失败（{type(e).__name__}）",
+                cause=e,
             )
-            return self._fallback_to_memory("Postgres 初始化失败")
-
