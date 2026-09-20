@@ -8,7 +8,7 @@ from typing import Callable
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.tools import BaseTool
 
-from react_agent.agent.configuration.context import AgentContext
+from react_agent.agent.config import AgentContext
 from react_agent.metering.contracts import CostEstimator
 
 
@@ -28,6 +28,8 @@ class AgentDependencies:
     tools: tuple[BaseTool, ...]
     model_ref: str = "unknown"
     cost_estimator: CostEstimator | None = None
+    model_context_window_tokens: int | None = None
+    reserved_completion_tokens: int = 2048
 
     def __post_init__(self) -> None:
         if not isinstance(self.config, AgentContext):
@@ -38,6 +40,10 @@ class AgentDependencies:
             raise ValueError("model_ref 不能为空")
         if self.cost_estimator is not None and not callable(self.cost_estimator):
             raise TypeError("cost_estimator 必须可调用")
+        if self.model_context_window_tokens is not None and self.model_context_window_tokens < 1:
+            raise ValueError("model_context_window_tokens 必须大于 0")
+        if self.reserved_completion_tokens < 1:
+            raise ValueError("reserved_completion_tokens 必须大于 0")
 
         tools = tuple(self.tools)
         names: list[str] = []
@@ -65,6 +71,5 @@ class AgentDependencies:
             if agent_tool.name != "search" or self.config.enable_web_search
         )
         return active, frozenset(agent_tool.name for agent_tool in active)
-
 
 __all__ = ["AgentDependencies", "ModelProvider"]

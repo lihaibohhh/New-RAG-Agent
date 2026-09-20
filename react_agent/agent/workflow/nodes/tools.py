@@ -8,10 +8,18 @@ from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.runtime import Runtime
 
+from react_agent.agent.context_management.evidence import (
+    merge_historical_evidence,
+    merge_visible_evidence,
+)
 from react_agent.agent.contracts.dependencies import AgentDependencies
 from react_agent.agent.contracts.state import State
-from react_agent.agent.policies.execution import tool_batch_termination_reason
+from react_agent.agent.policies import (
+    TerminationReason,
+    tool_batch_termination_reason,
+)
 from react_agent.agent.tool_flow.calls import close_tool_calls_for_budget
+from react_agent.agent.tool_flow.calls import extract_recent_tool_messages
 from react_agent.agent.tool_flow.execution import execute_dynamic_tools
 from react_agent.agent.tool_flow.observations import parse_tool_batch
 
@@ -46,6 +54,12 @@ async def postprocess_tools(
         has_errors=bool(batch.errors),
         completed_retries=state.turn_tool_retries,
     )
+    if any(
+        isinstance(run.get("error"), dict)
+        and run["error"].get("code") == "EVIDENCE_PAYLOAD_TOO_LARGE"
+        for run in batch.errors
+    ):
+        termination_reason = TerminationReason.EVIDENCE_OUTPUT_BUDGET_EXHAUSTED.value
     update: dict[str, Any] = {
         "tool_runs": batch.runs,
         "consecutive_failures": batch.consecutive_rag_misses,
@@ -53,10 +67,29 @@ async def postprocess_tools(
         "last_tool_batch_errors": batch.errors,
         "termination_reason": termination_reason,
     }
+    recent_tool_messages = extract_recent_tool_messages(list(state.messages))
+    evidence, omitted = merge_visible_evidence(
+        state.turn_evidence,
+        recent_tool_messages,
+    )
+    update["turn_evidence"] = evidence
+    update["turn_evidence_omitted_count"] = state.turn_evidence_omitted_count + omitted
+    historical, historical_omitted = merge_historical_evidence(
+        state.conversation_evidence,
+        recent_tool_messages,
+    )
+    update["conversation_evidence"] = historical
+    update["conversation_evidence_omitted_count"] = (
+        state.conversation_evidence_omitted_count + historical_omitted
+    )
+    update["conversation_evidence_scanned_message_count"] = len(state.messages)
     if batch.error_count:
         update["tool_error_count"] = state.tool_error_count + batch.error_count
     if batch.last_ok_result is not None:
-        update["last_tool_result"] = batch.last_ok_result
+        update["last_tool_result"] = {
+            key: batch.last_ok_result.get(key)
+            for key in ("tool", "query", "ok", "meta")
+        }
     return update
 
 

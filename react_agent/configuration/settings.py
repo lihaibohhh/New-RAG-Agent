@@ -133,6 +133,7 @@ class LLMConfig(BaseModel):
     model: str = Field(default="deepseek/deepseek-v4-flash")
     llm_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
     llm_max_tokens: int = Field(default=2048, gt=0)
+    llm_context_window_tokens: int | None = Field(default=None, gt=0)
     llm_timeout: int = Field(default=60, gt=0)
     llm_retries: int = Field(default=2, ge=0)
 
@@ -144,6 +145,7 @@ class LLMConfig(BaseModel):
             "model": "MODEL",
             "llm_temperature": "LLM_TEMPERATURE",
             "llm_max_tokens": "LLM_MAX_TOKENS",
+            "llm_context_window_tokens": "LLM_CONTEXT_WINDOW_TOKENS",
             "llm_timeout": "LLM_TIMEOUT",
             "llm_retries": "LLM_RETRIES",
         }

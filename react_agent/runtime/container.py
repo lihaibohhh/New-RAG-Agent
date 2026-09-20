@@ -6,10 +6,10 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import Any
 
-from react_agent.agent.configuration.context import AgentContext
+from react_agent.agent.config import AgentContext
 from react_agent.agent.contracts.dependencies import AgentDependencies
 from react_agent.agent.workflow.graph import compile_agent_graph
-from react_agent.agent.application.service import AgentService
+from react_agent.agent.service import AgentService
 from react_agent.conversations.configuration import normalize_checkpoint_backend
 from react_agent.conversations.contracts import ConversationPersistenceConfig
 from react_agent.conversations.infrastructure.checkpointer_factory import (
@@ -124,6 +124,8 @@ def _compose_agent_dependencies(
         tools=tools,
         model_ref=settings.llm.model,
         cost_estimator=estimate_configured_model_cost,
+        model_context_window_tokens=settings.llm.llm_context_window_tokens,
+        reserved_completion_tokens=settings.llm.llm_max_tokens,
     )
 
 

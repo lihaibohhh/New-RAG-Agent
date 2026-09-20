@@ -15,7 +15,6 @@ IDOR 防护：
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import JSONResponse
@@ -29,35 +28,6 @@ from react_agent.conversations import ConversationDeleteStatus, ConversationServ
 _logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/sessions", tags=["sessions v1"])
-
-
-# ── 消息序列化（脱敏：仅 type + content）─────────────────────────────────────
-
-def _serialize_msg(msg: Any) -> MessageItem:
-    """把 LangChain Message 或 dict 序列化为 MessageItem。"""
-    if isinstance(msg, dict):
-        return MessageItem(
-            type=str(msg.get("type", "unknown")),
-            content=str(msg.get("content", "")),
-            id=msg.get("id"),
-        )
-    # LangChain Message 对象（生产环境）
-    try:
-        from langchain_core.messages import (
-            AIMessage, HumanMessage, SystemMessage, ToolMessage,
-        )
-        type_map = {
-            HumanMessage: "human",
-            AIMessage: "ai",
-            SystemMessage: "system",
-            ToolMessage: "tool",
-        }
-        msg_type = type_map.get(type(msg), getattr(msg, "type", "unknown"))
-    except ImportError:
-        msg_type = getattr(msg, "type", "unknown")
-
-    content = msg.content if isinstance(getattr(msg, "content", None), str) else str(getattr(msg, "content", ""))
-    return MessageItem(type=msg_type, content=content, id=getattr(msg, "id", None))
 
 
 # ── GET /sessions/{session_id}/history ───────────────────────────────────────
@@ -88,7 +58,7 @@ async def get_session_history(
 
     return SessionHistoryResponse(
         session_id=session_id,
-        messages=[_serialize_msg(m) for m in page_msgs],
+        messages=[MessageItem(type=m.type, content=m.content, id=m.id) for m in page_msgs],
         total=total,
         page=page,
         page_size=page_size,

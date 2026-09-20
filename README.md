@@ -112,23 +112,24 @@ flowchart LR
 
 | 文件 | 职责 |
 |---|---|
-| `react_agent/agent/application/` | 对外 Agent 对话用例；校验 `thread_id`，封装 invoke / stream |
+| `react_agent/agent/service.py` | 对外 Agent 对话用例；校验 `thread_id`，封装 invoke / stream |
 | `react_agent/agent/workflow/` | LangGraph 拓扑、条件路由与节点适配层；`nodes/` 按生命周期、模型和工具节点拆分 |
 | `react_agent/agent/contracts/` | 图状态与运行时依赖契约，不包含模型或工具实现 |
-| `react_agent/agent/configuration/` | 仅管理图内行为的 `AgentContext`，以及环境变量覆盖与类型转换 |
-| `react_agent/agent/policies/` | 模型轮次、工具批次、重试和递归安全预算的纯策略判断 |
-| `react_agent/agent/modeling/` | 模型绑定/调用、消息历史清洗与截断，以及当前对话轮次的模型消息选择；不解析价格卡 |
-| `react_agent/agent/prompting/` | 默认系统提示词，以及失败恢复/主动收口的瞬态控制指令 |
+| `react_agent/agent/config.py` | 管理图内行为的 `AgentContext`，以及环境变量覆盖与类型转换 |
+| `react_agent/agent/context_management/` | 从完整 State 构造单次模型上下文；负责轮次分段、Token 预算、协议修复、证据账本与旧轮次摘要 |
+| `react_agent/agent/policies.py` | 模型轮次、工具批次、重试和递归安全预算的纯策略判断 |
+| `react_agent/agent/model_execution.py` | 模型绑定、调用、响应与用量状态更新；不再决定历史和证据如何进入上下文 |
+| `react_agent/agent/prompts.py` | 默认系统提示词，以及失败恢复/主动收口的瞬态控制指令 |
 | `react_agent/agent/tool_flow/` | Agent 内部工具调用解析、执行、结果归一化、限幅与预算统计 |
-| `react_agent/agent/support/` | 时间等不包含业务决策的通用辅助能力 |
-| `react_agent/agent/__init__.py` | 稳定公共 API；根目录不再存放实现或旧模块兼容门面 |
+| `react_agent/agent/time.py` | Agent 使用的时区时间表示规则 |
+| `react_agent/agent/__init__.py` | 通过懒加载导出稳定公共 API；不提供旧模块兼容门面 |
 | `react_agent/configuration/` | 应用级配置模型、环境/YAML 加载及非敏感工具默认值、价格卡；不负责 Agent 图内行为 |
 | `react_agent/tooling/` | Agent 与工具适配器共享的 ToolResult 信封和重试执行契约 |
 | `react_agent/models/` | LLM Provider 解析、创建与缓存 |
 | `react_agent/metering/` | 统一模型 token 归一化、人民币计价及累计状态的轮次用量差值；不决定 Agent 对话边界 |
 | `react_agent/infrastructure/` | Redis 等跨用例共享的技术资源适配器 |
 | `react_agent/observability/` | 已计算用量的结构化日志、会话汇总与界面展示；不负责重新计量或计价 |
-| `react_agent/conversations/contracts.py` | 会话删除结果与持久化错误契约 |
+| `react_agent/conversations/contracts.py` | 类型化消息视图、删除结果及持久化配置／错误契约 |
 | `react_agent/conversations/ports.py` | `ConversationRepositoryPort` 出站端口 |
 | `react_agent/conversations/service.py` | 历史读取与会话删除用例 |
 | `react_agent/conversations/infrastructure/` | LangGraph Checkpointer Adapter 及 PostgreSQL / SQLite / Memory 工厂 |
@@ -145,32 +146,83 @@ flowchart LR
 能力开关、业务预算、上下文控制和图安全熔断。模型选择/推理参数由
 `LLMConfig` 管理，具体工具参数由各工具配置管理；模型提供者、计价策略与工具
 集合通过 `AgentDependencies` 显式传入，Agent 节点不再自行导入模型工厂或
-全局工具表。会话标识由调用方提供，会话后端与数据库路径由
-`ConversationPersistenceConfig` 独立管理；FastAPI 和 Streamlit 都通过
+全局工具表。会话标识由调用方提供；`ConversationPersistenceConfig` 携带
+后端、数据库路径和 PostgreSQL 连接池参数，Checkpointer 工厂不再读取全局
+PostgreSQL 设置。FastAPI 和 Streamlit 都通过
 `create_application_services(...)` 完成组装，并把返回的服务实例传给
 `close_application_services(...)` 精确释放本实例资源。健康检查展示的是实际
 生效后端，因此 SQLite/PostgreSQL 降级到 Memory 时不会继续误报原配置值。
 FastAPI 与 Streamlit 均通过 `load_conversation_persistence_config()` 读取
-`CHECKPOINT_BACKEND` 和 `CHECKPOINT_DB_PATH`；未配置 backend 时安全回退到
-SQLite，不再由各启动入口分别硬编码持久化后端。
+`CHECKPOINT_BACKEND`、`CHECKPOINT_DB_PATH` 和 PostgreSQL 参数；未配置 backend
+时默认 SQLite，未知 backend 在启动时明确报错。
 当显式配置 `CHECKPOINT_BACKEND=postgres` 时，依赖缺失、连接串缺失、连接超时
 或建表失败都会终止应用启动，不会再静默降级到易失的 MemorySaver。SQLite
 初始化失败时仍保留面向本地开发的 MemorySaver 降级能力。
 `/api/v1/health/ready` 比较请求与实际启用的后端：例如请求 SQLite 却降级
 MemorySaver 时返回 503；显式 Memory 模式则正常就绪。原有 `/api/v1/health`
 和 `/health` 保留存活检查语义，不因后端不一致而返回 503。
+会话 history 返回的是**最新 Checkpoint 中的消息列表**，不是历次 Checkpoint
+版本的审计日志；仓储将 LangChain 消息投影为类型化的 `ConversationMessage`，
+API 再负责分页和响应格式。删除只使用 Checkpointer 的公开 `adelete_thread()`；
+后端不支持时返回 501，不再直接操作存储内部结构。
 
-Agent 包内部依赖方向固定为：`application → workflow → policies / modeling / tool_flow`
-，其中 `contracts` 和 `configuration` 是被依赖的契约与配置层。模型、工具和
+Agent 包内部由 `service.py` 调用 `workflow/`；节点使用 `policies.py`、
+`model_execution.py`、`context_management/` 和 `tool_flow/`，共享契约位于
+`contracts/`，图内行为配置位于 `config.py`。`model_execution.py`
+只消费 `context_management` 构造完成的 `ModelContext`；历史裁剪、工具协议修复
+和证据索引均不再从模型调用层或 `tool_flow` 暴露兼容入口。模型、工具和
 持久化的具体 Adapter 只能由 `react_agent/runtime/` 注入，禁止反向导入到
-Agent 包。内部调用方统一使用子包路径；外部入口统一从 `react_agent.agent`
-导入公共对象。旧的根目录模块路径已经移除，LangGraph 显式节点名称保持不变。
+Agent 包。外部入口统一从 `react_agent.agent` 导入公共对象。LangGraph 显式
+节点名称保持不变。历史 Token 数使用离线、确定性的 UTF-8 近似估算；
+一次上下文构造只估算每条消息一次，不会在调用模型前下载 tokenizer 资源。
+`MAX_INPUT_TOKENS` 是单次调用的本地输入估算上限，包含最终系统提示词、
+瞬态指令、绑定工具 Schema、当前轮、证据和已选历史；`MAX_HISTORY_TOKENS`
+只为会话消息分配子预算，不限制固定提示词和工具 Schema；当前轮即使超过该
+子预算也保留给总预算闸门判断。若配置模型实际窗口
+`LLM_CONTEXT_WINDOW_TOKENS`，还会从中
+扣除 `LLM_MAX_TOKENS` 输出预留和 `CONTEXT_SAFETY_MARGIN_TOKENS` 安全余量，
+取两种输入上限的较小值。未配置模型窗口时只执行本地策略上限，不宣称与
+Provider 窗口一致。每次调用生成不进入 Checkpoint 的 `BudgetReport`；
+默认历史/总输入预算分别为 80,000/96,000 估算 Token。
+`MAX_HISTORY_TOKENS` 按已完成的完整用户轮次裁剪，近期历史保持连续；
+当前轮不会被历史子预算拆开。总预算超限时，先尝试投影旧工具正文以保留轮次，
+仍超限才整轮移除；只剩当前轮时，依次缩短证据索引摘录、工具正文及索引条数。
+投影只作用于本次模型输入，不覆盖 Checkpoint；RAG 可见结果保留尽可能多的
+`source`、`page`、`chunk_id`，省略处显式标记，`BudgetReport` 记录原因和规模。
+调用前按 `tool_call_id` 校验并行工具调用与结果的配对，正文投影不删除
+ToolMessage 协议外壳。固定内容、当前问题或当前轮仍超限时在调用模型前报错。
+估算并非 Provider 精确 Token 计数。启用 `ENABLE_HISTORY_COMPACTION` 时，
+新用户轮开始且可见历史达到子预算约 80% 后，至多用一次额外模型调用总结
+游标之后的较早完整轮次；近期三轮及当前轮不压缩。模型只写定性概览，
+数字、否定约束、更正原文及 RAG 来源位置由程序按句段确定性附加；
+调用前先排除无法达到最小节省量的批次。不合格或不节省空间的摘要不推进
+游标，并在候选来源新增 `HISTORY_COMPACTION_RETRY_NEW_TOKENS` 之前不再付费
+重试。摘要输出受 `HISTORY_COMPACTION_MAX_OUTPUT_TOKENS` 限制，日志区分超长、
+不安全概览、无 Token 节省等原因。原始 `State.messages` 保留在 Checkpoint，摘要以独立
+字段存储，只在单次模型输入中替代其覆盖的旧轮次；摘要调用计入模型用量。
+API 非流式配额也包含摘要调用；流式接口只向用户推送主回答的文本 Token，
+摘要调用仅产生用量事件。
 
 Agent 的正常终止由 `MAX_MODEL_ROUNDS`、`MAX_TOOL_BATCHES` 和
 `MAX_TOOL_RETRIES` 控制；`RECURSION_LIMIT` 只作为图异常循环的最后熔断器，
 并在 `AgentContext` 初始化时校验其足以覆盖所配置的业务预算。若模型在预算
 耗尽时已经生成工具调用，图会先写入 `TOOL_BUDGET_EXHAUSTED` ToolMessage
 闭合调用协议，再进入不绑定工具的 `finalize_model`，避免持久化悬空调用。
+RAG 工具结果按整个 JSON 输出预算限幅：优先保留各片段的来源、页码与
+`chunk_id`，再分配可见正文；无法容纳任何证据时返回明确的预算错误，
+不伪装成检索未命中，并基于此前可见证据主动收口。Agent 在本轮内按
+`chunk_id` 合并模型可见片段的有界证据索引，最终总结会收到这份索引。
+索引只保留短的原文摘录和溯源，
+不代表片段已经核验，也不能保证截断部分没有关键事实。每次成功 RAG 还会
+独立维护不含正文的跨轮来源索引，保存查询、来源文件、页码和 `chunk_id`；
+该索引不依赖历史摘要是否被接受，因此原工具轮退出消息窗口后仍可用于来源
+回顾。旧 Checkpoint 会在下一轮增量补建该索引。工具调用轨迹只附带有界
+`sources` 列表，不复制检索正文。
+
+Streamlit 登录后从共享 Checkpoint 恢复用户消息和最终助手消息，过滤内部
+工具调用规划与 ToolMessage。新回答在展示动画开始前先写入页面会话状态，
+回答期间输入框保持禁用；展示采用快速分块而非逐字符延迟，因此中途 rerun
+不会吞掉已经生成的完整回答。
 
 ### 5.2 RAG：私有知识库检索
 

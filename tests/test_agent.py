@@ -19,7 +19,10 @@ if not os.environ.get("TAVILY_API_KEY"):
     )
 
 from react_agent.agent import AgentContext
-from react_agent.conversations import load_conversation_persistence_config
+from react_agent.conversations import (
+    load_conversation_persistence_config,
+    project_display_messages,
+)
 from react_agent.runtime import (
     close_application_services,
     create_application_services,
@@ -106,7 +109,19 @@ def run_async(coro):
 
 # ── 会话状态初始化 ────────────────────────────────────────────
 if "messages" not in st.session_state:
-    st.session_state.messages = []
+    try:
+        persisted_messages = run_async(
+            application_services.conversations.get_history(
+                st.session_state.thread_id
+            )
+        )
+        st.session_state.messages = project_display_messages(persisted_messages)
+    except Exception as exc:
+        logger.warning("持久化会话恢复失败，本次 UI 从空记录开始: %s", exc)
+        st.session_state.messages = []
+
+if "pending_prompt" not in st.session_state:
+    st.session_state.pending_prompt = None
 
 # ▸ 新增：会话级用量追踪器
 if "usage_tracker" not in st.session_state:
@@ -121,7 +136,13 @@ if "last_turn_display" not in st.session_state:
 
 # ▸ 新增：上一轮结束时的累计快照（用于做差值算本轮增量）
 if "prev_usage_snapshot" not in st.session_state:
-    st.session_state.prev_usage_snapshot = None
+    try:
+        st.session_state.prev_usage_snapshot = run_async(
+            agent.get_usage_snapshot(st.session_state.thread_id)
+        )
+    except Exception as exc:
+        logger.warning("持久化用量基线读取失败，本次 UI 从零计量: %s", exc)
+        st.session_state.prev_usage_snapshot = None
 
 
 # ── 统计面板渲染函数 ─────────────────────────────────────────
@@ -190,9 +211,28 @@ for msg in st.session_state.messages:
             display = msg["usage_display"]
             parts = [f"{k}: {v}" for k, v in display.items()]
             st.caption(" · ".join(parts))
+        if msg["role"] == "assistant" and msg.get("tool_runs"):
+            with st.expander("🛠️ 查看工具调用轨迹"):
+                st.json(msg["tool_runs"])
 
 # ── 处理新消息 ────────────────────────────────────────────────
-if prompt := st.chat_input("请输入您的问题..."):
+def queue_prompt() -> None:
+    """提交回调先锁定输入，避免回答渲染期间再次触发 rerun。"""
+    value = str(st.session_state.get("chat_prompt") or "").strip()
+    if value and not st.session_state.pending_prompt:
+        st.session_state.pending_prompt = value
+
+
+st.chat_input(
+    "Agent 正在回答，请稍候..."
+    if st.session_state.pending_prompt
+    else "请输入您的问题...",
+    key="chat_prompt",
+    disabled=bool(st.session_state.pending_prompt),
+    on_submit=queue_prompt,
+)
+
+if prompt := st.session_state.pending_prompt:
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
@@ -202,11 +242,16 @@ if prompt := st.chat_input("请输入您的问题..."):
             # ▸ 新增：计时
             t0 = time.perf_counter()
 
-            result = run_async(
-                agent.invoke(
-                    [HumanMessage(content=prompt)], thread_id=st.session_state.thread_id
+            try:
+                result = run_async(
+                    agent.invoke(
+                        [HumanMessage(content=prompt)],
+                        thread_id=st.session_state.thread_id,
+                    )
                 )
-            )
+            except Exception:
+                st.session_state.pending_prompt = None
+                raise
 
             latency_ms = (time.perf_counter() - t0) * 1000
 
@@ -227,7 +272,6 @@ if prompt := st.chat_input("请输入您的问题..."):
 
             # ▸ 保存本轮结束时的累计快照，供下一轮做差值
             snapshot = extract_cumulative_snapshot(result)
-            snapshot["tool_runs_count"] = len(result.get("tool_runs", []))
             st.session_state.prev_usage_snapshot = snapshot
 
             # 第三层 (界面)：累计到会话级追踪器
@@ -238,26 +282,38 @@ if prompt := st.chat_input("请输入您的问题..."):
             usage_display = format_usage_for_user(usage, latency_ms)
             st.session_state.last_turn_display = usage_display
 
+            current_tool_count = int(usage.get("tool_runs_count", 0))
+            all_tool_runs = list(result.get("tool_runs") or [])
+            current_tool_runs = (
+                all_tool_runs[-current_tool_count:] if current_tool_count else []
+            )
+
+            # Agent 结果一旦返回，先原子化写入页面状态，再做展示动画。
+            # 若动画期间发生 rerun，下一次渲染仍能恢复完整回答。
+            st.session_state.messages.append(
+                {
+                    "role": "assistant",
+                    "content": final_ai_msg,
+                    "usage_display": usage_display,
+                    "tool_runs": current_tool_runs,
+                }
+            )
+            st.session_state.pending_prompt = None
+
             def stream_data(text):
-                for char in text:
-                    yield char
-                    time.sleep(0.015)
+                for start in range(0, len(text), 24):
+                    yield text[start : start + 24]
+                    time.sleep(0.01)
 
             st.write_stream(stream_data(final_ai_msg))
 
             # 工具调用轨迹（已有功能）
-            if "tool_runs" in result and result["tool_runs"]:
+            if current_tool_runs:
                 with st.expander("🛠️ 查看工具调用轨迹"):
-                    st.json(result["tool_runs"])
+                    st.json(current_tool_runs)
 
             # ▸ 新增：本轮用量摘要（灰色小字，不抢眼）
             parts = [f"{k}: {v}" for k, v in usage_display.items()]
             st.caption(" · ".join(parts))
 
-    st.session_state.messages.append(
-        {
-            "role": "assistant",
-            "content": final_ai_msg,
-            "usage_display": usage_display,  # ▸ 随消息存储，翻阅历史时仍可见
-        }
-    )
+    st.rerun()

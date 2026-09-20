@@ -6,9 +6,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from react_agent.agent.configuration.context import AgentContext
+from react_agent.agent.config import AgentContext
 from react_agent.agent.contracts.dependencies import AgentDependencies
-from react_agent.agent.application.service import AgentService
+from react_agent.agent.service import AgentService
 from react_agent.conversations import load_conversation_persistence_config
 from react_agent.conversations.contracts import (
     ConversationPersistenceConfig,
@@ -47,6 +47,8 @@ class _FakeGraph:
         self.context = None
         self.config = None
         self.version = None
+        self.snapshot_values = {}
+        self.state_config = None
 
     async def ainvoke(self, inputs, *, context, config):
         self.context = context
@@ -57,6 +59,10 @@ class _FakeGraph:
         self.config = config
         self.version = version
         yield {"event": "on_chat_model_stream", "data": {"inputs": inputs}}
+
+    async def aget_state(self, config):
+        self.state_config = config
+        return SimpleNamespace(values=self.snapshot_values)
 
 
 @pytest.mark.asyncio
@@ -95,6 +101,33 @@ async def test_agent_service_stream_events_preserves_v1_streaming_contract() -> 
         "configurable": {"thread_id": "user:stream"},
     }
     assert graph.version == "v2"
+
+
+@pytest.mark.asyncio
+async def test_agent_service_reads_persisted_usage_baseline() -> None:
+    dependencies = AgentDependencies(
+        config=AgentContext(),
+        model_provider=lambda: object(),
+        tools=(),
+    )
+    graph = _FakeGraph()
+    graph.snapshot_values = {
+        "prompt_tokens": 100,
+        "completion_tokens": 20,
+        "total_tokens": 120,
+        "estimated_cost_cny": 0.12,
+        "llm_call_count": 4,
+        "tool_runs": [{"tool": "rag"}],
+    }
+    service = AgentService(dependencies, graph)
+
+    snapshot = await service.get_usage_snapshot("user:restored")
+
+    assert snapshot["total_tokens"] == 120
+    assert snapshot["estimated_cost_cny"] == pytest.approx(0.12)
+    assert snapshot["llm_call_count"] == 4
+    assert snapshot["tool_runs_count"] == 1
+    assert graph.state_config == {"configurable": {"thread_id": "user:restored"}}
 
 
 @pytest.mark.asyncio
@@ -239,6 +272,8 @@ async def test_admin_health_composition_does_not_build_query_pipeline() -> None:
 
 def test_runtime_selects_model_and_tool_catalog(monkeypatch) -> None:
     monkeypatch.setattr(container.settings.llm, "model", "provider/model")
+    monkeypatch.setattr(container.settings.llm, "llm_context_window_tokens", 8192)
+    monkeypatch.setattr(container.settings.llm, "llm_max_tokens", 1024)
     monkeypatch.setattr(
         container,
         "load_chat_model",
@@ -252,6 +287,8 @@ def test_runtime_selects_model_and_tool_catalog(monkeypatch) -> None:
 
     assert dependencies.resolve_model() == ("model", "provider/model")
     assert dependencies.model_ref == "provider/model"
+    assert dependencies.model_context_window_tokens == 8192
+    assert dependencies.reserved_completion_tokens == 1024
     assert [tool.name for tool in dependencies.tools] == [
         "search",
         "make_excel_table",
@@ -266,6 +303,7 @@ def test_model_and_search_adapter_settings_own_their_environment(
 ) -> None:
     monkeypatch.setenv("MODEL", "provider/env-model")
     monkeypatch.setenv("LLM_TEMPERATURE", "0.4")
+    monkeypatch.setenv("LLM_CONTEXT_WINDOW_TOKENS", "8192")
     monkeypatch.setenv("MAX_SEARCH_RESULTS", "7")
 
     model_settings = LLMConfig()
@@ -273,6 +311,7 @@ def test_model_and_search_adapter_settings_own_their_environment(
 
     assert model_settings.model == "provider/env-model"
     assert model_settings.llm_temperature == 0.4
+    assert model_settings.llm_context_window_tokens == 8192
     assert search_settings.max_search_results == 7
 
 
@@ -414,29 +453,24 @@ async def test_postgres_missing_dependencies_never_falls_back_to_memory(
 ) -> None:
     monkeypatch.setattr(checkpointer_factory_module, "AsyncPostgresSaver", None)
     factory = CheckpointerFactory()
-    monkeypatch.setattr(
-        factory,
-        "_postgres_conn_str",
-        lambda: "postgresql://configured-but-not-used",
-    )
 
     with pytest.raises(
         ConversationPersistenceInitializationError,
         match="已禁止降级到 MemorySaver",
     ):
         await factory.create(
-            ConversationPersistenceConfig(checkpoint_backend="postgres")
+            ConversationPersistenceConfig(
+                checkpoint_backend="postgres",
+                postgres_db_url="postgresql://configured-but-not-used",
+            )
         )
 
     assert factory._instances == {}
 
 
 @pytest.mark.asyncio
-async def test_postgres_missing_connection_string_stops_startup(
-    monkeypatch,
-) -> None:
+async def test_postgres_missing_connection_string_stops_startup() -> None:
     factory = CheckpointerFactory()
-    monkeypatch.setattr(factory, "_postgres_conn_str", lambda: "")
 
     with pytest.raises(
         ConversationPersistenceInitializationError,

@@ -3,8 +3,9 @@
 from __future__ import annotations
 import logging
 from typing import Any, List
-from react_agent.agent.configuration.context import AgentContext
+from react_agent.agent.config import AgentContext
 from react_agent.agent.contracts.dependencies import AgentDependencies
+from react_agent.metering.turn import extract_cumulative_snapshot
 
 _logger = logging.getLogger(__name__)
 
@@ -40,6 +41,16 @@ class AgentService:
     async def initialize(self) -> None:
         """兼容旧调用；对象由 Composition Root 完整创建后才会被暴露。"""
         return None
+
+    async def get_usage_snapshot(self, thread_id: str) -> dict[str, Any]:
+        """读取持久化累计用量，供入站适配器建立本次 UI 会话的差值基线。"""
+        if not thread_id:
+            raise ValueError("thread_id 不能为空")
+        snapshot = await self._graph.aget_state(
+            {"configurable": {"thread_id": thread_id}}
+        )
+        values = dict(getattr(snapshot, "values", None) or {})
+        return extract_cumulative_snapshot(values)
 
     async def invoke(self, messages: List[Any], thread_id: str):
         """
