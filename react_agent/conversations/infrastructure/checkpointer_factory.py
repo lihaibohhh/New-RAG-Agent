@@ -8,12 +8,12 @@ from pathlib import Path
 from typing import Any, Dict, NoReturn, Optional, Protocol, Tuple
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
+from pydantic import SecretStr
 
 from react_agent.conversations.configuration import normalize_checkpoint_backend
 from react_agent.conversations.contracts import (
     ConversationPersistenceInitializationError,
 )
-from react_agent.configuration.settings import resolve_app_path, settings
 
 
 class CheckpointConfig(Protocol):
@@ -21,6 +21,10 @@ class CheckpointConfig(Protocol):
 
     checkpoint_backend: str
     checkpoint_db_path: Optional[str]
+    postgres_db_url: SecretStr
+    postgres_pool_min_size: int
+    postgres_pool_max_size: int
+    postgres_connect_timeout_seconds: float
 
 
 # 安全默认值：若调用方没有显式覆盖，限制 Checkpoint 反序列化类型。
@@ -47,7 +51,7 @@ class CheckpointerFactory:
     2. 懒初始化锁：asyncio.Lock 在首次调用时创建，绑定到当前 event loop，
        避免 Streamlit 热重载 / FastAPI 多次启动时因 loop 销毁导致的 RuntimeError。
 
-    3. 精确 cache key：在锁外预计算含连接参数的 key（如 "postgres:postgresql://..."），
+    3. 精确 cache key：在锁外预计算连接目标指纹与连接池参数，
        锁内做精确 dict.get 查询，杜绝前缀扫描 + 字典无锁迭代的竞态问题。
 
     4. 持久化语义：显式请求 PostgreSQL 时初始化失败即终止启动，禁止降级到
@@ -94,10 +98,13 @@ class CheckpointerFactory:
     def _sqlite_db_path(self, ctx: CheckpointConfig) -> Path:
         raw = getattr(ctx, "checkpoint_db_path", None) or self._DEFAULT_SQLITE_PATH
         # 相对路径固定锚定到应用根目录，不再随启动命令的 cwd 漂移。
-        return Path(resolve_app_path(raw))
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            path = Path(__file__).resolve().parents[3] / path
+        return path.resolve()
 
-    def _postgres_conn_str(self) -> str:
-        return settings.postgres.POSTGRES_DB_URL.get_secret_value().strip()
+    def _postgres_conn_str(self, ctx: CheckpointConfig) -> str:
+        return ctx.postgres_db_url.get_secret_value().strip()
 
     def _compute_cache_key(self, backend: str, ctx: CheckpointConfig) -> str:
         """
@@ -111,9 +118,13 @@ class CheckpointerFactory:
             return f"sqlite:{self._sqlite_db_path(ctx)}"
         if backend == "postgres":
             conn_fingerprint = hashlib.sha256(
-                self._postgres_conn_str().encode("utf-8")
+                self._postgres_conn_str(ctx).encode("utf-8")
             ).hexdigest()[:16]
-            return f"postgres:{conn_fingerprint}"
+            return (
+                f"postgres:{conn_fingerprint}:"
+                f"{ctx.postgres_pool_min_size}:{ctx.postgres_pool_max_size}:"
+                f"{ctx.postgres_connect_timeout_seconds}"
+            )
         return backend  # "memory"
 
     def _register_lifecycle(
@@ -215,9 +226,8 @@ class CheckpointerFactory:
         if backend == "sqlite":
             return await self._create_sqlite(ctx, cache_key)
         if backend == "postgres":
-            return await self._create_postgres(cache_key)
-        self._log(f"[Checkpointer] 未知 backend '{backend}'，禁用持久化", "warning")
-        return None, ""
+            return await self._create_postgres(ctx, cache_key)
+        raise ValueError(f"不支持的 CHECKPOINT_BACKEND: {backend!r}")
 
     def _create_memory(self) -> Optional[BaseCheckpointSaver]:
         try:
@@ -298,7 +308,7 @@ class CheckpointerFactory:
             return self._fallback_to_memory("SQLite 初始化失败")
 
     async def _create_postgres(
-        self, ok_key: str
+        self, ctx: CheckpointConfig, ok_key: str
     ) -> Tuple[Optional[BaseCheckpointSaver], str]:
         """创建 PostgreSQL checkpointer。"""
         if (
@@ -310,14 +320,13 @@ class CheckpointerFactory:
                 "缺少依赖：pip install langgraph-checkpoint-postgres psycopg[binary,pool]"
             )
 
-        conn_str = self._postgres_conn_str()
+        conn_str = self._postgres_conn_str(ctx)
         if not conn_str:
             self._raise_postgres_unavailable("POSTGRES_DB_URL 未配置")
 
-        pg_cfg = settings.postgres
-        min_size = pg_cfg.POSTGRES_POOL_MIN_SIZE
-        max_size = pg_cfg.POSTGRES_POOL_MAX_SIZE
-        connect_timeout = pg_cfg.POSTGRES_CONNECT_TIMEOUT_SECONDS
+        min_size = ctx.postgres_pool_min_size
+        max_size = ctx.postgres_pool_max_size
+        connect_timeout = ctx.postgres_connect_timeout_seconds
 
         pool = None
         try:

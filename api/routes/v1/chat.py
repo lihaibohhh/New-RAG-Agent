@@ -17,18 +17,22 @@ import asyncio
 import json
 import logging
 import time
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator, Mapping, Sequence
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage
 
 from api.dependencies import get_agent
+from api.errors import AppError
 from api.models import ChatRequest, ChatResponse
 from api.security import require_api_key, get_rate_limit_key
 from api.ratelimit import check_rate_limit, check_token_budget, record_token_usage
 from react_agent.agent import AgentService
-from react_agent.agent.modeling.history import latest_turn_ai_messages
+from react_agent.agent.context_management import (
+    ContextBudgetExceeded,
+    latest_turn_ai_messages,
+)
 from react_agent.metering.model_usage import meter_model_call
 from react_agent.metering.pricing import estimate_configured_model_cost
 
@@ -39,6 +43,61 @@ router = APIRouter(prefix="/chat", tags=["chat v1"])
 # ── SSE 序列化 ─────────────────────────────────────────────────────────────────
 def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _context_budget_problem(exc: ContextBudgetExceeded) -> tuple[int, str, str]:
+    if exc.reason == "USER_INPUT_TOO_LARGE":
+        return 413, "Input Too Large", "当前问题超过模型输入预算，请缩短或分批提交"
+    if exc.reason == "CURRENT_TURN_CONTEXT_TOO_LARGE":
+        return 413, "Context Too Large", "当前轮工具结果超过模型输入预算，请缩小问题范围后重试"
+    return 500, "Context Configuration Error", "模型输入预算配置不足，无法执行本次请求"
+
+
+async def _record_invoke_model_usage(
+    messages: Sequence[AIMessage],
+    agent: AgentService,
+    bucket_key: str,
+    *,
+    compaction_usage: Mapping[str, Any] | None = None,
+) -> None:
+    """成功与预算中止共用计量路径，避免已发生的模型调用漏记。"""
+    from api.metrics import llm_cost_cny_total, llm_tokens_total
+
+    invoke_tokens = 0
+    for message in messages:
+        metered = meter_model_call(
+            message,
+            model_ref=agent.model_ref,
+            cost_estimator=estimate_configured_model_cost,
+        )
+        usage = metered.usage
+        model_name = metered.model_name
+        invoke_tokens += usage["total_tokens"]
+        if usage["prompt_tokens"]:
+            llm_tokens_total.labels(type="prompt", model=model_name).inc(
+                usage["prompt_tokens"]
+            )
+        if usage["completion_tokens"]:
+            llm_tokens_total.labels(type="completion", model=model_name).inc(
+                usage["completion_tokens"]
+            )
+        if metered.cost.status == "estimated" and metered.cost.amount:
+            llm_cost_cny_total.labels(model=model_name).inc(metered.cost.amount)
+    if compaction_usage:
+        model_name = str(compaction_usage.get("model_name") or agent.model_ref)
+        prompt_tokens = int(compaction_usage.get("prompt_tokens") or 0)
+        completion_tokens = int(compaction_usage.get("completion_tokens") or 0)
+        invoke_tokens += int(compaction_usage.get("total_tokens") or 0)
+        if prompt_tokens:
+            llm_tokens_total.labels(type="prompt", model=model_name).inc(prompt_tokens)
+        if completion_tokens:
+            llm_tokens_total.labels(type="completion", model=model_name).inc(
+                completion_tokens
+            )
+        amount = float(compaction_usage.get("cost_cny") or 0.0)
+        if compaction_usage.get("priced") and amount:
+            llm_cost_cny_total.labels(model=model_name).inc(amount)
+    await record_token_usage(bucket_key, invoke_tokens)
 
 
 # ── 事件 → SSE 帧映射 ─────────────────────────────────────────────────────────
@@ -52,6 +111,10 @@ def _map_event(ev: dict, state: dict, agent: AgentService, start: float) -> str 
     data = ev.get("data", {})
 
     if name == "on_chat_model_stream":
+        if "context_compaction" in (ev.get("tags") or ()) or (
+            ev.get("metadata") or {}
+        ).get("langgraph_node") == "compact_history":
+            return None
         chunk = data.get("chunk")
         if chunk and hasattr(chunk, "content") and chunk.content:
             if state["ttft_ms"] is None:
@@ -194,6 +257,27 @@ async def _stream_v1_generator(
                 "stream_cancelled | session=%s request_id=%s", session_id, request_id
             )
             raise
+        except ContextBudgetExceeded as exc:
+            status, title, detail = _context_budget_problem(exc)
+            _logger.warning(
+                "context_budget_exceeded | session=%s reason=%s estimated=%s limit=%s",
+                session_id,
+                exc.reason,
+                exc.report.estimated_input_tokens,
+                exc.report.input_limit_tokens,
+            )
+            await q.put(
+                _sse(
+                    "error",
+                    {
+                        "type": "about:blank",
+                        "title": title,
+                        "status": status,
+                        "detail": detail,
+                        "request_id": request_id,
+                    },
+                )
+            )
         except Exception as exc:
             _logger.exception("stream error | session=%s: %s", session_id, exc)
             await q.put(
@@ -420,6 +504,22 @@ async def chat_invoke(
             messages=[HumanMessage(content=req.message)],
             thread_id=thread_id,
         )
+    except ContextBudgetExceeded as exc:
+        status, title, detail = _context_budget_problem(exc)
+        _logger.warning(
+            "context_budget_exceeded | session=%s reason=%s estimated=%s limit=%s",
+            session_id,
+            exc.reason,
+            exc.report.estimated_input_tokens,
+            exc.report.input_limit_tokens,
+        )
+        await _record_invoke_model_usage(
+            exc.completed_model_messages,
+            agent,
+            bucket_key,
+            compaction_usage=exc.compaction_usage,
+        )
+        raise AppError(status=status, title=title, detail=detail) from exc
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -431,28 +531,11 @@ async def chat_invoke(
     content = ai_msgs[-1].content if ai_msgs else ""
 
     # 同流式路径一样，逐次计入当前轮所有模型调用（含工具规划和最终总结）。
-    from api.metrics import llm_tokens_total, llm_cost_cny_total
-
-    invoke_tokens = 0
-    for message in latest_turn_ai_messages(msgs):
-        metered = meter_model_call(
-            message,
-            model_ref=agent.model_ref,
-            cost_estimator=estimate_configured_model_cost,
-        )
-        usage = metered.usage
-        model_name = metered.model_name
-        invoke_tokens += usage["total_tokens"]
-        if usage["prompt_tokens"]:
-            llm_tokens_total.labels(type="prompt", model=model_name).inc(
-                usage["prompt_tokens"]
-            )
-        if usage["completion_tokens"]:
-            llm_tokens_total.labels(type="completion", model=model_name).inc(
-                usage["completion_tokens"]
-            )
-        if metered.cost.status == "estimated" and metered.cost.amount:
-            llm_cost_cny_total.labels(model=model_name).inc(metered.cost.amount)
-    await record_token_usage(bucket_key, invoke_tokens)
+    await _record_invoke_model_usage(
+        latest_turn_ai_messages(msgs),
+        agent,
+        bucket_key,
+        compaction_usage=result.get("turn_compaction_usage"),
+    )
 
     return ChatResponse(content=content, session_id=session_id, thread_id=thread_id)

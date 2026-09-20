@@ -91,11 +91,34 @@ class State(InputState):
     """工具失败次数（后续可用于：连续失败 -> 回退回答/停止调用）。"""
 
     last_tool_result: Optional[Dict[str, Any]] = None
-    """最近一次工具的“结构化返回”（可选）。
+    """最近一次成功工具的信封摘要；不重复保存正文。"""
 
-    ToolNode 会把工具返回包进 ToolMessage.content；
-    你后续若在 call_model() 中解析 ToolMessage 并提取结构化结果，
-    可以写入 last_tool_result / tool_runs，方便模型二次推理与调试。
+    turn_evidence: List[Dict[str, Any]] = field(default_factory=list)
+    """本轮模型可见 RAG 片段的有界索引，按 chunk_id 合并。"""
+
+    turn_evidence_omitted_count: int = 0
+    """因账本容量或异常元数据而未纳入索引的候选片段数。"""
+
+    conversation_evidence: List[Dict[str, Any]] = field(default_factory=list)
+    """跨轮持久化的 RAG 来源索引；只保存查询与来源位置，不复制正文。"""
+
+    conversation_evidence_omitted_count: int = 0
+    """因容量、限幅或异常元数据未进入跨轮来源索引的累计数量。"""
+
+    conversation_evidence_scanned_message_count: int = 0
+    """跨轮来源索引已扫描到的完整消息数量，用于旧 Checkpoint 增量迁移。"""
+
+    conversation_summary: Optional[Dict[str, Any]] = None
+    """已完成旧轮次的派生摘要、来源消息 ID 与游标；不替换 messages 原文。"""
+
+    turn_compaction_usage: Optional[Dict[str, Any]] = None
+    """本轮额外摘要模型调用的用量；供非流式 API 精确计入配额。"""
+
+    compaction_control: Optional[Dict[str, Any]] = None
+    """历史压缩的持久化控制记录。
+
+    记录最近候选批次、拒绝原因和下次重试所需的最小来源 Token，
+    避免同一批不可压缩历史在每个用户轮次反复付费。
     """
 
     # -----------------------------

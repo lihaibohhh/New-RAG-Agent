@@ -8,15 +8,11 @@ from typing import Any
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
 
+from react_agent.agent.context_management import ContextBudget, build_model_context
 from react_agent.agent.contracts.dependencies import AgentDependencies
 from react_agent.agent.contracts.state import State
-from react_agent.agent.modeling.history import (
-    build_model_input,
-    prepare_model_messages,
-    sanitize_dangling_tool_calls,
-)
 from react_agent.metering.model_usage import meter_model_call
-from react_agent.agent.support.time import now_iso_in_timezone
+from react_agent.agent.time import now_iso_in_timezone
 from react_agent.agent.tool_flow.calls import get_tool_call_name
 from react_agent.agent.tool_flow.catalog import render_tool_catalog
 
@@ -59,17 +55,35 @@ async def invoke_chat_model(
         dependencies,
         tools_enabled=tools_enabled,
     )
+    model_context = build_model_context(
+        state,
+        agent_config,
+        system_prompt=system_prompt,
+        directive=directive,
+        budget=ContextBudget(
+            max_input_tokens=agent_config.max_input_tokens,
+            reserved_completion_tokens=dependencies.reserved_completion_tokens,
+            safety_margin_tokens=agent_config.context_safety_margin_tokens,
+            context_window_tokens=dependencies.model_context_window_tokens,
+        ),
+        bound_tools=active_tools if tools_enabled else (),
+    )
     base_model = dependencies.resolve_model()
     model = base_model.bind_tools(active_tools) if tools_enabled else base_model
-
-    messages = prepare_model_messages(list(state.messages), agent_config)
-    roles = [getattr(message, "role", type(message).__name__) for message in messages]
+    roles = [
+        getattr(message, "role", type(message).__name__)
+        for message in model_context.messages
+    ]
     logger.debug("模型输入裁剪后的消息序列: %s", roles)
-    messages = sanitize_dangling_tool_calls(messages)
+    logger.debug(
+        "模型上下文诊断: %s",
+        model_context.diagnostics,
+    )
+    logger.debug("模型输入预算: %s", model_context.budget_report)
 
     try:
         response: AIMessage = await model.ainvoke(
-            build_model_input(system_prompt, directive, messages),
+            model_context.as_list(),
             config=config,
         )
     except Exception as exc:
@@ -79,6 +93,13 @@ async def invoke_chat_model(
         logger.error("模型响应正文=%s", response_body)
         raise
 
+    return response, model_usage_update(state, dependencies, response)
+
+
+def model_usage_update(
+    state: State, dependencies: AgentDependencies, response: AIMessage
+) -> dict[str, Any]:
+    """主调用与历史压缩调用共用同一用量累计口径。"""
     metered = meter_model_call(
         response,
         model_ref=dependencies.model_ref,
@@ -104,7 +125,7 @@ async def invoke_chat_model(
         "pricing_rate_card_version": cost.rate_card_version,
         "llm_call_count": state.llm_call_count + 1,
     }
-    return response, usage_update
+    return usage_update
 
 
 def tool_names_from_response(response: AIMessage) -> list[str]:
@@ -113,4 +134,4 @@ def tool_names_from_response(response: AIMessage) -> list[str]:
     return [get_tool_call_name(call) or "unknown" for call in calls]
 
 
-__all__ = ["invoke_chat_model", "tool_names_from_response"]
+__all__ = ["invoke_chat_model", "model_usage_update", "tool_names_from_response"]

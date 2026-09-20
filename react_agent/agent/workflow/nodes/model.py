@@ -11,15 +11,15 @@ from langgraph.runtime import Runtime
 
 from react_agent.agent.contracts.dependencies import AgentDependencies
 from react_agent.agent.contracts.state import State
-from react_agent.agent.modeling.execution import (
+from react_agent.agent.model_execution import (
     invoke_chat_model,
     tool_names_from_response,
 )
-from react_agent.agent.policies.execution import (
+from react_agent.agent.policies import (
     TerminationReason,
     model_termination_reason,
 )
-from react_agent.agent.prompting.directives import render_finalization_directive
+from react_agent.agent.prompts import render_finalization_directive
 from react_agent.agent.tool_flow.budget import (
     count_successful_rag_calls_in_current_turn,
 )

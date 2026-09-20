@@ -11,7 +11,7 @@ from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import StateGraph
 
-from react_agent.agent.configuration.context import AgentContext
+from react_agent.agent.config import AgentContext
 from react_agent.agent.contracts.dependencies import AgentDependencies
 from react_agent.agent.contracts.state import InputState, State
 from react_agent.agent.tool_flow.budget import (
@@ -194,7 +194,12 @@ def test_agent_context_contains_only_agent_behavior_configuration() -> None:
         "rag_call_limit",
         "consecutive_failure_threshold",
         "max_history_tokens",
+        "max_input_tokens",
+        "context_safety_margin_tokens",
         "enable_history_truncation",
+        "enable_history_compaction",
+        "history_compaction_max_output_tokens",
+        "history_compaction_retry_new_tokens",
     }
 
 
@@ -426,22 +431,122 @@ def test_rag_call_policy_counts_only_successes_in_current_turn() -> None:
 
 def test_tool_payload_bounding_preserves_envelope_and_traceability() -> None:
     payload = tool_success(
-        tool_name="rag",
+        tool_name="query_internal_knowledge",
         query="query",
         data={
             "results": [
-                {"content": "a" * 80, "source_file": "one.pdf", "source_page": 1},
-                {"content": "b" * 80, "source_file": "two.pdf", "source_page": 2},
+                {
+                    "content": "a" * 800,
+                    "source": "one.pdf",
+                    "page": 1,
+                    "chunk_id": "one::1",
+                },
+                {
+                    "content": "b" * 800,
+                    "source": "two.pdf",
+                    "page": 2,
+                    "chunk_id": "two::2",
+                },
             ]
         },
+        meta={"has_relevant_content": True},
     )
 
-    bounded = json.loads(bound_tool_payload(json.dumps(payload), max_chars=150))
+    encoded = bound_tool_payload(json.dumps(payload), max_chars=700)
+    bounded = json.loads(encoded)
 
+    assert len(encoded) <= 700
     assert bounded["ok"] is True
-    assert bounded["tool"] == "rag"
+    assert bounded["tool"] == "query_internal_knowledge"
     assert bounded["meta"]["truncated"] is True
     assert bounded["meta"]["total_results"] == 2
+    assert bounded["meta"]["retrieval_hit"] is True
+    assert bounded["meta"]["has_relevant_content"] is True
+    assert bounded["data"]["has_relevant_content"] is True
+    assert len(bounded["data"]["results"]) == 2
+    assert [item["chunk_id"] for item in bounded["data"]["results"]] == [
+        "one::1",
+        "two::2",
+    ]
+    assert all(item["content"] for item in bounded["data"]["results"])
+
+
+def test_rag_payload_reports_budget_error_when_no_evidence_can_fit() -> None:
+    payload = tool_success(
+        tool_name="query_internal_knowledge",
+        query="query",
+        data={
+            "results": [
+                {
+                    "source": "very-long-file-name.pdf",
+                    "page": 1,
+                    "chunk_id": "very-long-id",
+                    "content": "important evidence",
+                }
+            ],
+            "has_relevant_content": True,
+        },
+        meta={"has_relevant_content": True},
+    )
+
+    encoded = bound_tool_payload(json.dumps(payload), max_chars=100)
+    bounded = json.loads(encoded)
+
+    assert len(encoded) <= 100
+    assert bounded["ok"] is False
+    assert bounded["error"]
+
+
+def test_rag_payload_removes_duplicate_source_prefix_before_bounding() -> None:
+    payload = tool_success(
+        tool_name="query_internal_knowledge",
+        query="query",
+        data={
+            "results": [
+                {
+                    "source": "report.pdf",
+                    "page": 3,
+                    "chunk_id": "report::3",
+                    "content": "[来源：report.pdf  第 3 页]\n关键数据 520 亿美元",
+                }
+            ]
+        },
+        meta={"has_relevant_content": True},
+    )
+
+    bounded = json.loads(bound_tool_payload(json.dumps(payload), max_chars=500))
+
+    assert bounded["data"]["results"][0]["content"] == "关键数据 520 亿美元"
+
+
+def test_rag_payload_keeps_three_long_table_chunks_under_default_budget() -> None:
+    payload = tool_success(
+        tool_name="query_internal_knowledge",
+        query="2026 年资本开支",
+        data={
+            "results": [
+                {
+                    "source": f"report-{index}.pdf",
+                    "page": index + 1,
+                    "chunk_id": f"report-{index}::table",
+                    "content": '| 项目 | 数值 |\n| 资本开支 | "520–560 亿美元" |\n'
+                    * 300,
+                }
+                for index in range(3)
+            ]
+        },
+        meta={"has_relevant_content": True},
+    )
+
+    encoded = bound_tool_payload(json.dumps(payload, ensure_ascii=False), 4000)
+    bounded = json.loads(encoded)
+
+    assert len(encoded) <= 4000
+    assert bounded["meta"]["visible_results"] == 3
+    assert [item["chunk_id"] for item in bounded["data"]["results"]] == [
+        f"report-{index}::table" for index in range(3)
+    ]
+    assert all(item["content_truncated"] for item in bounded["data"]["results"])
 
 
 @pytest.mark.asyncio
@@ -490,6 +595,32 @@ def test_utils_package_is_fully_removed() -> None:
     assert not (package_root / "utils").exists()
     for source_path in _python_sources(package_root):
         assert "react_agent.utils" not in source_path.read_text(encoding="utf-8")
+
+
+def test_context_legacy_entrypoints_are_fully_removed() -> None:
+    project_root = Path(__file__).parent.parent
+    agent_root = project_root / "react_agent" / "agent"
+    removed_paths = (
+        agent_root / "modeling" / "history.py",
+        agent_root / "tool_flow" / "evidence.py",
+    )
+    removed_modules = (
+        "react_agent.agent.modeling.history",
+        "react_agent.agent.tool_flow.evidence",
+    )
+
+    assert all(not path.exists() for path in removed_paths)
+    violations: dict[str, list[str]] = {}
+    for source_path in _python_sources(project_root):
+        imports = [
+            imported
+            for module in removed_modules
+            for imported in _imports_from(source_path, module)
+            if imported == module or imported.startswith(f"{module}.")
+        ]
+        if imports:
+            violations[str(source_path.relative_to(project_root))] = imports
+    assert violations == {}
 
 
 def test_internal_symbols_are_not_imported_across_project_modules() -> None:
@@ -557,10 +688,18 @@ def test_agent_nodes_remain_thin_orchestration_adapters() -> None:
     assert imports == []
 
 
-def test_agent_root_contains_only_public_package_api() -> None:
+def test_agent_root_contains_expected_flat_modules() -> None:
     project_root = Path(__file__).parent.parent
     agent_root = project_root / "react_agent" / "agent"
-    allowed_root_modules = {"__init__.py"}
+    allowed_root_modules = {
+        "__init__.py",
+        "config.py",
+        "model_execution.py",
+        "policies.py",
+        "prompts.py",
+        "service.py",
+        "time.py",
+    }
 
     assert {path.name for path in agent_root.glob("*.py")} == allowed_root_modules
 
@@ -571,10 +710,14 @@ def test_removed_agent_module_paths_are_not_imported() -> None:
         "react_agent.agent.context",
         "react_agent.agent.dependencies",
         "react_agent.agent.graph",
+        "react_agent.agent.application",
+        "react_agent.agent.configuration",
+        "react_agent.agent.modeling",
         "react_agent.agent.nodes",
-        "react_agent.agent.prompts",
-        "react_agent.agent.service",
+        "react_agent.agent.policies.execution",
+        "react_agent.agent.prompting",
         "react_agent.agent.state",
+        "react_agent.agent.support",
         "react_agent.agent.tool_calls",
         "react_agent.agent.tool_policy",
         "react_agent.agent.usage",
@@ -598,47 +741,48 @@ def test_agent_subpackages_follow_dependency_direction() -> None:
     project_root = Path(__file__).parent.parent
     agent_root = project_root / "react_agent" / "agent"
     constraints = {
-        "application": (
-            "react_agent.agent.modeling",
+        agent_root / "service.py": (
+            "react_agent.agent.model_execution",
             "react_agent.agent.tool_flow",
             "react_agent.agent.workflow",
         ),
-        "contracts": (
-            "react_agent.agent.modeling",
+        agent_root / "contracts": (
+            "react_agent.agent.model_execution",
             "react_agent.agent.tool_flow",
             "react_agent.agent.workflow",
         ),
-        "configuration": (
+        agent_root / "config.py": (
             "react_agent.agent.contracts",
-            "react_agent.agent.modeling",
+            "react_agent.agent.model_execution",
             "react_agent.agent.tool_flow",
             "react_agent.agent.workflow",
         ),
-        "policies": (
-            "react_agent.agent.configuration",
+        agent_root / "policies.py": (
+            "react_agent.agent.config",
             "react_agent.agent.contracts",
-            "react_agent.agent.modeling",
+            "react_agent.agent.model_execution",
             "react_agent.agent.tool_flow",
             "react_agent.agent.workflow",
         ),
-        "prompting": (
-            "react_agent.agent.configuration",
+        agent_root / "prompts.py": (
+            "react_agent.agent.config",
             "react_agent.agent.contracts",
-            "react_agent.agent.modeling",
+            "react_agent.agent.model_execution",
             "react_agent.agent.policies",
             "react_agent.agent.tool_flow",
             "react_agent.agent.workflow",
         ),
-        "modeling": ("react_agent.agent.workflow",),
-        "tool_flow": (
-            "react_agent.agent.modeling",
+        agent_root / "model_execution.py": ("react_agent.agent.workflow",),
+        agent_root / "tool_flow": (
+            "react_agent.agent.model_execution",
             "react_agent.agent.workflow",
         ),
     }
     violations: dict[str, list[str]] = {}
 
-    for package_name, forbidden_prefixes in constraints.items():
-        for source_path in _python_sources(agent_root / package_name):
+    for source_root, forbidden_prefixes in constraints.items():
+        source_paths = [source_root] if source_root.is_file() else _python_sources(source_root)
+        for source_path in source_paths:
             imports = [
                 imported
                 for prefix in forbidden_prefixes

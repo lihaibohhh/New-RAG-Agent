@@ -7,7 +7,7 @@ from typing import Any
 
 def __getattr__(name: str) -> Any:
     if name == "AgentService":
-        from react_agent.agent.application.service import AgentService
+        from react_agent.agent.service import AgentService
 
         return AgentService
     if name == "AgentDependencies":
@@ -15,7 +15,7 @@ def __getattr__(name: str) -> Any:
 
         return AgentDependencies
     if name == "AgentContext":
-        from react_agent.agent.configuration.context import AgentContext
+        from react_agent.agent.config import AgentContext
 
         return AgentContext
     if name in {"State", "InputState"}:

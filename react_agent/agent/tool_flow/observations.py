@@ -8,7 +8,7 @@ from typing import Any
 
 from langchain_core.messages import AnyMessage, ToolMessage
 
-from react_agent.agent.support.time import now_iso_in_timezone
+from react_agent.agent.time import now_iso_in_timezone
 from react_agent.agent.tool_flow.calls import (
     extract_recent_tool_messages,
     find_last_real_human_index,
@@ -63,6 +63,7 @@ def parse_tool_batch(
             "ok": run_ok,
             "error": run_error,
             "meta": payload.get("meta"),
+            "sources": _source_summaries(payload),
             "ts": now_iso_in_timezone(timezone),
         }
         if payload.get("ok") is True:
@@ -79,6 +80,37 @@ def parse_tool_batch(
     )
 
 
+def _source_summaries(payload: dict[str, Any], *, limit: int = 12) -> list[dict[str, Any]]:
+    """为观测面板提取有界来源位置，不复制工具正文。"""
+    data = payload.get("data")
+    if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+        return []
+    sources: list[dict[str, Any]] = []
+    seen: set[tuple[str, Any, str]] = set()
+    for item in data["results"]:
+        if not isinstance(item, dict):
+            continue
+        source = str(item.get("source") or item.get("source_file") or "")
+        page = item.get("page", item.get("source_page"))
+        chunk_id = str(item.get("chunk_id") or "")
+        if not source and page is None and not chunk_id:
+            continue
+        key = (source, page, chunk_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        sources.append(
+            {
+                "source_file": source or None,
+                "source_page": page,
+                "chunk_id": chunk_id or None,
+            }
+        )
+        if len(sources) >= limit:
+            break
+    return sources
+
+
 def _count_consecutive_rag_misses(messages: list[AnyMessage]) -> int:
     last_human_index = find_last_real_human_index(messages)
     if last_human_index < 0:
@@ -93,6 +125,8 @@ def _count_consecutive_rag_misses(messages: list[AnyMessage]) -> int:
             continue
         try:
             payload = json.loads(getattr(message, "content", None) or "{}")
+            if payload.get("ok") is not True:
+                continue
             has_content = payload["meta"]["has_relevant_content"]
         except Exception:
             has_content = None

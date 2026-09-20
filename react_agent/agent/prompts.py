@@ -1,4 +1,8 @@
-"""Agent 默认系统提示词。"""
+"""Agent 默认系统提示词与瞬态控制指令。"""
+
+from __future__ import annotations
+
+from typing import Any
 
 SYSTEM_PROMPT = """你是一个严谨、以事实为导向的学术与技术AI助手。
 当前系统时间: {system_time}
@@ -17,7 +21,7 @@ SYSTEM_PROMPT = """你是一个严谨、以事实为导向的学术与技术AI�
 3. 交叉验证：遇到不确定的事实、数值或专业理论，必须优先调用工具进行核实。
 4. 绝对的领域隔离与优雅降级：
    - 当用户指令明确指向“内部文件”、“文献库”或要求进行“本地文献对比”时，你被剥夺使用 search 工具的权限。
-   - 【降级策略】：如果你通过 query_internal_knowledge 无法检索到足够的信息来填补数据（例如：对比表格中某个维度缺失），你必须在最终答案或 Excel 数据中直接填入“文献未提及”或“N/A”。
+   - 【降级策略】：如果已检索片段不足以填补数据（例如：对比表格中某个维度缺失），你必须在最终答案或 Excel 数据中明确写“当前检索片段未确认”或“N/A”；不能据此断言整份文献没有提及。
    - 任何情况下，都绝对不允许为了“强行补全任务”而擅自调用 search 工具去互联网抓取替代信息。
    
 =========================================================
@@ -39,10 +43,11 @@ SYSTEM_PROMPT = """你是一个严谨、以事实为导向的学术与技术AI�
     - 若上下文已明确实体，禁止在 query 中保留"该公司""此协议""这家车企"等模糊指代。
  
 2. 重试规则：
-   - 每次检索若返回 has_relevant_content: false，计为一次"无效检索"。
+   - 仅当工具成功（ok: true）且返回 has_relevant_content: false 时，计为一次"无效检索"；工具错误不等于知识库未命中。
    - 连续 {consecutive_failure_threshold} 次无效检索后，立即执行拒答终止，不再继续。
    - 若检索返回了有效内容（has_relevant_content: true），
      不计入无效次数，可继续检索其他子问题。
+   - 若结果标记 truncated 或 content_truncated，只能据可见正文作答；不能推断被裁剪部分的内容。
  
 3. 时效性声明：当检索结果来自多份同类型文档（如多期行业周报）时，
    必须在回答开头注明所引用文档的完整文件名，并提示用户确认是否为目标版本。
@@ -50,4 +55,49 @@ SYSTEM_PROMPT = """你是一个严谨、以事实为导向的学术与技术AI�
 """
 
 
-__all__ = ["SYSTEM_PROMPT"]
+def render_tool_recovery_directive(errors: list[dict[str, Any]]) -> str:
+    """把当前工具批次错误渲染为一次瞬态恢复指令。"""
+    summaries: list[str] = []
+    for run in errors:
+        error_info = run.get("error") or "未知错误"
+        if isinstance(error_info, dict):
+            error_info = (
+                f"{error_info.get('code', 'ERR')}: "
+                f"{error_info.get('message', str(error_info))}"
+            )
+        summaries.append(
+            f"- {run.get('tool', 'unknown_tool')}: {str(error_info)[:300]}"
+        )
+    return (
+        "【工具恢复指令】上一批工具调用存在失败：\n"
+        + "\n".join(summaries)
+        + "\n请分析错误原因并修正参数；不要以相同参数盲目重复调用。"
+        "若错误不可恢复，请基于已有结果直接回答并明确说明限制。"
+    )
+
+
+def render_finalization_directive(reason: str | None) -> str:
+    """按主动终止原因生成禁止继续调用工具的最终回答指令。"""
+    descriptions = {
+        "MODEL_ROUND_BUDGET_EXHAUSTED": "常规模型推理轮次已达到上限",
+        "TOOL_BATCH_BUDGET_EXHAUSTED": "工具执行批次已达到上限",
+        "TOOL_RETRY_BUDGET_EXHAUSTED": "工具失败恢复次数已达到上限",
+        "RAG_CALL_BUDGET_EXHAUSTED": "内部知识库调用次数已达到上限",
+        "RAG_CONSECUTIVE_MISS": "内部知识库连续未检索到相关内容",
+        "EVIDENCE_OUTPUT_BUDGET_EXHAUSTED": "检索结果超过可展示预算，部分证据无法读取",
+    }
+    detail = descriptions.get(reason or "", "本轮 Agent 已进入主动收口阶段")
+    return (
+        f"【最终回答指令】{detail}。禁止继续调用任何工具。"
+        "请仅根据当前对话和已经取得的工具结果生成最终用户答复。"
+        "优先总结已确认的信息；证据不足或工具失败的部分必须明确说明，"
+        "若工具结果被裁剪，仅引用实际可见的正文，不得推断未显示部分；"
+        "不得猜测、补造数据，也不要向用户暴露 recursion_limit 等内部实现参数。"
+    )
+
+
+__all__ = [
+    "SYSTEM_PROMPT",
+    "render_finalization_directive",
+    "render_tool_recovery_directive",
+]

@@ -9,6 +9,7 @@
 主要目录与入口：
 
 - `react_agent/agent/`：Agent 状态、节点、路由、工具策略、用量计算、图编译、执行上下文与对话用例。
+- `react_agent/agent/context_management/`：从完整 Agent State 构造单次模型输入，管理轮次分段、Token 预算、工具协议修复、证据索引与后续压缩契约。
 - `react_agent/tooling/`：Agent 与工具适配器共享的 ToolResult 信封和重试执行契约。
 - `react_agent/models/`：LLM Provider 解析、创建与缓存；由 Runtime、评测和显式脚本消费。
 - `react_agent/infrastructure/`：Redis 等跨用例共享的技术资源适配器，不得反向依赖 Agent。
