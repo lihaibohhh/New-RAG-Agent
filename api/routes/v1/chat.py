@@ -22,6 +22,7 @@ from typing import Any, AsyncGenerator, Mapping, Sequence
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage
+from langgraph.errors import GraphRecursionError
 
 from api.dependencies import get_agent
 from api.errors import AppError
@@ -33,6 +34,7 @@ from react_agent.agent.context_management import (
     ContextBudgetExceeded,
     latest_turn_ai_messages,
 )
+from react_agent.agent.policies import TerminationReason
 from react_agent.metering.model_usage import meter_model_call
 from react_agent.metering.pricing import estimate_configured_model_cost
 
@@ -51,6 +53,10 @@ def _context_budget_problem(exc: ContextBudgetExceeded) -> tuple[int, str, str]:
     if exc.reason == "CURRENT_TURN_CONTEXT_TOO_LARGE":
         return 413, "Context Too Large", "当前轮工具结果超过模型输入预算，请缩小问题范围后重试"
     return 500, "Context Configuration Error", "模型输入预算配置不足，无法执行本次请求"
+
+
+def _graph_step_problem() -> tuple[int, str, str]:
+    return 500, "Agent Step Budget Exceeded", "本轮处理达到执行步数上限，请缩小问题范围后重试"
 
 
 async def _record_invoke_model_usage(
@@ -195,6 +201,24 @@ def _map_event(ev: dict, state: dict, agent: AgentService, start: float) -> str 
             },
         )
 
+    elif name == "on_chain_end" and ev.get("name") in {
+        "call_model",
+        "postprocess_tools",
+    }:
+        output = data.get("output")
+        if isinstance(output, Mapping) and output.get("termination_reason") == (
+            TerminationReason.UNEXPECTED_RECURSION_BOUNDARY.value
+        ):
+            messages = output.get("messages") or []
+            if messages and isinstance(messages[-1], AIMessage):
+                content = messages[-1].content
+                if isinstance(content, str) and content:
+                    if state["ttft_ms"] is None:
+                        state["ttft_ms"] = round(
+                            (time.perf_counter() - start) * 1000
+                        )
+                    return _sse("token", {"delta": content})
+
     return None
 
 
@@ -265,6 +289,26 @@ async def _stream_v1_generator(
                 exc.reason,
                 exc.report.estimated_input_tokens,
                 exc.report.input_limit_tokens,
+            )
+            await q.put(
+                _sse(
+                    "error",
+                    {
+                        "type": "about:blank",
+                        "title": title,
+                        "status": status,
+                        "detail": detail,
+                        "request_id": request_id,
+                    },
+                )
+            )
+        except GraphRecursionError as exc:
+            status, title, detail = _graph_step_problem()
+            _logger.error(
+                "graph_step_budget_exceeded | session=%s request_id=%s: %s",
+                session_id,
+                request_id,
+                exc,
             )
             await q.put(
                 _sse(
@@ -519,6 +563,20 @@ async def chat_invoke(
             bucket_key,
             compaction_usage=exc.compaction_usage,
         )
+        raise AppError(status=status, title=title, detail=detail) from exc
+    except GraphRecursionError as exc:
+        status, title, detail = _graph_step_problem()
+        _logger.error(
+            "graph_step_budget_exceeded | session=%s: %s", session_id, exc
+        )
+        completed_messages = getattr(exc, "completed_model_messages", None)
+        if completed_messages is not None:
+            await _record_invoke_model_usage(
+                completed_messages,
+                agent,
+                bucket_key,
+                compaction_usage=getattr(exc, "compaction_usage", None),
+            )
         raise AppError(status=status, title=title, detail=detail) from exc
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

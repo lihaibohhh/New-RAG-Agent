@@ -4,23 +4,31 @@ import ast
 import json
 from dataclasses import fields
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.errors import GraphRecursionError
 from langgraph.graph import StateGraph
 
 from react_agent.agent.config import AgentContext
 from react_agent.agent.contracts.dependencies import AgentDependencies
 from react_agent.agent.contracts.state import InputState, State
+from react_agent.agent.service import AgentService
 from react_agent.agent.tool_flow.budget import (
     count_successful_rag_calls_in_current_turn,
 )
 from react_agent.agent.tool_flow.calls import extract_tool_call_ids
 from react_agent.agent.tool_flow.payload import bound_tool_payload
 from react_agent.agent.workflow.graph import build_base_graph
-from react_agent.agent.workflow.nodes import call_model
+from react_agent.agent.workflow.nodes import (
+    call_model,
+    dynamic_tool_node,
+    postprocess_tools,
+)
+from react_agent.agent.workflow.routing import route_after_postprocess
 from react_agent.tooling.results import tool_error, tool_success
 from react_agent.tooling.retry import with_retry
 
@@ -93,6 +101,330 @@ async def test_last_step_tool_call_returns_a_mergeable_fallback() -> None:
     assert result["messages"][-1].usage_metadata["total_tokens"] == 7
     assert len(result["debug_log"]) == 1
     assert result["debug_log"][0].startswith("[call_model] is_last_step=True;")
+    events = [
+        event
+        async for event in graph.astream_events(
+            {"messages": [HumanMessage(content="测试流式边界兜底")]},
+            context=dependencies,
+            config={"recursion_limit": 2},
+            version="v2",
+        )
+    ]
+    node_ends = [
+        event
+        for event in events
+        if event["event"] == "on_chain_end" and event.get("name") == "call_model"
+    ]
+    assert len(node_ends) == 1
+    assert node_ends[0]["data"]["output"]["termination_reason"] == (
+        "UNEXPECTED_RECURSION_BOUNDARY"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recursion_limit", [4, 5, 6])
+async def test_low_graph_step_budget_avoids_tool_call_before_model_invocation(
+    recursion_limit: int,
+) -> None:
+    class Model:
+        def __init__(self) -> None:
+            self.bound_calls = 0
+
+        def bind_tools(self, _tools):
+            self.bound_calls += 1
+            return self
+
+        async def ainvoke(self, _messages, config=None):
+            if self.bound_calls:
+                return AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"id": "would-run", "name": "search", "args": {"query": "x"}}
+                    ],
+                )
+            return AIMessage(
+                content="根据现有信息直接回答。",
+                usage_metadata={
+                    "input_tokens": 5,
+                    "output_tokens": 2,
+                    "total_tokens": 7,
+                },
+            )
+
+    model = Model()
+    dependencies = AgentDependencies(
+        config=AgentContext(enable_history_truncation=False),
+        model_provider=lambda: model,
+        tools=(),
+    )
+    result = await build_base_graph().compile().ainvoke(
+        {"messages": [HumanMessage(content="测试低图步数")]},
+        context=dependencies,
+        config={"recursion_limit": recursion_limit},
+    )
+
+    assert model.bound_calls == 0
+    assert result["messages"][-1].content == "根据现有信息直接回答。"
+    assert result["termination_reason"] == "GRAPH_STEP_BUDGET_EXHAUSTED"
+    assert result["total_tokens"] == 7
+    assert result["llm_call_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_no_model_is_called_when_no_graph_step_can_finish() -> None:
+    dependencies = AgentDependencies(
+        config=AgentContext(enable_history_truncation=False),
+        model_provider=lambda: pytest.fail("不应调用模型"),
+        tools=(),
+    )
+    state = State(messages=[HumanMessage(content="问题")], remaining_steps=0)
+    runtime = SimpleNamespace(context=dependencies)
+
+    with pytest.raises(GraphRecursionError, match="call_model"):
+        await call_model(state, runtime)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("current_turn_persisted", [False, True])
+async def test_failed_invoke_collects_only_its_checkpointed_model_usage(
+    current_turn_persisted: bool,
+) -> None:
+    class FailingGraph:
+        current_input: HumanMessage | None = None
+
+        async def ainvoke(self, input_state, *, context, config):
+            self.current_input = input_state["messages"][-1]
+            raise GraphRecursionError("test limit")
+
+        async def aget_state(self, config):
+            messages = [
+                HumanMessage(id="prior", content="问题"),
+                AIMessage(content="上轮回答"),
+            ]
+            if current_turn_persisted:
+                messages.extend(
+                    [
+                        self.current_input,
+                        AIMessage(
+                            content="",
+                            usage_metadata={
+                                "input_tokens": 5,
+                                "output_tokens": 2,
+                                "total_tokens": 7,
+                            },
+                        ),
+                    ]
+                )
+            return SimpleNamespace(
+                values={"messages": messages, "turn_compaction_usage": None}
+            )
+
+    graph = FailingGraph()
+    dependencies = AgentDependencies(
+        config=AgentContext(enable_history_truncation=False),
+        model_provider=lambda: None,
+        tools=(),
+    )
+    service = AgentService(dependencies, graph)
+
+    with pytest.raises(GraphRecursionError) as captured:
+        await service.invoke([HumanMessage(content="问题")], thread_id="user:test")
+
+    assert graph.current_input.id is not None
+    completed = getattr(captured.value, "completed_model_messages", None)
+    if current_turn_persisted:
+        assert len(completed) == 1
+        assert completed[0].usage_metadata["total_tokens"] == 7
+    else:
+        assert completed is None
+
+
+@pytest.mark.asyncio
+async def test_actual_graph_recursion_error_preserves_completed_model_usage() -> None:
+    async def emit_model(state: State) -> dict[str, object]:
+        return {
+            "messages": [
+                AIMessage(
+                    content="已产生费用的中间结果",
+                    usage_metadata={
+                        "input_tokens": 5,
+                        "output_tokens": 2,
+                        "total_tokens": 7,
+                    },
+                )
+            ]
+        }
+
+    async def spin(state: State) -> dict[str, int]:
+        return {"step_counter": state.step_counter + 1}
+
+    builder = StateGraph(
+        State,
+        input_schema=InputState,
+        context_schema=AgentDependencies,
+    )
+    builder.add_node("emit_model", emit_model)
+    builder.add_node("spin", spin)
+    builder.add_edge("__start__", "emit_model")
+    builder.add_edge("emit_model", "spin")
+    builder.add_edge("spin", "spin")
+    graph = builder.compile(checkpointer=MemorySaver())
+    dependencies = AgentDependencies(
+        config=AgentContext(
+            recursion_limit=11,
+            max_model_rounds=1,
+            max_tool_batches=1,
+            max_tool_retries=1,
+            enable_history_truncation=False,
+        ),
+        model_provider=lambda: None,
+        tools=(),
+    )
+    service = AgentService(dependencies, graph)
+
+    with pytest.raises(GraphRecursionError) as captured:
+        await service.invoke([HumanMessage(content="问题")], thread_id="user:loop")
+
+    completed = captured.value.completed_model_messages
+    assert len(completed) == 1
+    assert completed[0].usage_metadata["total_tokens"] == 7
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recursion_limit", [7, 8])
+async def test_tool_result_finalizes_while_one_graph_step_is_reserved(
+    recursion_limit: int,
+) -> None:
+    class BoundModel:
+        async def ainvoke(self, _messages, config=None):
+            return AIMessage(
+                content="",
+                tool_calls=[
+                    {"id": "tool-1", "name": "search", "args": {"query": "x"}}
+                ],
+            )
+
+    class Model:
+        def __init__(self) -> None:
+            self.bound_calls = 0
+
+        def bind_tools(self, _tools):
+            self.bound_calls += 1
+            return BoundModel()
+
+        async def ainvoke(self, _messages, config=None):
+            return AIMessage(content="根据工具结果完成最终回答。")
+
+    calls: list[str] = []
+
+    def search(query: str) -> str:
+        calls.append(query)
+        return json.dumps(tool_success(tool_name="search", query=query, data={}))
+
+    model = Model()
+    dependencies = AgentDependencies(
+        config=AgentContext(enable_history_truncation=False),
+        model_provider=lambda: model,
+        tools=(StructuredTool.from_function(search, description="测试搜索"),),
+    )
+    result = await build_base_graph().compile().ainvoke(
+        {"messages": [HumanMessage(content="测试工具后的收口")]},
+        context=dependencies,
+        config={"recursion_limit": recursion_limit},
+    )
+
+    assert calls == ["x"]
+    assert model.bound_calls == 1
+    assert result["turn_tool_batches"] == 1
+    assert result["termination_reason"] == "GRAPH_STEP_BUDGET_EXHAUSTED"
+    assert result["messages"][-1].content == "根据工具结果完成最终回答。"
+
+
+@pytest.mark.asyncio
+async def test_postprocess_last_step_returns_a_protocol_safe_fallback() -> None:
+    pending = AIMessage(
+        content="",
+        tool_calls=[{"id": "tool-1", "name": "search", "args": {"query": "x"}}],
+    )
+    tool_result = ToolMessage(
+        tool_call_id="tool-1",
+        name="search",
+        content=json.dumps(tool_success(tool_name="search", query="x", data={})),
+    )
+    dependencies = AgentDependencies(
+        config=AgentContext(enable_history_truncation=False),
+        model_provider=lambda: None,
+        tools=(),
+    )
+    builder = StateGraph(
+        State,
+        input_schema=InputState,
+        context_schema=AgentDependencies,
+    )
+    builder.add_node("postprocess_tools", postprocess_tools)
+    builder.add_edge("__start__", "postprocess_tools")
+    builder.add_conditional_edges(
+        "postprocess_tools", route_after_postprocess, {"__end__": "__end__"}
+    )
+
+    result = await builder.compile().ainvoke(
+        {"messages": [HumanMessage(content="问题"), pending, tool_result]},
+        context=dependencies,
+        config={"recursion_limit": 2},
+    )
+
+    assert result["termination_reason"] == "UNEXPECTED_RECURSION_BOUNDARY"
+    assert isinstance(result["messages"][-1], AIMessage)
+    assert "无法继续生成可靠结论" in result["messages"][-1].content
+
+
+@pytest.mark.asyncio
+async def test_tools_do_not_execute_without_room_for_result_processing() -> None:
+    calls: list[str] = []
+
+    def search(query: str) -> str:
+        calls.append(query)
+        return json.dumps(tool_success(tool_name="search", query=query, data={}))
+
+    dependencies = AgentDependencies(
+        config=AgentContext(enable_history_truncation=False),
+        model_provider=lambda: None,
+        tools=(StructuredTool.from_function(search, description="测试搜索"),),
+    )
+    builder = StateGraph(
+        State,
+        input_schema=InputState,
+        context_schema=AgentDependencies,
+    )
+    builder.add_node("tools", dynamic_tool_node)
+    builder.add_node("postprocess_tools", postprocess_tools)
+    builder.add_edge("__start__", "tools")
+    builder.add_edge("tools", "postprocess_tools")
+    builder.add_conditional_edges(
+        "postprocess_tools", route_after_postprocess, {"__end__": "__end__"}
+    )
+    result = await builder.compile().ainvoke(
+        {
+            "messages": [
+                HumanMessage(content="问题"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"id": "tool-1", "name": "search", "args": {"query": "x"}}
+                    ],
+                ),
+            ]
+        },
+        context=dependencies,
+        config={"recursion_limit": 3},
+    )
+
+    assert calls == []
+    assert isinstance(result["messages"][-2], ToolMessage)
+    assert json.loads(result["messages"][-2].content)["error"]["code"] == (
+        "GRAPH_STEP_BUDGET_EXHAUSTED"
+    )
+    assert "无法继续生成可靠结论" in result["messages"][-1].content
 
 
 @pytest.mark.asyncio

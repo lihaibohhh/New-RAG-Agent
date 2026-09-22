@@ -24,7 +24,28 @@ class TerminationReason(str, Enum):
     RAG_CALL_BUDGET_EXHAUSTED = "RAG_CALL_BUDGET_EXHAUSTED"
     RAG_CONSECUTIVE_MISS = "RAG_CONSECUTIVE_MISS"
     EVIDENCE_OUTPUT_BUDGET_EXHAUSTED = "EVIDENCE_OUTPUT_BUDGET_EXHAUSTED"
+    GRAPH_STEP_BUDGET_EXHAUSTED = "GRAPH_STEP_BUDGET_EXHAUSTED"
     UNEXPECTED_RECURSION_BOUNDARY = "UNEXPECTED_RECURSION_BOUNDARY"
+
+
+def allow_tool_path(remaining_steps: int) -> bool:
+    """为工具执行、结果处理及最坏情况下的最终总结各留一步。"""
+    return remaining_steps >= 4
+
+
+def can_execute_tools(remaining_steps: int) -> bool:
+    """工具节点之后还需结果处理与最终总结两个节点。"""
+    return remaining_steps >= 3
+
+
+def finalize_after_tools(remaining_steps: int) -> bool:
+    """即将无法完成下一轮工具循环时，进入收口路径。"""
+    return remaining_steps <= 3
+
+
+def can_schedule_finalizer(remaining_steps: int) -> bool:
+    """当前节点结束后是否还容得下独立的最终总结节点。"""
+    return remaining_steps >= 2
 
 
 def minimum_recursion_limit(
@@ -114,6 +135,10 @@ def tool_batch_termination_reason(
 __all__ = [
     "ExecutionBudget",
     "TerminationReason",
+    "allow_tool_path",
+    "can_execute_tools",
+    "can_schedule_finalizer",
+    "finalize_after_tools",
     "minimum_recursion_limit",
     "model_termination_reason",
     "tool_batch_termination_reason",

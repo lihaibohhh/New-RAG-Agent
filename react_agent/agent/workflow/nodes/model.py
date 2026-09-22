@@ -7,6 +7,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
+from langgraph.errors import GraphRecursionError
 from langgraph.runtime import Runtime
 
 from react_agent.agent.contracts.dependencies import AgentDependencies
@@ -17,6 +18,7 @@ from react_agent.agent.model_execution import (
 )
 from react_agent.agent.policies import (
     TerminationReason,
+    allow_tool_path,
     model_termination_reason,
 )
 from react_agent.agent.prompts import render_finalization_directive
@@ -36,12 +38,25 @@ async def call_model(
 ) -> dict[str, Any]:
     """调用可使用工具的主模型，并根据显式业务预算决定是否收口。"""
     dependencies = runtime.context
+    if state.remaining_steps < 1:
+        raise GraphRecursionError("call_model 已无可完成的图步骤")
+    tools_allowed = allow_tool_path(state.remaining_steps)
+    boundary_reason = TerminationReason.GRAPH_STEP_BUDGET_EXHAUSTED.value
+    if not tools_allowed:
+        logger.info(
+            "graph_step_budget_final_answer | remaining_steps=%s",
+            state.remaining_steps,
+        )
     response, usage_update = await invoke_chat_model(
         state,
         dependencies,
         config,
-        allow_tools=True,
-        directive=state.pending_directive,
+        allow_tools=tools_allowed,
+        directive=(
+            state.pending_directive
+            if tools_allowed
+            else render_finalization_directive(boundary_reason)
+        ),
     )
     next_model_round = state.turn_model_rounds + 1
     tool_call_ids = extract_tool_call_ids(response)
@@ -55,14 +70,15 @@ async def call_model(
         successful_rag_calls=rag_calls,
     )
 
-    if state.is_last_step:
+    if not tools_allowed and tool_call_ids:
         logger.error(
-            "unexpected_recursion_boundary | model_round=%s tool_batches=%s tool_calls=%s",
+            "unexpected_tool_call_at_graph_boundary | model_round=%s "
+            "tool_batches=%s remaining_steps=%s tool_calls=%s",
             next_model_round,
             state.turn_tool_batches,
+            state.remaining_steps,
             tool_names,
         )
-    if state.is_last_step and tool_call_ids:
         return _emergency_model_boundary_update(
             state,
             response,
@@ -76,7 +92,9 @@ async def call_model(
         "messages": [response],
         "step_counter": state.step_counter + 1,
         "turn_model_rounds": next_model_round,
-        "termination_reason": termination_reason,
+        "termination_reason": (
+            termination_reason if tools_allowed else boundary_reason
+        ),
         "pending_directive": None,
     }
     update.update(usage_update)
@@ -126,6 +144,8 @@ async def finalize_model(
     config: RunnableConfig = None,
 ) -> dict[str, Any]:
     """调用不绑定工具的最终总结模型。"""
+    if state.remaining_steps < 1:
+        raise GraphRecursionError("finalize_model 已无可完成的图步骤")
     response, usage_update = await invoke_chat_model(
         state,
         runtime.context,

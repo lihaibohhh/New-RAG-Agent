@@ -8,7 +8,7 @@
 - prompting/ 强调中文回答与“需要核实时必须用工具”的规则，State 预留位置以便做：工具失败回退、事实缓存、引用整理等
 
 注意：
-- 当前图只硬依赖两个字段：messages 与 is_last_step
+- 当前图依赖 messages 与 LangGraph 注入的剩余步骤
 - 下面新增字段全部“向后兼容”：不改 graph.py 也能正常跑；以后你想增强再用它们。
 """
 
@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from langchain_core.messages import AnyMessage
 from langgraph.graph import add_messages
-from langgraph.managed import IsLastStep
+from langgraph.managed import IsLastStep, RemainingSteps
 from typing_extensions import Annotated
 
 
@@ -64,6 +64,8 @@ class State(InputState):
 
     # LangGraph managed：接近 recursion_limit 时置 True，仅用于异常边界观测/保险。
     is_last_step: IsLastStep = field(default=False)
+    # LangGraph managed：本次图调用的剩余步骤，不写入 Checkpoint。
+    remaining_steps: RemainingSteps = field(default=50)
 
     # -----------------------------
     # 工具调用轨迹（建议：只存“结构化摘要”，别存巨量原文）

@@ -3,6 +3,11 @@
 from __future__ import annotations
 import logging
 from typing import Any, List
+from uuid import uuid4
+
+from langchain_core.messages import AIMessage, HumanMessage
+from langgraph.errors import GraphRecursionError
+
 from react_agent.agent.config import AgentContext
 from react_agent.agent.contracts.dependencies import AgentDependencies
 from react_agent.metering.turn import extract_cumulative_snapshot
@@ -74,9 +79,51 @@ class AgentService:
             "configurable": {"thread_id": thread_id},
         }
 
-        result = await self._graph.ainvoke(
-            {"messages": messages}, context=self._dependencies, config=config
-        )
+        input_messages = list(messages)
+        current_human_id: str | None = None
+        for index in range(len(input_messages) - 1, -1, -1):
+            message = input_messages[index]
+            if isinstance(message, HumanMessage):
+                current_human_id = message.id or str(uuid4())
+                if not message.id:
+                    input_messages[index] = message.model_copy(
+                        update={"id": current_human_id}
+                    )
+                break
+
+        try:
+            result = await self._graph.ainvoke(
+                {"messages": input_messages},
+                context=self._dependencies,
+                config=config,
+            )
+        except GraphRecursionError as exc:
+            if current_human_id is not None:
+                try:
+                    snapshot = await self._graph.aget_state(config)
+                    values = dict(getattr(snapshot, "values", None) or {})
+                    persisted_messages = list(values.get("messages") or [])
+                    current_index = next(
+                        (
+                            index
+                            for index, message in enumerate(persisted_messages)
+                            if isinstance(message, HumanMessage)
+                            and message.id == current_human_id
+                        ),
+                        None,
+                    )
+                    if current_index is not None:
+                        exc.completed_model_messages = tuple(
+                            message
+                            for message in persisted_messages[current_index + 1 :]
+                            if isinstance(message, AIMessage)
+                        )
+                        exc.compaction_usage = values.get("turn_compaction_usage")
+                except Exception:
+                    _logger.exception(
+                        "无法读取图步数异常后的用量状态 | thread_id=%s", thread_id
+                    )
+            raise
 
         return result
 
