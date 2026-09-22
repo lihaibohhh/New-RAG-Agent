@@ -85,6 +85,7 @@ def render_finalization_directive(reason: str | None) -> str:
         "RAG_CALL_BUDGET_EXHAUSTED": "内部知识库调用次数已达到上限",
         "RAG_CONSECUTIVE_MISS": "内部知识库连续未检索到相关内容",
         "EVIDENCE_OUTPUT_BUDGET_EXHAUSTED": "检索结果超过可展示预算，部分证据无法读取",
+        "GRAPH_STEP_BUDGET_EXHAUSTED": "本轮执行空间即将耗尽",
     }
     detail = descriptions.get(reason or "", "本轮 Agent 已进入主动收口阶段")
     return (

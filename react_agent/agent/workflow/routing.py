@@ -4,6 +4,7 @@ from typing import Literal
 
 from langchain_core.messages import AIMessage
 from react_agent.agent.contracts.state import State
+from react_agent.agent.policies import TerminationReason
 from react_agent.agent.tool_flow.calls import extract_tool_call_ids
 
 
@@ -31,8 +32,10 @@ def route_model_output(
 
 def route_after_postprocess(
     state: State,
-) -> Literal["call_model", "reflection", "finalize_model"]:
+) -> Literal["__end__", "call_model", "reflection", "finalize_model"]:
     """按显式业务终止原因和当前工具批次状态选择后续节点。"""
+    if state.termination_reason == TerminationReason.UNEXPECTED_RECURSION_BOUNDARY.value:
+        return "__end__"
     if state.termination_reason:
         return "finalize_model"
     if state.last_tool_batch_errors:

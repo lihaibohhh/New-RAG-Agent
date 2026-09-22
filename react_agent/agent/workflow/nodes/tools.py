@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
+from langgraph.errors import GraphRecursionError
 from langgraph.runtime import Runtime
 
 from react_agent.agent.context_management.evidence import (
@@ -16,6 +18,9 @@ from react_agent.agent.contracts.dependencies import AgentDependencies
 from react_agent.agent.contracts.state import State
 from react_agent.agent.policies import (
     TerminationReason,
+    can_execute_tools,
+    can_schedule_finalizer,
+    finalize_after_tools,
     tool_batch_termination_reason,
 )
 from react_agent.agent.tool_flow.calls import close_tool_calls_for_budget
@@ -24,12 +29,36 @@ from react_agent.agent.tool_flow.execution import execute_dynamic_tools
 from react_agent.agent.tool_flow.observations import parse_tool_batch
 
 
+logger = logging.getLogger(__name__)
+
+
 async def dynamic_tool_node(
     state: State,
     config: RunnableConfig,
     runtime: Runtime[AgentDependencies],
 ) -> dict[str, Any]:
     """将 LangGraph 节点调用转交给独立的动态工具执行模块。"""
+    if not can_execute_tools(state.remaining_steps):
+        if state.remaining_steps < 2:
+            raise GraphRecursionError("tools 已无足够图步骤闭合工具调用")
+        last_message = state.messages[-1] if state.messages else None
+        if not isinstance(last_message, AIMessage):
+            raise GraphRecursionError("tools 无法识别待闭合的模型工具调用")
+        logger.error(
+            "unexpected_recursion_boundary | node=tools remaining_steps=%s",
+            state.remaining_steps,
+        )
+        return {
+            "messages": close_tool_calls_for_budget(
+                last_message,
+                termination_reason=(
+                    TerminationReason.UNEXPECTED_RECURSION_BOUNDARY.value
+                ),
+                error_code="GRAPH_STEP_BUDGET_EXHAUSTED",
+                error_message="本轮执行步数不足，该工具未执行。",
+            ),
+            "termination_reason": TerminationReason.UNEXPECTED_RECURSION_BOUNDARY.value,
+        }
     return await execute_dynamic_tools(state, config, runtime.context)
 
 
@@ -60,6 +89,8 @@ async def postprocess_tools(
         for run in batch.errors
     ):
         termination_reason = TerminationReason.EVIDENCE_OUTPUT_BUDGET_EXHAUSTED.value
+    if finalize_after_tools(state.remaining_steps) and termination_reason is None:
+        termination_reason = TerminationReason.GRAPH_STEP_BUDGET_EXHAUSTED.value
     update: dict[str, Any] = {
         "tool_runs": batch.runs,
         "consecutive_failures": batch.consecutive_rag_misses,
@@ -67,6 +98,22 @@ async def postprocess_tools(
         "last_tool_batch_errors": batch.errors,
         "termination_reason": termination_reason,
     }
+    if not can_schedule_finalizer(state.remaining_steps):
+        logger.error(
+            "unexpected_recursion_boundary | node=postprocess_tools remaining_steps=%s",
+            state.remaining_steps,
+        )
+        update["termination_reason"] = (
+            TerminationReason.UNEXPECTED_RECURSION_BOUNDARY.value
+        )
+        update["messages"] = [
+            AIMessage(
+                content=(
+                    "本轮处理意外到达系统执行边界，无法继续生成可靠结论。"
+                    "请缩小问题范围后重试。"
+                )
+            )
+        ]
     recent_tool_messages = extract_recent_tool_messages(list(state.messages))
     evidence, omitted = merge_visible_evidence(
         state.turn_evidence,

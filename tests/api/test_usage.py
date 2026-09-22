@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
+from langgraph.errors import GraphRecursionError
 
 from api.models import ChatRequest
 from api.errors import AppError
@@ -58,6 +59,27 @@ def _state() -> dict[str, Any]:
         "unpriced_model_count": 0,
         "models": {},
     }
+
+
+def test_unexpected_boundary_node_result_reaches_stream_client() -> None:
+    frame = chat._map_event(
+        {
+            "event": "on_chain_end",
+            "name": "call_model",
+            "data": {
+                "output": {
+                    "termination_reason": "UNEXPECTED_RECURSION_BOUNDARY",
+                    "messages": [AIMessage(content="执行边界提示")],
+                }
+            },
+        },
+        _state(),
+        None,
+        time.perf_counter(),
+    )
+    assert frame is not None
+    assert frame.startswith("event: token\n")
+    assert json.loads(frame.split("data: ", 1)[1])["delta"] == "执行边界提示"
 
 
 def _compaction_usage() -> dict[str, Any]:
@@ -348,6 +370,85 @@ async def test_stream_budget_error_keeps_error_done_order(
     error = json.loads(frames[0].split("data: ", 1)[1])
     assert error["status"] == 413
     assert "问题超过" in error["detail"]
+
+
+@pytest.mark.asyncio
+async def test_stream_graph_step_error_keeps_error_done_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded: list[tuple[str, int]] = []
+
+    async def record(bucket_key: str, tokens: int) -> None:
+        recorded.append((bucket_key, tokens))
+
+    monkeypatch.setattr(chat, "record_token_usage", record)
+
+    class Request:
+        async def is_disconnected(self) -> bool:
+            return False
+
+    class Agent:
+        model_ref = "test/known-model"
+
+        async def stream_events(self, messages: list[Any], thread_id: str):
+            yield {
+                "event": "on_chat_model_end",
+                "data": {"output": _message("known-model", 8, 2)},
+            }
+            raise GraphRecursionError("test limit")
+
+    frames = [
+        frame
+        async for frame in chat._stream_v1_generator(
+            Request(), Agent(), "问题", "user:test:session", "session", "bucket"
+        )
+    ]
+    assert [frame.split("\n", 1)[0] for frame in frames] == [
+        "event: usage",
+        "event: error",
+        "event: done",
+    ]
+    error = json.loads(frames[1].split("data: ", 1)[1])
+    assert error["title"] == "Agent Step Budget Exceeded"
+    assert error["status"] == 500
+    assert recorded == [("bucket", 10)]
+
+
+@pytest.mark.asyncio
+async def test_invoke_graph_step_error_uses_problem_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded: list[tuple[str, int]] = []
+
+    async def no_limit(*args: Any) -> None:
+        return None
+
+    async def record(bucket_key: str, tokens: int) -> None:
+        recorded.append((bucket_key, tokens))
+
+    monkeypatch.setattr(chat, "check_rate_limit", no_limit)
+    monkeypatch.setattr(chat, "check_token_budget", no_limit)
+    monkeypatch.setattr(chat, "record_token_usage", record)
+
+    class Agent:
+        model_ref = "test/known-model"
+
+        async def invoke(self, messages: list[Any], thread_id: str) -> dict[str, Any]:
+            error = GraphRecursionError("test limit")
+            error.completed_model_messages = (_message("known-model", 8, 2),)
+            raise error
+
+    with pytest.raises(AppError) as captured:
+        await chat.chat_invoke(
+            ChatRequest(message="问题", session_id="session"),
+            None,
+            Agent(),
+            "api-key",
+        )
+
+    assert captured.value.status == 500
+    assert captured.value.title == "Agent Step Budget Exceeded"
+    assert recorded == [("api-key", 10)]
 
 
 @pytest.mark.asyncio

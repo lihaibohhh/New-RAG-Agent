@@ -208,6 +208,10 @@ Agent 的正常终止由 `MAX_MODEL_ROUNDS`、`MAX_TOOL_BATCHES` 和
 并在 `AgentContext` 初始化时校验其足以覆盖所配置的业务预算。若模型在预算
 耗尽时已经生成工具调用，图会先写入 `TOOL_BUDGET_EXHAUSTED` ToolMessage
 闭合调用协议，再进入不绑定工具的 `finalize_model`，避免持久化悬空调用。
+图运行期间还会读取 LangGraph 注入的 `RemainingSteps`：若剩余步骤不足以完成
+工具执行、结果处理和最终总结，主模型在当前节点禁用工具，依据已有证据回答或说明不足；工具
+结果处理后若不足以继续循环，则提前进入 `finalize_model`。意外耗尽图步骤时，
+API 返回明确的执行步数错误；流式接口发出 `error` 后仍按约定发出 `done`。
 RAG 工具结果按整个 JSON 输出预算限幅：优先保留各片段的来源、页码与
 `chunk_id`，再分配可见正文；无法容纳任何证据时返回明确的预算错误，
 不伪装成检索未命中，并基于此前可见证据主动收口。Agent 在本轮内按
@@ -415,6 +419,8 @@ token | tool_call | tool_result | usage | done | error
 `cost_status` 标明状态。`done.total_cost` 仅累计已计价调用，新增的
 `currency=CNY` 与 `unpriced_model_count` 用于避免把未知价格误认为零费用。
 流式和非流式均按当前轮全部模型调用累计 token，再写入 API 每日 token 预算。
+非流式请求若意外触发图步数硬熔断，会从当前提问的 Checkpoint 补记已完成的
+模型调用；只有匹配本次用户消息 ID 的状态才会计入，避免重复计算上一轮。
 流式请求若在模型返回 usage 前断连，进行中调用的精确 token 数可能不可得；
 预算仅记录截至断连已收到的模型结束事件用量。
 Prometheus 费用指标为 `llm_cost_cny_total`；原 USD 指标已停用，已有监控面板

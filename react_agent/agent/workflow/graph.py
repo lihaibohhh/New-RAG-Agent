@@ -1,8 +1,8 @@
 """Agent 执行图的定义与编译。
 
-正常终止由显式业务预算控制：工具预算耗尽时先闭合未执行的调用，再由
-不绑定工具的 finalize_model 生成最终回答。LangGraph recursion_limit 仅作为
-异常循环熔断器，不参与正常业务路由。
+正常终止由显式业务预算及 LangGraph 剩余步骤共同控制：工具预算耗尽时先
+闭合未执行的调用，再由不绑定工具的 finalize_model 生成最终回答。
+recursion_limit 本身仍是异常循环熔断器。
 """
 
 from __future__ import annotations

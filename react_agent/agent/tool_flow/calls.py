@@ -85,6 +85,8 @@ def close_tool_calls_for_budget(
     message: AIMessage,
     *,
     termination_reason: str | None,
+    error_code: str = "TOOL_BUDGET_EXHAUSTED",
+    error_message: str = "本轮工具调用预算已耗尽，该工具未执行。",
 ) -> list[ToolMessage]:
     """为预算终止时未执行的调用构造一一对应的 ToolMessage。"""
     closed: list[ToolMessage] = []
@@ -113,8 +115,8 @@ def close_tool_calls_for_budget(
                     tool_error(
                         tool_name=tool_name,
                         query=str(args)[:200],
-                        code="TOOL_BUDGET_EXHAUSTED",
-                        message="本轮工具调用预算已耗尽，该工具未执行。",
+                        code=error_code,
+                        message=error_message,
                         meta={"termination_reason": termination_reason},
                     ),
                     ensure_ascii=False,
