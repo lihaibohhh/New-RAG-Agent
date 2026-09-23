@@ -208,6 +208,10 @@ Agent 的正常终止由 `MAX_MODEL_ROUNDS`、`MAX_TOOL_BATCHES` 和
 并在 `AgentContext` 初始化时校验其足以覆盖所配置的业务预算。若模型在预算
 耗尽时已经生成工具调用，图会先写入 `TOOL_BUDGET_EXHAUSTED` ToolMessage
 闭合调用协议，再进入不绑定工具的 `finalize_model`，避免持久化悬空调用。
+`RAG_CALL_LIMIT` 限制当前用户轮中被 Agent 接受执行的 RAG 工具调用：
+成功、未命中和执行失败均占用一次，在执行前因配额不足被拦截的调用
+不占用。同一模型批次生成多个 RAG 调用时，工具执行层只放行剩余
+配额，并为其余调用写入 `RAG_CALL_BUDGET_EXHAUSTED` ToolMessage 后主动收口。
 图运行期间还会读取 LangGraph 注入的 `RemainingSteps`：若剩余步骤不足以完成
 工具执行、结果处理和最终总结，主模型在当前节点禁用工具，依据已有证据回答或说明不足；工具
 结果处理后若不足以继续循环，则提前进入 `finalize_model`。意外耗尽图步骤时，

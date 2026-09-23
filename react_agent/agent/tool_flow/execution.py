@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import replace
 from typing import Any
 
 from langchain_core.messages import AIMessage, ToolMessage
@@ -12,6 +13,10 @@ from langgraph.prebuilt import ToolNode
 
 from react_agent.agent.contracts.dependencies import AgentDependencies
 from react_agent.agent.contracts.state import State
+from react_agent.agent.policies import TerminationReason
+from react_agent.agent.tool_flow.budget import (
+    count_attempted_rag_calls_in_current_turn,
+)
 from react_agent.agent.tool_flow.calls import (
     extract_tool_call_ids,
     get_tool_call_name,
@@ -21,6 +26,7 @@ from react_agent.tooling.results import tool_error
 
 
 logger = logging.getLogger(__name__)
+_RAG_TOOL_NAME = "query_internal_knowledge"
 
 
 def bound_tool_messages(messages: list[Any], max_chars: int) -> list[Any]:
@@ -64,11 +70,19 @@ async def execute_dynamic_tools(
                 )
             }
 
-        blocked_calls, allowed_calls = _partition_tool_calls(
+        disabled_calls, executable_calls = _partition_tool_calls(
             last_message,
             active_names,
         )
-        if not blocked_calls:
+        attempted_rag_calls = count_attempted_rag_calls_in_current_turn(
+            list(state.messages)
+        )
+        allowed_calls, budget_blocked_calls = _apply_rag_call_budget(
+            executable_calls,
+            attempted=attempted_rag_calls,
+            limit=agent_config.rag_call_limit,
+        )
+        if not disabled_calls and not budget_blocked_calls:
             node = ToolNode(active_tools, handle_tool_errors=True)
             result = await node.ainvoke(state, config)
             all_messages = invalid_messages + result.get("messages", [])
@@ -78,23 +92,37 @@ async def execute_dynamic_tools(
             )
             return result
 
-        blocked_messages = _blocked_tool_messages(blocked_calls, active_names)
+        blocked_messages = _blocked_tool_messages(disabled_calls, active_names)
+        budget_messages = _rag_budget_messages(
+            budget_blocked_calls,
+            attempted=attempted_rag_calls,
+            limit=agent_config.rag_call_limit,
+        )
         executed_messages: list[Any] = []
         if allowed_calls and isinstance(last_message, AIMessage):
             filtered_message = last_message.model_copy(
                 update={"tool_calls": allowed_calls}
             )
             transient_messages = list(state.messages[:-1]) + [filtered_message]
+            transient_state = replace(state, messages=transient_messages)
             node = ToolNode(active_tools, handle_tool_errors=True)
-            invoke_result = await node.ainvoke(transient_messages, config)
+            invoke_result = await node.ainvoke(transient_state, config)
             executed_messages = invoke_result.get("messages", [])
 
-        return {
+        update: dict[str, Any] = {
             "messages": bound_tool_messages(
-                invalid_messages + blocked_messages + executed_messages,
+                invalid_messages
+                + blocked_messages
+                + budget_messages
+                + executed_messages,
                 agent_config.max_tool_output_chars,
             )
         }
+        if budget_blocked_calls:
+            update["termination_reason"] = (
+                TerminationReason.RAG_CALL_BUDGET_EXHAUSTED.value
+            )
+        return update
     except Exception as exc:
         return _recover_from_execution_error(state, dependencies, exc)
 
@@ -121,6 +149,7 @@ def _invalid_tool_messages(last_message: Any) -> list[ToolMessage]:
                             f"工具参数 JSON 解析失败：{str(error)[:300]}。"
                             "请检查参数格式后重新调用。"
                         ),
+                        meta={"executed": False},
                     ),
                     ensure_ascii=False,
                 ),
@@ -146,6 +175,63 @@ def _partition_tool_calls(
     return blocked, allowed
 
 
+def _apply_rag_call_budget(
+    calls: list[Any],
+    *,
+    attempted: int,
+    limit: int,
+) -> tuple[list[Any], list[Any]]:
+    """Reserve remaining RAG slots while preserving non-RAG calls."""
+    remaining = max(0, limit - attempted)
+    allowed: list[Any] = []
+    blocked: list[Any] = []
+    for tool_call in calls:
+        if get_tool_call_name(tool_call) != _RAG_TOOL_NAME:
+            allowed.append(tool_call)
+        elif remaining > 0:
+            allowed.append(tool_call)
+            remaining -= 1
+        else:
+            blocked.append(tool_call)
+    return allowed, blocked
+
+
+def _tool_query(tool_call: Any) -> str:
+    args = tool_call.get("args", {}) if isinstance(tool_call, dict) else {}
+    if isinstance(args, dict):
+        return str(args.get("query") or "")[:200]
+    return str(args)[:200]
+
+
+def _rag_budget_messages(
+    blocked_calls: list[Any],
+    *,
+    attempted: int,
+    limit: int,
+) -> list[ToolMessage]:
+    return [
+        ToolMessage(
+            tool_call_id=tool_call.get("id", ""),
+            name=_RAG_TOOL_NAME,
+            content=json.dumps(
+                tool_error(
+                    tool_name=_RAG_TOOL_NAME,
+                    query=_tool_query(tool_call),
+                    code="RAG_CALL_BUDGET_EXHAUSTED",
+                    message="本轮知识库检索次数已达到上限，该调用未执行。",
+                    meta={
+                        "attempted": attempted,
+                        "executed": False,
+                        "limit": limit,
+                    },
+                ),
+                ensure_ascii=False,
+            ),
+        )
+        for tool_call in blocked_calls
+    ]
+
+
 def _blocked_tool_messages(
     blocked_calls: list[Any],
     active_names: frozenset[str],
@@ -163,6 +249,7 @@ def _blocked_tool_messages(
                         f"工具 '{get_tool_call_name(tool_call)}' 在当前配置下已被禁用。"
                         f"可用工具：{sorted(active_names)}。"
                     ),
+                    meta={"executed": False},
                 ),
                 ensure_ascii=False,
             ),

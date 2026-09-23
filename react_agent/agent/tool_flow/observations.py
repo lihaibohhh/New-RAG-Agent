@@ -57,12 +57,16 @@ def parse_tool_batch(
             run_ok = bool(raw_ok) if raw_ok is not None else None
             run_error = parsed.get("error")
 
+        meta = payload.get("meta")
+        executed = not (isinstance(meta, dict) and meta.get("executed") is False)
+
         run = {
             "tool": getattr(tool_message, "name", "") or "unknown_tool",
             "query": payload.get("query"),
+            "executed": executed,
             "ok": run_ok,
             "error": run_error,
-            "meta": payload.get("meta"),
+            "meta": meta,
             "sources": _source_summaries(payload),
             "ts": now_iso_in_timezone(timezone),
         }

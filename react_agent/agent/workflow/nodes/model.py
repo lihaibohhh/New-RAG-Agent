@@ -23,7 +23,7 @@ from react_agent.agent.policies import (
 )
 from react_agent.agent.prompts import render_finalization_directive
 from react_agent.agent.tool_flow.budget import (
-    count_successful_rag_calls_in_current_turn,
+    count_attempted_rag_calls_in_current_turn,
 )
 from react_agent.agent.tool_flow.calls import extract_tool_call_ids
 
@@ -61,13 +61,13 @@ async def call_model(
     next_model_round = state.turn_model_rounds + 1
     tool_call_ids = extract_tool_call_ids(response)
     tool_names = tool_names_from_response(response)
-    rag_calls = count_successful_rag_calls_in_current_turn(list(state.messages))
+    rag_calls = count_attempted_rag_calls_in_current_turn(list(state.messages))
     termination_reason = model_termination_reason(
         dependencies.config,
         tool_names=tool_names if tool_call_ids else [],
         next_model_round=next_model_round,
         completed_tool_batches=state.turn_tool_batches,
-        successful_rag_calls=rag_calls,
+        attempted_rag_calls=rag_calls,
     )
 
     if not tools_allowed and tool_call_ids:

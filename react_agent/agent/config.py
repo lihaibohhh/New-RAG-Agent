@@ -178,9 +178,13 @@ class AgentContext:
     )
 
     rag_call_limit: int = field(
-        default=3,
+        default=6,
         metadata={
-            "description": "单轮对话内 query_internal_knowledge 调用次数硬上限（兜底防御，与上层提示词策略无关）。"
+            "description": (
+                "单轮对话内被 Agent 接受并执行的 "
+                "query_internal_knowledge 调用次数硬上限；"
+                "成功与失败均占用配额，本地预检拦截不占用。"
+            )
         },
     )
 
