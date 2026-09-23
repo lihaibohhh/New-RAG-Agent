@@ -97,13 +97,13 @@ def model_termination_reason(
     tool_names: list[str],
     next_model_round: int,
     completed_tool_batches: int,
-    successful_rag_calls: int,
+    attempted_rag_calls: int,
 ) -> str | None:
     """模型请求工具后，判断是否应先闭合调用并主动收口。"""
     if not tool_names:
         return None
     if (
-        successful_rag_calls >= config.rag_call_limit
+        attempted_rag_calls >= config.rag_call_limit
         and "query_internal_knowledge" in tool_names
     ):
         return TerminationReason.RAG_CALL_BUDGET_EXHAUSTED.value

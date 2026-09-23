@@ -18,8 +18,10 @@ from react_agent.agent.context_management import (
 )
 from react_agent.agent.context_management.segmentation import segment_current_turn
 from react_agent.agent.context_management.budgeting import estimate_message_tokens
-from react_agent.agent.context_management.builder import attach_evidence_index
-from react_agent.agent.context_management.evidence import render_evidence_index
+from react_agent.agent.context_management.evidence import (
+    attach_evidence_index,
+    render_evidence_index,
+)
 from react_agent.agent.context_management.projection import (
     project_completed_tool_messages,
     project_current_tool_messages,
@@ -486,7 +488,8 @@ def test_budget_report_includes_final_input_and_bound_tool_schema() -> None:
                         name="search",
                         content="工具正文" * 100,
                     ),
-                ]
+                ],
+                turn_compaction_usage={"prompt_tokens": 5},
             ),
             "系统",
             50,
@@ -510,6 +513,7 @@ def test_budget_gate_classifies_irreducible_context(
     assert captured.value.report.outcome == reason.lower()
     if reason == "CURRENT_TURN_CONTEXT_TOO_LARGE":
         assert len(captured.value.completed_model_messages) == 1
+        assert captured.value.compaction_usage == {"prompt_tokens": 5}
 
 
 def test_budget_drops_completed_history_without_mutating_state() -> None:

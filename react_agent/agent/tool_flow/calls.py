@@ -117,7 +117,10 @@ def close_tool_calls_for_budget(
                         query=str(args)[:200],
                         code=error_code,
                         message=error_message,
-                        meta={"termination_reason": termination_reason},
+                        meta={
+                            "executed": False,
+                            "termination_reason": termination_reason,
+                        },
                     ),
                     ensure_ascii=False,
                 ),

@@ -76,18 +76,20 @@ async def postprocess_tools(
         return {}
 
     next_tool_batch = state.turn_tool_batches + 1
-    termination_reason = tool_batch_termination_reason(
-        agent_config,
-        consecutive_rag_misses=batch.consecutive_rag_misses,
-        next_tool_batch=next_tool_batch,
-        has_errors=bool(batch.errors),
-        completed_retries=state.turn_tool_retries,
-    )
+    termination_reason = state.termination_reason
+    if termination_reason is None:
+        termination_reason = tool_batch_termination_reason(
+            agent_config,
+            consecutive_rag_misses=batch.consecutive_rag_misses,
+            next_tool_batch=next_tool_batch,
+            has_errors=bool(batch.errors),
+            completed_retries=state.turn_tool_retries,
+        )
     if any(
         isinstance(run.get("error"), dict)
         and run["error"].get("code") == "EVIDENCE_PAYLOAD_TOO_LARGE"
         for run in batch.errors
-    ):
+    ) and termination_reason is None:
         termination_reason = TerminationReason.EVIDENCE_OUTPUT_BUDGET_EXHAUSTED.value
     if finalize_after_tools(state.remaining_steps) and termination_reason is None:
         termination_reason = TerminationReason.GRAPH_STEP_BUDGET_EXHAUSTED.value
@@ -146,10 +148,17 @@ async def close_pending_tool_calls(state: State) -> dict[str, Any]:
     if not isinstance(last_message, AIMessage):
         return {}
 
+    kwargs: dict[str, str] = {}
+    if state.termination_reason == TerminationReason.RAG_CALL_BUDGET_EXHAUSTED.value:
+        kwargs = {
+            "error_code": "RAG_CALL_BUDGET_EXHAUSTED",
+            "error_message": "本轮知识库检索次数已达到上限，该调用未执行。",
+        }
     return {
         "messages": close_tool_calls_for_budget(
             last_message,
             termination_reason=state.termination_reason,
+            **kwargs,
         )
     }
 

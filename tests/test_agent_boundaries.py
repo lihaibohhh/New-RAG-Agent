@@ -18,6 +18,7 @@ from react_agent.agent.contracts.dependencies import AgentDependencies
 from react_agent.agent.contracts.state import InputState, State
 from react_agent.agent.service import AgentService
 from react_agent.agent.tool_flow.budget import (
+    count_attempted_rag_calls_in_current_turn,
     count_successful_rag_calls_in_current_turn,
 )
 from react_agent.agent.tool_flow.calls import extract_tool_call_ids
@@ -735,7 +736,7 @@ async def test_failed_tool_batch_uses_bounded_recovery_path() -> None:
     assert result["messages"][-1].content == "工具失败，当前无法完成该操作。"
 
 
-def test_rag_call_policy_counts_only_successes_in_current_turn() -> None:
+def test_rag_call_policy_counts_attempts_and_successes_in_current_turn() -> None:
     messages = [
         HumanMessage(content="上一轮"),
         ToolMessage(
@@ -756,9 +757,170 @@ def test_rag_call_policy_counts_only_successes_in_current_turn() -> None:
             tool_call_id="success",
             content=json.dumps(tool_success(tool_name="rag", query="new", data={})),
         ),
+        ToolMessage(
+            name="query_internal_knowledge",
+            tool_call_id="blocked",
+            content=json.dumps(
+                tool_error(
+                    tool_name="rag",
+                    query="blocked",
+                    code="RAG_CALL_BUDGET_EXHAUSTED",
+                    message="not executed",
+                    meta={"executed": False},
+                )
+            ),
+        ),
     ]
 
+    assert count_attempted_rag_calls_in_current_turn(messages) == 2
     assert count_successful_rag_calls_in_current_turn(messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_rag_call_budget_caps_batch_and_finalizes_with_protocol_closed() -> None:
+    class BoundModel:
+        def __init__(self, owner) -> None:
+            self.owner = owner
+
+        async def ainvoke(self, _messages, config=None):
+            self.owner.agent_round += 1
+            queries = (
+                ["rag-1", "rag-2"]
+                if self.owner.agent_round == 1
+                else ["rag-3", "rag-4", "rag-5", "rag-6"]
+            )
+            calls = [
+                {
+                    "id": f"call-{query}",
+                    "name": "query_internal_knowledge",
+                    "args": {"query": query},
+                }
+                for query in queries
+            ]
+            if self.owner.agent_round == 2:
+                calls.append(
+                    {
+                        "id": "call-search",
+                        "name": "search",
+                        "args": {"query": "public-data"},
+                    }
+                )
+            return AIMessage(content="", tool_calls=calls)
+
+    class Model:
+        def __init__(self) -> None:
+            self.agent_round = 0
+            self.finalizer_calls = 0
+
+        def bind_tools(self, _tools):
+            return BoundModel(self)
+
+        async def ainvoke(self, _messages, config=None):
+            self.finalizer_calls += 1
+            return AIMessage(content="基于配额内的检索结果生成最终回答。")
+
+    rag_calls: list[str] = []
+    search_calls: list[str] = []
+
+    def query_internal_knowledge(query: str) -> str:
+        rag_calls.append(query)
+        return json.dumps(
+            tool_success(
+                tool_name="query_internal_knowledge",
+                query=query,
+                data={
+                    "results": [
+                        {
+                            "content": f"{query} 的可引用正文证据",
+                            "source": "report.pdf",
+                            "page": 1,
+                            "chunk_id": f"chunk-{query}",
+                        }
+                    ]
+                },
+                meta={"has_relevant_content": True},
+            ),
+            ensure_ascii=False,
+        )
+
+    def search(query: str) -> str:
+        search_calls.append(query)
+        return json.dumps(
+            tool_success(tool_name="search", query=query, data={}),
+            ensure_ascii=False,
+        )
+
+    model = Model()
+    context = AgentContext(
+        recursion_limit=30,
+        max_model_rounds=4,
+        max_tool_batches=3,
+        max_tool_retries=1,
+        rag_call_limit=3,
+        enable_history_truncation=False,
+    )
+    dependencies = AgentDependencies(
+        config=context,
+        model_provider=lambda: model,
+        tools=(
+            StructuredTool.from_function(
+                query_internal_knowledge,
+                description="测试 RAG 工具",
+            ),
+            StructuredTool.from_function(search, description="测试搜索工具"),
+        ),
+    )
+
+    result = await build_base_graph().compile().ainvoke(
+        {"messages": [HumanMessage(content="执行多个检索")]},
+        context=dependencies,
+        config={"recursion_limit": context.recursion_limit},
+    )
+
+    assert sorted(rag_calls) == ["rag-1", "rag-2", "rag-3"]
+    assert search_calls == ["public-data"]
+    tool_messages = [
+        message
+        for message in result["messages"]
+        if isinstance(message, ToolMessage)
+    ]
+    assert {message.tool_call_id for message in tool_messages} == {
+        "call-rag-1",
+        "call-rag-2",
+        "call-rag-3",
+        "call-rag-4",
+        "call-rag-5",
+        "call-rag-6",
+        "call-search",
+    }
+    rag_messages = [
+        message
+        for message in tool_messages
+        if message.name == "query_internal_knowledge"
+    ]
+    assert {message.tool_call_id for message in rag_messages} == {
+        "call-rag-1",
+        "call-rag-2",
+        "call-rag-3",
+        "call-rag-4",
+        "call-rag-5",
+        "call-rag-6",
+    }
+    budget_errors = [
+        json.loads(message.content)
+        for message in rag_messages
+        if json.loads(message.content).get("error")
+        and json.loads(message.content)["error"]["code"]
+        == "RAG_CALL_BUDGET_EXHAUSTED"
+    ]
+    assert len(budget_errors) == 3
+    assert all(item["meta"]["executed"] is False for item in budget_errors)
+    assert result["termination_reason"] == "RAG_CALL_BUDGET_EXHAUSTED"
+    assert model.agent_round == 2
+    assert model.finalizer_calls == 1
+    assert result["messages"][-1].content == "基于配额内的检索结果生成最终回答。"
+    assert sum(run["executed"] is True for run in result["tool_runs"]) == 4
+    assert sum(run["executed"] is False for run in result["tool_runs"]) == 3
 
 
 def test_tool_payload_bounding_preserves_envelope_and_traceability() -> None:

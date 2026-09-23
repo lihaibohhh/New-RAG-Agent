@@ -1,17 +1,60 @@
-"""当前用户轮次内的可见 RAG 证据索引。"""
+"""RAG 证据的收集、筛选与模型可见索引。"""
 
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from langchain_core.messages import ToolMessage
+
+
+logger = logging.getLogger(__name__)
 
 
 MAX_EVIDENCE_RECORDS = 18
 MAX_EVIDENCE_EXCERPT_CHARS = 240
 MAX_HISTORICAL_EVIDENCE_RECORDS = 64
 MAX_HISTORICAL_QUERY_CHARS = 160
+
+
+def attach_evidence_index(messages: list[Any], evidence_index: str) -> list[Any]:
+    """仅在本次模型输入的工具角色中附加证据索引，不改写 Checkpoint。"""
+    if not evidence_index:
+        return messages
+    result = list(messages)
+    for index in range(len(result) - 1, -1, -1):
+        message = result[index]
+        if isinstance(message, ToolMessage) and isinstance(message.content, str):
+            result[index] = message.model_copy(
+                update={"content": f"{message.content}\n\n{evidence_index}"}
+            )
+            return result
+    logger.warning("存在本轮证据索引，但模型输入中没有可承载索引的工具消息")
+    return result
+
+
+def select_historical_evidence(
+    records: list[dict[str, Any]], messages: list[Any]
+) -> list[dict[str, Any]]:
+    """排除已由本次模型输入中的工具消息承载的历史来源。"""
+    selected_tool_ids = {
+        str(getattr(message, "id", None) or "")
+        for message in messages
+        if isinstance(message, ToolMessage) and getattr(message, "id", None)
+    }
+    selected_tool_call_ids = {
+        str(getattr(message, "tool_call_id", None) or "")
+        for message in messages
+        if isinstance(message, ToolMessage)
+        and getattr(message, "tool_call_id", None)
+    }
+    return [
+        record
+        for record in records
+        if str(record.get("last_tool_message_id") or "") not in selected_tool_ids
+        and str(record.get("last_tool_call_id") or "") not in selected_tool_call_ids
+    ]
 
 
 def merge_visible_evidence(
@@ -260,8 +303,10 @@ def render_evidence_index(
 
 
 __all__ = [
+    "attach_evidence_index",
     "merge_historical_evidence",
     "merge_visible_evidence",
     "render_evidence_index",
     "render_historical_evidence_index",
+    "select_historical_evidence",
 ]
