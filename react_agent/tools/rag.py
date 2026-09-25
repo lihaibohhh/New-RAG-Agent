@@ -7,7 +7,7 @@ from typing import Any
 
 from langchain_core.tools import tool
 
-from react_agent.rag.contracts import RagValidationError, RetrievalResult
+from knowledge.contracts import RagValidationError, RetrievalResult
 from react_agent.tooling.results import tool_error as _err
 from react_agent.tooling.results import tool_success as _ok
 from react_agent.tooling.retry import with_retry

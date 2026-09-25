@@ -15,12 +15,14 @@ from react_agent.metering.model_usage import meter_model_call
 from react_agent.agent.time import now_iso_in_timezone
 from react_agent.agent.tool_flow.calls import get_tool_call_name
 from react_agent.agent.tool_flow.catalog import render_tool_catalog
+from react_agent.skills import SkillSelection
 
 
 logger = logging.getLogger(__name__)
 
 
 def _build_system_prompt(
+    state: State,
     dependencies: AgentDependencies,
     *,
     tools_enabled: bool,
@@ -32,12 +34,24 @@ def _build_system_prompt(
         tools_enabled=tools_enabled,
     )
     system_time = now_iso_in_timezone(config.timezone)
-    return config.system_prompt.format(
+    system_prompt = config.system_prompt.format(
         system_time=system_time,
         language=config.language,
         tool_catalog=tool_catalog,
         consecutive_failure_threshold=config.consecutive_failure_threshold,
-    ), active_tools
+    )
+    selection = SkillSelection.from_state(state.selected_skill)
+    if selection is not None and dependencies.skill_registry is not None:
+        skill = dependencies.skill_registry.resolve(selection)
+        if skill is None:
+            logger.warning(
+                "selected_skill_unavailable | name=%s version=%s",
+                selection.name,
+                selection.version,
+            )
+        else:
+            system_prompt = f"{system_prompt}\n\n{skill.render_for_model()}"
+    return system_prompt, active_tools
 
 
 async def invoke_chat_model(
@@ -52,6 +66,7 @@ async def invoke_chat_model(
     agent_config = dependencies.config
     tools_enabled = bool(agent_config.enable_tools and allow_tools)
     system_prompt, active_tools = _build_system_prompt(
+        state,
         dependencies,
         tools_enabled=tools_enabled,
     )

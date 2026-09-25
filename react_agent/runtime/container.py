@@ -20,10 +20,8 @@ from react_agent.conversations.infrastructure.langgraph_repository import (
 )
 from react_agent.conversations.service import ConversationService
 from react_agent.configuration.settings import settings
-from react_agent.rag.runtime import (
-    create_configured_rag_runtime,
-)
-from react_agent.rag.runtime_ports import AgentRagRuntimePort
+from knowledge.client import create_configured_rag_runtime
+from knowledge.runtime_ports import AgentRagRuntimePort
 from react_agent.tools.excel import create_excel_tool
 from react_agent.tools.make_docx import create_docx_tool
 from react_agent.tools.markdown import create_markdown_tool
@@ -31,6 +29,7 @@ from react_agent.tools.rag import create_rag_tool
 from react_agent.tools.search import create_search_tool
 from react_agent.models import load_chat_model
 from react_agent.metering.pricing import estimate_configured_model_cost
+from react_agent.skills import build_builtin_skill_registry
 
 
 @dataclass(frozen=True)
@@ -122,6 +121,7 @@ def _compose_agent_dependencies(
         config=agent_context,
         model_provider=partial(load_chat_model, settings.llm.model),
         tools=tools,
+        skill_registry=build_builtin_skill_registry(),
         model_ref=settings.llm.model,
         cost_estimator=estimate_configured_model_cost,
         model_context_window_tokens=settings.llm.llm_context_window_tokens,

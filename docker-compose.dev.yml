@@ -7,34 +7,25 @@
 # Python 源码变化无需重建；依赖、Dockerfile 或系统库变化仍需重新构建镜像。
 services:
   knowledge-service:
-    # 开发模式监听两个服务端源码目录；配置 YAML 变化仍需显式重启。
+    # 开发模式监听统一 Knowledge 命名空间。
     environment:
       - KNOWLEDGE_SERVICE_EVALUATION_API_ENABLED=true
     command:
       - python
       - -m
       - uvicorn
-      - knowledge_service.main:app
+      - knowledge.server.main:app
       - --host
       - 0.0.0.0
       - --port
       - "8001"
       - --reload
       - --reload-dir
-      - /app/knowledge_service
-      - --reload-dir
-      - /app/react_agent
+      - /app/knowledge
     volumes:
       - type: bind
-        source: ./react_agent
-        target: /app/react_agent
-        read_only: true
-        bind:
-          create_host_path: false
-
-      - type: bind
-        source: ./knowledge_service
-        target: /app/knowledge_service
+        source: ./knowledge
+        target: /app/knowledge
         read_only: true
         bind:
           create_host_path: false
@@ -45,6 +36,22 @@ services:
       - type: bind
         source: ./react_agent
         target: /app/react_agent
+        read_only: true
+        bind:
+          create_host_path: false
+
+      # 独立 MCP 协议适配器；不再属于 react_agent 包。
+      - type: bind
+        source: ./mcp_service
+        target: /app/mcp_service
+        read_only: true
+        bind:
+          create_host_path: false
+
+      # Knowledge 核心、HTTP 客户端与服务端共享命名空间。
+      - type: bind
+        source: ./knowledge
+        target: /app/knowledge
         read_only: true
         bind:
           create_host_path: false
@@ -95,6 +102,13 @@ services:
       - type: bind
         source: ./react_agent
         target: /app/react_agent
+        read_only: true
+        bind:
+          create_host_path: false
+
+      - type: bind
+        source: ./knowledge
+        target: /app/knowledge
         read_only: true
         bind:
           create_host_path: false

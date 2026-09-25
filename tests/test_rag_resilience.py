@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from react_agent.rag.contracts import RagDocument
-from react_agent.rag.infrastructure.retrieval.bm25_repository import (
+from knowledge.contracts import RagDocument
+from knowledge.infrastructure.retrieval.bm25_repository import (
     RedisBm25Repository,
 )
-from react_agent.rag.infrastructure.retrieval.hybrid_retriever import (
+from knowledge.infrastructure.retrieval.hybrid_retriever import (
     HybridRetrieverAdapter,
 )
 

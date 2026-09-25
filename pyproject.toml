@@ -52,7 +52,12 @@ dependencies = [
     "huggingface-hub==0.36.0",
     "prometheus-client==0.21.1",
     "httpx==0.28.1",
+    # 当前 FastMCP 适配器仍使用 Python SDK v1 API；v2 是破坏性升级。
+    "mcp>=1.28,<2",
 ]
+
+[project.scripts]
+financial-rag-mcp = "mcp_service.main:main"
 
 [dependency-groups]
 dev = [
@@ -72,3 +77,4 @@ where = ["."]
 
 [tool.setuptools.package-data]
 "react_agent.configuration" = ["*.yaml"]
+"react_agent.skills" = ["builtin/*/SKILL.md"]

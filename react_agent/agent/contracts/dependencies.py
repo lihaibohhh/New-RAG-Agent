@@ -10,6 +10,7 @@ from langchain_core.tools import BaseTool
 
 from react_agent.agent.config import AgentContext
 from react_agent.metering.contracts import CostEstimator
+from react_agent.skills import SkillRegistry
 
 
 ModelProvider = Callable[[], BaseChatModel]
@@ -26,6 +27,7 @@ class AgentDependencies:
     config: AgentContext
     model_provider: ModelProvider
     tools: tuple[BaseTool, ...]
+    skill_registry: SkillRegistry | None = None
     model_ref: str = "unknown"
     cost_estimator: CostEstimator | None = None
     model_context_window_tokens: int | None = None

@@ -22,7 +22,8 @@ RUN groupadd --gid 10001 app \
 # BuildKit 缓存只加速下载，不会进入最终镜像。
 COPY --chown=app:app pyproject.toml ./
 COPY --chown=app:app react_agent ./react_agent
-COPY --chown=app:app knowledge_service ./knowledge_service
+COPY --chown=app:app knowledge ./knowledge
+COPY --chown=app:app mcp_service ./mcp_service
 RUN --mount=type=cache,target=/root/.cache/pip \
     mkdir -p /tmp/torch-cpu \
     && python -m pip download --no-deps --dest /tmp/torch-cpu \

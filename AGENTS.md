@@ -13,13 +13,17 @@
 - `react_agent/tooling/`：Agent 与工具适配器共享的 ToolResult 信封和重试执行契约。
 - `react_agent/models/`：LLM Provider 解析、创建与缓存；由 Runtime、评测和显式脚本消费。
 - `react_agent/infrastructure/`：Redis 等跨用例共享的技术资源适配器，不得反向依赖 Agent。
-- `react_agent/observability/`：应用会话用量记录与展示；RAG 专属计时归 `react_agent/rag/observability.py`。
+- `react_agent/observability/`：应用会话用量记录与展示；知识库建库计时归 `knowledge/observability.py`。
 - `react_agent/conversations/`：会话契约、管理用例、Repository Port 与 Checkpointer 基础设施。
 - `react_agent/runtime/`：选择并注入 LLM、Agent Tools、Conversation 与共享 Checkpointer，管理应用实例生命周期。
 - `react_agent/configuration/`：应用级配置模型、环境/YAML 加载与非敏感默认配置文件；Agent 编排代码不得放入此目录。
-- `react_agent/rag/`：Query、Ingestion、Operations 用例以及 PDF 解析、BM25/向量召回、精排和缓存适配器；实例由 `rag/runtime/` 组装。
+- `knowledge/`：统一知识库命名空间；公共契约、端口、基础设施和显式配置的本地 Runtime 位于根层。在线 RAG 与建库通过独立 Runtime Port 暴露，仅在 Server 组合根汇合。
+- `knowledge/rag/`：在线检索、分阶段评测和预热用例；不得依赖 `knowledge.ingestion`。
+- `knowledge/ingestion/`：文档解析、PDF 路由和增量建库用例；不得依赖 `knowledge.rag`。
+- `knowledge/client/`：独立 Knowledge Service HTTP 客户端，以及互不暴露能力的远程 RAG/Ingestion Runtime；只依赖公共契约，不得反向依赖 Agent、Server 或 MCP。
+- `knowledge/server/`：Knowledge Service ASGI 入口、请求模型、服务端配置和组合根；是唯一允许打开本地知识库资源的在线进程，不得依赖 `react_agent`。
 - `react_agent/tools/`：RAG、搜索、Excel、Word、Markdown 和 SQL 协议适配器；Agent 实际工具集合由 `react_agent/runtime/container.py` 组装。
-- `react_agent/mcp_server/`：MCP Server 和工具注册；根目录的 `mcp_rag_server.py` 是 stdio 薄启动入口。
+- `mcp_service/`：独立 MCP Server 协议适配器、进程生命周期和工具注册，只依赖 Knowledge 公共契约/客户端；不得依赖 `react_agent`。`mcp_service.main:main` 是正式命令入口，根目录 `mcp_rag_server.py` 仅作兼容转发。
 - `api/`：FastAPI 服务、鉴权、限流、指标、错误处理和版本化路由。
 - `tests/api/`：使用 FakeAgent 与 fakeredis 的离线 API 回归测试。
 - `tests/test_agent.py`：Streamlit 应用入口，不是普通单元测试。
@@ -45,8 +49,9 @@
 
 - 从 `.env.example` 复制本地 `.env`，按需配置 DeepSeek/OpenAI、Tavily、Redis、PostgreSQL 等服务。
 - 不读取、输出、记录或提交 `.env` 中的真实密钥；日志、异常消息、测试夹具和示例中也不得泄露凭据。
-- 项目配置入口是 `react_agent/configuration/settings.py`。工具配置优先级为：Conda/系统环境变量 > `.env` > `react_agent/configuration/config.yaml` > 代码默认值。
-- 新增配置时同步更新配置模型和 `.env.example`；只有工具层的非敏感默认值适合放入 `react_agent/configuration/config.yaml`。
+- Agent 配置入口是 `react_agent/configuration/settings.py`；工具配置优先级为：Conda/系统环境变量 > `.env` > `react_agent/configuration/config.yaml` > 代码默认值。
+- Knowledge Server 的 HTTP 边界配置位于 `knowledge/server/settings.py`，本地 Runtime 环境配置投影位于 `knowledge/server/runtime.py`；不得借用 Agent settings。
+- 新增配置时同步更新所属边界的配置模型和 `.env.example`；只有 Agent 工具层的非敏感默认值适合放入 `react_agent/configuration/config.yaml`。
 - 测试应使用假密钥和 mock/fake 依赖。不要为普通回归测试调用真实 LLM、Tavily、Redis、PostgreSQL 或外网服务。
 
 ## 实现约定

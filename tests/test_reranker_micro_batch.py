@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 import threading
 
-from react_agent.rag.contracts import RagDocument
-from react_agent.rag.infrastructure.retrieval.reranker import (
+from knowledge.contracts import RagDocument
+from knowledge.infrastructure.retrieval.reranker import (
     RerankerProviderAdapter,
     _score_with_gate,
 )

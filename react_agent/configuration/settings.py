@@ -271,7 +271,6 @@ class RagProfile(BaseModel):
     """根据实际计算设备解析出的在线 RAG 运行参数。"""
 
     device: Literal["cpu", "cuda"]
-    timeout: int = Field(gt=0)
     rerank_candidates: int = Field(ge=1, le=100)
     rerank_top_n: int = Field(ge=1, le=20)
     reranker_concurrency: int = Field(ge=1, le=8)
@@ -284,11 +283,6 @@ class RagConfig(BaseModel):
     max_retries: int = Field(default=2, ge=0)
     max_content_chars: int = Field(default=800, ge=200, le=5000)
     client_timeout: float = Field(default=150.0, gt=0)
-
-    # 兼容旧配置；设置后同时覆盖 CPU/GPU 的 timeout。
-    timeout: int | None = Field(default=None, gt=0)
-    cpu_timeout: int = Field(default=120, gt=0)
-    cuda_timeout: int = Field(default=45, gt=0)
 
     # 全局字段用于临时强制覆盖；未设置时按设备选择对应档位。
     rerank_candidates: int | None = Field(default=None, ge=1, le=100)
@@ -308,9 +302,6 @@ class RagConfig(BaseModel):
         payload = dict(values or {})
         env_mapping = {
             "client_timeout": "KNOWLEDGE_SERVICE_TIMEOUT",
-            "timeout": "RAG_TIMEOUT",
-            "cpu_timeout": "RAG_CPU_TIMEOUT",
-            "cuda_timeout": "RAG_CUDA_TIMEOUT",
             "rerank_candidates": "RAG_RERANK_CANDIDATES",
             "cpu_rerank_candidates": "RAG_CPU_RERANK_CANDIDATES",
             "cuda_rerank_candidates": "RAG_CUDA_RERANK_CANDIDATES",
@@ -333,8 +324,6 @@ class RagConfig(BaseModel):
         is_cuda = device == "cuda"
         return RagProfile(
             device=device,
-            timeout=self.timeout
-            or (self.cuda_timeout if is_cuda else self.cpu_timeout),
             rerank_candidates=self.rerank_candidates
             or (self.cuda_rerank_candidates if is_cuda else self.cpu_rerank_candidates),
             rerank_top_n=self.rerank_top_n,

@@ -37,7 +37,7 @@ services:
       - python
       - -m
       - uvicorn
-      - knowledge_service.main:app
+      - knowledge.server.main:app
       - --host
       - 0.0.0.0
       - --port
@@ -85,6 +85,8 @@ services:
     env_file:
       - .env
     restart: unless-stopped
+    # 关闭时需释放模型、检索线程池和 Redis 连接。
+    stop_grace_period: 1m
     healthcheck:
       test:
         - CMD

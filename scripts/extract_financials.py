@@ -247,7 +247,7 @@ def extract_one_pdf(
 # ──────────────────────────────────────────────
 if __name__ == "__main__":
     import asyncio
-    from react_agent.rag.runtime import create_configured_rag_runtime
+    from knowledge.client import create_configured_rag_runtime
 
     model_ref = "deepseek/deepseek-v4-flash"
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)

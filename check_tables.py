@@ -1,14 +1,23 @@
-"""兼容建库脚本：所有写库与缓存失效统一交给 RAG IngestionService。"""
+"""兼容建库脚本：所有写库与索引变更通知统一交给 IngestionService。"""
 from __future__ import annotations
 
 import argparse
+import asyncio
 
-from react_agent.rag import build_vector_db as ingest_knowledge_base
+from knowledge.client import create_configured_ingestion_runtime
+
+
+async def _ingest_knowledge_base(data_dir: str | None):
+    runtime = create_configured_ingestion_runtime()
+    try:
+        return await runtime.get_ingestion_service().ingest(data_dir or ".")
+    finally:
+        await runtime.close()
 
 
 def build_vector_db(data_dir: str | None = None) -> dict:
     """保留原脚本函数名，返回可序列化的建库报告。"""
-    return ingest_knowledge_base(data_dir).to_dict()
+    return asyncio.run(_ingest_knowledge_base(data_dir)).to_dict()
 
 
 def main() -> None:

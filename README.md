@@ -28,6 +28,7 @@
 | 方向 | 已完成能力 |
 |---|---|
 | **Agent 架构** | LangGraph `StateGraph` + ReAct 循环，支持模型推理、工具调用、观察、反思与动态路由 |
+| **Skill 工作流** | 内置行业/市场研究 Skill；按用户轮确定性选择、按需加载并瞬态注入模型上下文，不扩大 Runtime 工具权限 |
 | **RAG 检索** | PyMuPDF + pdfplumber 金融研报解析，BM25 + 向量双路召回，RRF 融合，Cross-Encoder 精排 |
 | **可信溯源** | RAG 结果保留来源文件和页码，回答可追溯、可复核 |
 | **多工具输出** | Web 搜索、知识库检索、Excel、Word、Markdown，Text2SQL 模块可按需启用 |
@@ -96,6 +97,7 @@ flowchart LR
   → Streamlit / FastAPI
   → AgentService
   → 初始化当前轮模型/工具/恢复预算
+  → 选择并加载匹配的内置 Skill（未匹配则保持普通 ReAct）
   → LangGraph ReAct 循环
   → 工具调用：RAG / Search / Excel / Word / Markdown
   → 工具结果整理与失败恢复
@@ -121,6 +123,7 @@ flowchart LR
 | `react_agent/agent/model_execution.py` | 模型绑定、调用、响应与用量状态更新；不再决定历史和证据如何进入上下文 |
 | `react_agent/agent/prompts.py` | 默认系统提示词，以及失败恢复/主动收口的瞬态控制指令 |
 | `react_agent/agent/tool_flow/` | Agent 内部工具调用解析、执行、结果归一化、限幅与预算统计 |
+| `react_agent/skills/` | 内置专业工作流的契约、缓存加载、确定性选择与 `SKILL.md` 包资源 |
 | `react_agent/agent/time.py` | Agent 使用的时区时间表示规则 |
 | `react_agent/agent/__init__.py` | 通过懒加载导出稳定公共 API；不提供旧模块兼容门面 |
 | `react_agent/configuration/` | 应用级配置模型、环境/YAML 加载及非敏感工具默认值、价格卡；不负责 Agent 图内行为 |
@@ -135,10 +138,15 @@ flowchart LR
 | `react_agent/conversations/infrastructure/` | LangGraph Checkpointer Adapter 及 PostgreSQL / SQLite / Memory 工厂 |
 | `react_agent/runtime/container.py` | 选择 LLM Adapter 与 Agent 工具集，创建共享 Checkpointer，完成依赖注入并管理实例生命周期 |
 
-全局配置入口是 `react_agent/configuration/settings.py`。工具默认值和价格卡随
+全局 Agent 配置入口是 `react_agent/configuration/settings.py`。工具默认值和价格卡随
 `react_agent.configuration` 一起打包；`.env` / `.env.example` 留在应用根目录，
 供本地运行和 Docker Compose 注入环境变量。`pyproject.toml`、Compose 文件与
 `pytest.ini` 保留在根目录，供相应构建、部署和测试工具发现。
+Knowledge Server 的 HTTP 设置和本地 Runtime 配置分别由
+`knowledge/server/settings.py` 和 `knowledge/server/runtime.py` 从环境变量组装，
+不依赖 Agent 配置对象。Runtime 数字、布尔值、枚举和取值范围会在服务启动时
+统一校验：环境变量缺失时使用默认值，显式配置但格式错误或越界时直接启动失败。
+远程 Knowledge Service 的请求超时由 `KNOWLEDGE_SERVICE_TIMEOUT` 控制。
 
 `AgentService` 不提供历史读取或删除接口；FastAPI Chat 路由只注入
 `AgentService`，Sessions 路由只注入 `ConversationService`。两者不互相依赖，
@@ -258,17 +266,24 @@ PDF / DOCX / TXT / Markdown / CSV / Excel
   → BM25 Top-10 + Vector Top-10
   → RRF 融合到最多 20 个候选
   → Cross-Encoder 精排
-  → Top-3 返回给 Agent
+  → 按配置返回 Top-N（默认 5）给 Agent
 ```
 
-RAG 采用端口与适配器分层：`query/RetrievalService` 是缓存、召回、精排和
-来源归一化的唯一在线编排入口；`ingestion/IngestionService` 负责增量建库后
-统一失效查询缓存；Chroma、Redis、Retriever 和 Reranker 位于
-`rag/infrastructure/`，由 Knowledge Service 内的实例级 `RagRuntime` 组装。Agent 与 MCP 的 RAG
+RAG 采用端口与适配器分层：`knowledge/` 是统一命名空间，根层保存
+公共数据契约和能力端口。`knowledge/rag/query/RetrievalService` 是缓存、召回、精排和
+来源归一化的唯一在线编排入口；`knowledge/ingestion/IngestionService` 负责增量建库后
+发布索引变更通知，不直接依赖 RAG；Chroma、Redis、Retriever 和 Reranker 位于
+`knowledge/infrastructure/`，由 Knowledge Service 最外层的实例级 `KnowledgeRuntime` 组装。Agent 与 MCP 的 RAG
 Adapter 都在注册时接收 `RetrievalService` 提供者，只负责协议转换，执行过程中
 不再访问 RAG Service Locator。
 
-`knowledge_service/` 是唯一允许直接打开 `CHROMA_DB_PATH` 的进程边界，提供
+`knowledge/client/` 是独立的远程访问边界，包含 HTTP 协议客户端、
+互不包含的 `RemoteRagRuntime` / `RemoteIngestionRuntime`、显式
+`KnowledgeClientConfig` 和环境配置适配器。Agent、MCP 和评测只依赖在线 RAG
+Runtime，建库脚本只依赖 Ingestion Runtime。旧 Agent 内嵌 RAG 模块及兼容
+导入路径已删除，不再提供隐式本地 Runtime 或远程客户端入口。
+
+`knowledge/server/` 是唯一允许直接打开 `CHROMA_DB_PATH` 的在线进程边界，提供
 检索、预热、真实健康检查、缓存失效、分页 Chunk 读取和受限目录建库 API。
 Agent、MCP、Windows CLI 和评测任务使用 `RAG_RUNTIME_MODE=remote` 并配置
 `KNOWLEDGE_SERVICE_URL`，通过 `RemoteRagRuntime` 访问服务，不加载
@@ -338,46 +353,56 @@ FastAPI 与 Streamlit 并存，共享同一套 Agent 实例与持久化存储。
 
 ### 5.5 MCP Server：外部 MCP 客户端接入
 
-本项目新增 stdio 模式 MCP Server，用于将金融研报 RAG 能力接入 Claude Desktop、Cursor、Claude Code、MCP Inspector 等支持 MCP 的客户端。
+本项目提供 stdio 模式 MCP Server，用于将金融研报 RAG 能力接入 Claude Desktop、Cursor、Claude Code、MCP Inspector 等支持 MCP 的客户端。
 
 | 文件 | 职责 |
 |---|---|
-| `src/mcp_rag_server.py` | MCP stdio 薄启动入口；负责路径锚定、Windows UTF-8 流修复、加载 `.env`、关闭 LangSmith/LangChain tracing、配置日志并启动 server |
-| `react_agent/mcp_server/app.py` | MCP Server 创建与工具注册入口；默认注册 info + rag，`MCP_EXPOSE_ADMIN_TOOLS=1` 时注册 health + warmup |
-| `react_agent/mcp_server/info_tools.py` | 注册 `server_info`，返回当前真实可用工具与能力边界；默认不暴露 admin tools |
-| `react_agent/mcp_server/health_tools.py` | 注册 `check_knowledge_base`，轻量检查知识库与向量库可用性，可选 admin 工具 |
-| `react_agent/rag/operations/warmup.py` | 实例级 RAG 预热状态机，拥有顺序、幂等、失败、等待与取消规则 |
-| `react_agent/mcp_server/warmup_tools.py` | 注册 `start_rag_singleton_warmup` / `get_rag_singleton_warmup_status`，可选 admin 工具 |
-| `react_agent/mcp_server/rag_tools.py` | 注册 `query_financial_reports`，对外暴露金融研报 RAG 查询 |
-| `react_agent/mcp_server/responses.py` | 统一 MCP 工具返回结构，如 `mcp_ok` / `mcp_err` |
+| `mcp_rag_server.py` | 无副作用兼容入口，仅调用 `mcp_service.main:main` |
+| `mcp_service/main.py` | Windows UTF-8、`.env`、tracing、日志和 stdio 进程初始化；支持 `MCP_LOG_PATH` |
+| `mcp_service/bootstrap.py` | 显式持有 FastMCP 与远程 RAG Runtime，保证组装失败或 stdio 退出后释放连接 |
+| `mcp_service/app.py` | MCP Server 创建与工具注册入口；默认注册 info + rag，`MCP_EXPOSE_ADMIN_TOOLS=1` 时注册 health + warmup |
+| `mcp_service/info_tools.py` | 注册 `server_info`，返回当前真实可用工具与能力边界；默认不暴露 admin tools |
+| `mcp_service/health_tools.py` | 注册 `check_knowledge_base`，轻量检查知识库与向量库可用性，可选 admin 工具 |
+| `knowledge/rag/operations/warmup.py` | 实例级 RAG 预热状态机，拥有顺序、幂等、失败、等待与取消规则 |
+| `mcp_service/warmup_tools.py` | 注册 `start_rag_singleton_warmup` / `get_rag_singleton_warmup_status`，可选 admin 工具 |
+| `mcp_service/rag_tools.py` | 注册 `query_financial_reports`，对外暴露金融研报 RAG 查询 |
+| `mcp_service/responses.py` | 统一 MCP 工具返回结构，如 `mcp_ok` / `mcp_err` |
+| `mcp_service/observability.py` | 为每次工具调用记录 request_id、阶段、状态、耗时和错误类型 |
 
 MCP 启动方式：
 
 ```bash
-cd src
-python mcp_rag_server.py
+conda run -n new_agent python mcp_rag_server.py
+# 安装项目后也可以直接运行：financial-rag-mcp
 ```
 
 使用 MCP Inspector 测试：
 
 ```bash
-cd src
-npx -y @modelcontextprotocol/inspector -- python mcp_rag_server.py
+npx -y @modelcontextprotocol/inspector -- conda run -n new_agent python mcp_rag_server.py
 ```
 
-使用 Codex 外接测试
+安装项目后，可将正式命令注册到 Codex：
+
 ```bash
-codex mcp add financial-rag --env MCP_EXPOSE_ADMIN_TOOLS=0 -- "E:\anaconda\envs\agent_base\python.exe" "E:\transformer_program\nanoGPT_program\AI_Agent\agent_v0\react-agent-main\src\mcp_rag_server.py"
-# 确认是否注册：
-/mcp
-query: 根据内部数据库，2026 年 1 月，国内领先的芯片设计企业兆易创新和谁正式签署战略合作协议？
+codex mcp add financial-rag --env MCP_EXPOSE_ADMIN_TOOLS=0 -- financial-rag-mcp
 ```
 
 MCP 启动入口遵循“薄启动”原则：启动阶段不预热 embedding、reranker、Chroma、Redis 等重资源，避免 stdio 握手阶段阻塞。普通业务查询只需调用 `query_financial_reports`；首次查询会自动触发 retriever / reranker 单例预热并进行有限等待。诊断或显式预热场景可设置 `MCP_EXPOSE_ADMIN_TOOLS=1`，再调用 `start_rag_singleton_warmup` / `get_rag_singleton_warmup_status`。
-MCP 启动时根据 `RAG_RUNTIME_MODE` 创建 Runtime；默认 `remote`，此时必须配置
+源码检出中的 MCP 入口仍以项目 `src` 为运行根目录；普通安装后的
+`financial-rag-mcp` 以当前工作目录为根，避免从 `site-packages` 读取 `.env`
+或写入日志。可通过启动环境中的 `MCP_ENV_FILE` 和 `MCP_LOG_PATH` 指定路径；
+日志文件不可写时会降级为仅写入 `stderr`，不会阻断 stdio 握手。
+MCP 启动时通过 `knowledge.client` 根据 `RAG_RUNTIME_MODE` 创建 Runtime；默认 `remote`，此时必须配置
 `KNOWLEDGE_SERVICE_URL`，不会隐式打开本地 Chroma。注册函数只接收显式的 Query、
-Admin 和 Operations 提供者；关闭 stdio Server 后由入口释放客户端连接，不依赖
-模块级 RAG 服务单例。
+Admin 和 Operations 提供者；关闭 stdio Server 后由 `McpServiceApplication` 在
+`finally` 中释放客户端连接，不依赖模块级 RAG 服务单例。每次工具调用的返回
+`meta` 和结构化日志都包含 `request_id`、`stage`、`status` 与 `elapsed_ms`；失败时
+另含 `error_type`，便于关联客户端报错和服务端日志。
+
+当前 MCP 适配器使用 Python SDK v1 的 `mcp.server.fastmcp.FastMCP` API，因此依赖
+明确限制为 `mcp>=1.28,<2`。SDK v2 是破坏性升级，后续迁移应单独调整 Server、
+ClientSession 与传输层 API，并重新执行 stdio 子进程握手测试，不能直接解除上限。
 
 ---
 
@@ -482,8 +507,8 @@ POSTGRES_DB_URL=postgresql://user:password@127.0.0.1:5432/finance_agent
 POSTGRES_DOCKER_DB_URL=postgresql://user:password@host.docker.internal:5432/finance_agent
 ```
 
-连接串只保存在本地 `.env`，不要提交 GitHub。`data_sql/financials.db`
-仍是 SQL 工具的旧实验数据源，不属于 Agent 会话库；当前保留但不迁移，后续可独立重构或废弃。
+连接串只保存在本地 `.env`，不要提交 GitHub。`data_sql/financials.db` 是可选
+Text2SQL 工具的数据源，与 Agent 会话存储相互独立。
 
 DeepSeek 费用估算由 `react_agent/configuration/deepseek_pricing.yaml` 独立管理。价格卡使用人民币、
 按北京时间区分峰时与闲时，并把旧模型名归一化到实际计费模型。API 返回未知模型
@@ -499,9 +524,8 @@ Knowledge Service；后者是 Chroma、BM25、embedding、reranker 和 Chunk Sto
 
 Compose 只把 `chroma_db`、`data/knowledge`、模型缓存和私有研报挂载给 Knowledge
 Service；Agent 只挂载专用的 `data/agent-state` 会话目录，并通过
-`http://knowledge-service:8001` 访问知识库。当前为兼容既有数据仍使用宿主 bind
-mount，但必须停止 Windows 本地 Chroma 进程和旧 Agent 容器，避免同时打开同一
-目录。后续完成备份恢复演练后可把该挂载替换为 Docker named volume。
+`http://knowledge-service:8001` 访问知识库。当前使用宿主 bind mount；启动容器前
+必须停止其他会直接打开同一 Chroma 目录的本地进程或容器，避免多进程争用。
 混合检索使用 `rank-bm25`，首次生成 Chunk Store 后，Redis 缓存失效会从独立
 SQLite 语料快照重建 BM25。BM25 建库和查询统一使用 Jieba 搜索模式，
 同时执行 NFKC/大小写规范化、金融科技词典和英文数字型号保护。
@@ -524,11 +548,9 @@ curl.exe http://127.0.0.1:8001/api/v1/health/ready
 ```
 
 `live` 只说明 HTTP 进程存活；`ready` 会真实打开 Chroma 并统计 Chunk，因此能发现
-HNSW 加载失败。首次启动会在后台预热，并从现有 Chroma 生成
-`data/knowledge/chunks.sqlite3`。引入中文分词后，28,771 Chunk 的本地独立实测为：
-Chunk Store 读取约 1.8 秒、BM25 全量构建约 56.5 秒；旧的空格分词 4–5 秒数据
-不再具有参考性。Smoke 集纯 BM25 Top-10 的平均查询耗时约 425ms。
-这些阶段部分并行，实际总时长以 `/api/v1/runtime/warmup` 返回的 timings 为准。
+HNSW 加载失败。首次启动会在后台预热，并在需要时从现有 Chroma 生成
+`data/knowledge/chunks.sqlite3`。预热阶段部分并行，实际状态和耗时以
+`/api/v1/runtime/warmup` 返回值为准。
 Knowledge Service 默认设置 `HF_HUB_OFFLINE=true` 和
 `TRANSFORMERS_OFFLINE=true`，只使用挂载的模型缓存，避免服务重启时因 Hugging
 Face 网络波动导致预热失败。首次部署且缓存为空时，可在 `.env` 中临时设为
@@ -590,15 +612,13 @@ docker compose --profile ingestion stop docling
 ### 7.5 在 Conda 环境启动 Streamlit
 
 ```bash
-cd src
-streamlit run tests/test_agent.py
+conda run -n new_agent python -m streamlit run tests/test_agent.py
 ```
 
 ### 7.6 在 Conda 环境启动 FastAPI
 
 ```bash
-cd src
-uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+conda run -n new_agent python -m uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 Swagger 文档：
@@ -747,7 +767,7 @@ BM25 擅长股票代码、公司名、指标名等精确匹配；向量检索擅
 RRF 候选池最多保留 20 条；进入 Cross-Encoder 前还会按设备档位限流。
 CPU 默认评分 12 条，CUDA 默认评分 20 条，在个人开发机上兼顾检索质量和等待时间。
 
-早期实现中，低相关结果也会被缓存 1 小时，后续相似 query 命中缓存后会跳过新检索，造成错误固化。本项目让 reranker 返回 `top_score`，写入缓存前进行门控：
+reranker 返回 `top_score`，语义缓存按置信度决定是否写入，避免低相关结果固化：
 
 | top_score | 策略 |
 |---|---|
@@ -763,7 +783,7 @@ DeepSeek / LangChain 工具调用中，复杂工具参数可能进入 `.invalid_
 
 ### 9.5 FastAPI serving：从 demo 接口到可运营服务
 
-这轮服务化改造不仅是“加几个接口”，而是补齐了 LLM 应用上线前常见的工程护栏：
+FastAPI 服务包含以下工程护栏：
 
 - API versioning；
 - request_id 全链路追踪；
@@ -777,111 +797,65 @@ DeepSeek / LangChain 工具调用中，复杂工具参数可能进入 `.invalid_
 - 零真实依赖的回归测试。
 
 
-### 9.6 MCP RAG 冷启动处理
+### 9.6 MCP stdio 与资源生命周期
 
-MCP 改造中定位到的问题：首次 `query_financial_reports` 变慢的主要根因不是 BM25、Chroma、Redis 或检索/精排算法本身，而是 LangSmith/LangChain tracing 在首次底层 retriever 调用时采集 runtime metadata，触发 `git describe --tags --always --dirty` 并卡住 40 秒以上。
+`mcp_rag_server.py` 和安装命令 `financial-rag-mcp` 都只负责 stdio 初始化与
+`mcp_service` 组装，启动阶段不会加载 embedding、reranker、Chroma 或 Redis。
+MCP 默认使用远程 Knowledge Service；查询时由服务端按需完成 RAG 预热，连接在
+stdio Server 退出后统一关闭。
 
-已落地的处理方式：
-
-- `mcp_rag_server.py` 改为 stdio 薄启动入口，启动时不做重资源预热；
-- MCP 进程启动后强制关闭 `LANGCHAIN_TRACING_V2`、`LANGSMITH_TRACING_V2`、`LANGCHAIN_TRACING`、`LANGSMITH_TRACING`；
-- MCP 相关工具拆分到 `react_agent/mcp_server/` 目录，按职责模块化注册；
-- 预热统一通过 `RagAdminService.warmup()` 加载 Retriever 与 Reranker 进程内单例；
-- `start_rag_singleton_warmup` 可手动后台触发单例预热，立即返回；
-- `get_rag_singleton_warmup_status` 用于查询后台单例预热状态；
-- RAG 查询工具保留语义缓存命中路径，减少重复查询成本。
-
-当前预热会在加载 Retriever 与 Reranker 单例后，分别执行一次真实 embedding
-和 reranker 前向推理。在线 RAG 根据 `RAG_DEVICE=auto|cpu|cuda` 选择运行档位：
-CPU 默认单精排、12 个候选和 120 秒工具预算；CUDA 默认单精排、20 个候选和
-45 秒预算。召回、缓存、精排排队和推理耗时会进入日志或工具元数据。
-
-模型计算超时不会自动重试。同步模型推理进入 Python 工作线程后不能由协程安全
-终止，立即重试只会重复占用计算资源；进程级精排闸门用于阻止多个重任务同时争抢
-CPU/GPU。
-
-推荐使用流程：
-
-```text
-1. List Tools
-2. query_financial_reports
-```
-
-如需管理员提前预热，可手动执行：
-
-```text
-1. MCP_EXPOSE_ADMIN_TOOLS=1
-2. start_rag_singleton_warmup
-3. get_rag_singleton_warmup_status，直到 warmup_status.state=done
-4. query_financial_reports
-```
-
-当前已确认的问题边界：预热可以消除模型首次前向计算的额外开销，但不能替代在线
-查询的并发控制、候选限流和合理的设备超时预算。
+普通客户端只需调用 `query_financial_reports`。诊断场景可设置
+`MCP_EXPOSE_ADMIN_TOOLS=1`，使用 `check_knowledge_base`、
+`start_rag_singleton_warmup` 和 `get_rag_singleton_warmup_status`。stdout 仅承载
+MCP 协议消息，诊断日志写入 stderr 或 `MCP_LOG_PATH` 指定的文件。
 
 ---
 
 ## 10. 目录结构
 
 ```text
-react-agent-main/
-└── src/
-    ├── api/                         # FastAPI 服务层
-    │   ├── main.py                  # app 入口、lifespan、路由挂载
-    │   ├── settings.py              # 配置校验
-    │   ├── errors.py                # problem+json 错误信封
-    │   ├── middleware.py            # request_id 日志与 Prometheus 采集
-    │   ├── security.py              # API Key 鉴权
-    │   ├── ratelimit.py             # Redis 限流与 token 预算
-    │   ├── metrics.py               # Prometheus 指标
-    │   └── routes/
-    │       └── v1/
-    │           ├── chat.py          # v1 token 级 SSE / invoke
-    │           └── sessions.py      # 会话历史与删除
-    ├── react_agent/
-    │   ├── agent/                   # Agent 图、节点、路由、状态、提示词和对话用例
-    │   ├── conversations/           # 会话契约、Repository Port、管理用例和持久化 Adapter
-    │   ├── runtime/                 # LLM、Tools、Agent、Conversations 与生命周期的应用级 Composition Root
-    │   ├── configuration/           # 全局配置加载、校验与非敏感 YAML 默认值
-    │   │   ├── settings.py          # 环境变量、路径、配置模型与聚合入口
-    │   │   ├── config.yaml          # 工具层非敏感默认配置
-    │   │   └── deepseek_pricing.yaml # DeepSeek 价格卡
-    │   ├── rag/                     # 独立 RAG 业务边界
-    │   │   ├── contracts.py         # 来源、元数据、解析、查询、建库与健康状态契约
-    │   │   ├── ports.py             # 解析、缓存、召回、精排、建库、知识库只读端口
-    │   │   ├── query/               # RetrievalService：唯一在线检索编排
-    │   │   ├── ingestion/           # 文档解析入口、PDF 路由、建库与缓存一致性
-    │   │   ├── admin/               # RagAdminService：健康、人工失效与离线语料读取
-    │   │   ├── operations/          # 预热状态机、幂等、等待、失败与取消策略
-    │   │   ├── infrastructure/      # 技术实现与端口适配器
-    │   │   │   ├── parsing/         # 本地 PDF、Docling、普通文档与表格解析
-    │   │   │   ├── retrieval/       # Chroma/BM25 候选源、Redis 索引仓库、RRF 与精排
-    │   │   │   ├── cache/           # Redis 精确与语义查询缓存
-    │   │   │   ├── models/          # Runtime 持有的懒加载 Embedding Provider
-    │   │   │   └── storage/         # Chroma 建库、更新、诊断和只读访问
-    │   │   └── runtime/             # 实例级生产对象图、设备档位与资源生命周期
-    │   │       ├── offline.py       # 显式知识库路径的离线管理服务工厂
-    │   │       └── testing.py       # 服务容器与预热状态的测试重置入口
-    │   ├── tools/                   # RAG / Search / Excel / Word / Markdown / SQL
-    │   ├── tooling/                 # ToolResult 公共契约与工具重试策略
-    │   ├── models/                  # LLM Provider 工厂
-    │   ├── metering/                # 模型用量归一化、人民币计价与轮次投影
-    │   ├── infrastructure/          # Redis 等共享技术适配器
-    │   ├── observability/           # 已计算用量的日志与界面展示
-    │   ├── mcp_server/              # MCP 工具注册与 stdio Server 模块
-    │   │   ├── app.py               # 创建 MCP Server；默认注册 info/rag，admin 模式注册 health/warmup
-    │   │   ├── info_tools.py        # server_info：当前可用工具与能力边界
-    │   │   ├── health_tools.py      # check_knowledge_base，可选 admin 工具
-    │   │   ├── warmup_tools.py      # RAG 单例预热启动 / 状态查询，可选 admin 工具
-    │   │   ├── rag_tools.py         # query_financial_reports
-    │   │   └── responses.py         # mcp_ok / mcp_err 返回结构
-    ├── eval/                        # RAGAS 评测脚本与数据生成
-    ├── scripts/                     # PDF 检查、财务抽取、Redis 检查、历史管理
-    ├── tests/                       # Streamlit 入口与 API 回归测试
-    ├── mcp_rag_server.py            # MCP stdio 薄启动入口：关闭 tracing / 日志 / create_mcp_server
-    ├── pyproject.toml
-    ├── .env.example
-    └── .gitignore
+src/
+├── api/                         # FastAPI 服务、鉴权、限流、指标和 v1 路由
+├── knowledge/                   # 统一 Knowledge 命名空间
+│   ├── contracts.py             # 来源、解析、查询、建库与健康状态契约
+│   ├── ports.py                 # 解析、缓存、召回、精排、建库和存储端口
+│   ├── rag/                     # 在线检索、分阶段评测与预热用例
+│   ├── ingestion/               # 文档解析、PDF 路由与增量建库
+│   ├── admin/                   # 健康检查、缓存失效与 Chunk 读取
+│   ├── infrastructure/          # Chroma、Redis、解析、召回、模型和存储适配器
+│   ├── runtime/                 # 本地对象图、配置、设备策略与资源生命周期
+│   ├── client/                  # Knowledge Service HTTP 客户端与远程 Runtime
+│   └── server/                  # ASGI 入口、请求模型和服务端组合根
+├── react_agent/
+│   ├── agent/                   # Agent 状态、工作流、策略、上下文和工具流
+│   ├── skills/                  # 内置专业工作流及选择、加载契约
+│   ├── conversations/           # 会话用例、端口和 Checkpointer 适配器
+│   ├── runtime/                 # 应用级 Composition Root 与生命周期
+│   ├── configuration/           # 应用配置、默认值和价格卡
+│   ├── tools/                   # RAG、Search、Excel、Word、Markdown 和 SQL 工具
+│   ├── tooling/                 # ToolResult 与重试契约
+│   ├── models/                  # LLM Provider 工厂
+│   ├── metering/                # Token、成本和轮次用量计算
+│   ├── infrastructure/          # Agent 侧共享技术适配器
+│   └── observability/           # 用量日志与界面展示
+├── mcp_service/                 # 独立 MCP 协议适配器
+│   ├── main.py                  # 环境、日志、stdio 初始化
+│   ├── bootstrap.py             # MCP 应用组装与资源释放
+│   ├── app.py                   # FastMCP 创建和工具注册
+│   ├── rag_tools.py             # query_financial_reports
+│   ├── health_tools.py          # 可选健康检查工具
+│   ├── warmup_tools.py          # 可选预热工具
+│   ├── info_tools.py            # server_info
+│   ├── responses.py             # 统一工具响应结构
+│   └── observability.py         # MCP 工具调用日志
+├── eval/                        # RAGAS 评测和数据集脚本
+├── scripts/                     # 数据检查、财务抽取和调试脚本
+├── tests/                       # 离线测试与 Streamlit 应用入口
+├── mcp_rag_server.py            # MCP stdio 兼容入口
+├── docker-compose.yml
+├── Dockerfile
+├── pyproject.toml
+└── .env.example
 ```
 
 ---
@@ -895,95 +869,9 @@ react-agent-main/
 | 固定窗口限流 | 窗口边界存在短时 2× 突发 | 生产高并发可升级为滑动窗口或令牌桶 |
 | token 预算事后扣费 | 单条超长请求可能先超过预算 | 增加单请求 max_tokens 硬限制 |
 | 历史工具链干扰 | 已用 Guard 和跨轮计数缓解 | 将上一轮 tool call chain 压缩为中性摘要 |
-| MCP 首次 query 长尾 | 已定位为 LangSmith / LangChain tracing 触发 `git describe` 长尾；MCP 进程已强制关闭 tracing，warmup 降级为 retriever/reranker 单例加载 | 保持 tracing 关闭；如需排障可独立压测 `bm25.invoke()` / `vector.invoke()` / Chroma 查询 |
 
 ---
 
-## 12. 更新日志
-
-### 2026-09-07：RAG 核心元数据契约收敛
-
-- 新增 `SourceReference` 与 `ChunkMetadata`，统一定义来源、页码、chunk ID、文档类型、行业和检索分数；
-- `RagDocument` 与 `StoredChunk` 对外兼容既有字典输入，内部统一暴露类型化核心字段；
-- Chroma、Redis、BM25、混合召回、精排和结果构建不再各自解释核心 metadata 裸键；
-- 旧 Chroma/Redis 数据仍按原平铺格式读取，历史 `chunk_id` 来源推导集中为单点兼容逻辑。
-- RAG 全局服务 getter 替换为实例级 `RagRuntime`，应用 Runtime、MCP、评测和脚本显式持有各自对象图；
-- 预热状态机迁入 `rag/operations/`，Runtime 只负责组装、触发与关闭；
-- Agent 与 MCP RAG Adapter 改为显式服务提供者注入，不再执行期定位全局容器；
-- Tavily Client、重试参数、搜索数量及 Artifact 输出目录均由应用 Runtime 传入工具工厂；
-- Embedding Provider 由 Runtime 创建，查询、语义缓存与建库 Writer 共享同一实例；
-- RAG Redis 连接池、Embedding/Reranker 引用、Chroma Wrapper 与 BM25 后台执行器纳入实例生命周期并在关闭时释放。
-
-### 2026-09-06：RAG 内部类型与召回组件边界收敛
-
-- 新增 `RagDocument`，缓存、召回、精排与向量写入端口不再传递 `list[Any]` 或 LangChain `Document`；
-- 文档解析 worker 显式注入 `DocumentParsingService`，移除 ingestion 对 runtime 容器的反向调用；
-- 来源标识规则提升到 RAG 共享层，解析基础设施不再依赖 ingestion 包；
-- Reranker 的设备和推理并发由 Runtime 注入，基础设施不再依赖 runtime；
-- 混合召回拆为 Chroma 候选源、BM25 适配器、Redis 索引仓库、纯 RRF 策略和组合适配器。
-
-### 2026-09-03：Redis 与 PostgreSQL 职责收敛
-
-- Redis Stack 改为固定版本的官方 Redis 服务端镜像，移除 RedisInsight，端口仅绑定本机；
-- Redis 只承担 RAG/BM25 缓存、API 限流和 token 预算，Agent 会话统一由 PostgreSQL 承担；
-- 语义缓存由 `pickle` 改为受限 JSON 与原始 `float32` 向量字节，并使用 `rag:v2:*` 键空间隔离旧缓存；
-- 限流与预算的 Redis key 改用不可逆摘要，不再暴露 API Key 前缀；
-- PostgreSQL Checkpointer 补齐依赖、显式连接池生命周期、`dict_row` 和安全反序列化设置；
-- `data_sql/financials.db` 暂作为旧实验数据源保留，不与会话迁移混在一起。
-
-### 2026-09-02：Docling 按需解析与依赖单一来源
-
-- 新增 Docling Serve 异步解析适配器、本地 PDF 解析适配器和 `auto/local/docling` 路由；
-- 解析结果统一为 RAG 公共契约，保留 `source_file`/`source_page`/`source_pages`/`chunk_id` 溯源信息；
-- 自动路由增加图片面积、表格倾向、多栏倾向和本地解析质量门槛，超过 200 页的 PDF 直接排除；
-- 新增 `DocumentParsingService` 唯一入口，普通文档、结构化表格、PDF 路由各自独立；OCR 策略明确为 `auto/force/disabled`；
-- 删除旧 `loaders.py`/`chunker.py` 分派链，建库代码只调用统一解析服务，跨端口文档统一为 `RagDocument`；
-- 将 PDF、混合召回、精排、语义缓存和 Chroma 建库实现从 `rag/` 根目录迁至 `rag/infrastructure/`，根目录只保留公共入口与契约；
-- 将 `infrastructure/` 内部脚本继续按 `parsing/retrieval/cache/storage` 分包，应用层只依赖 Port，具体实现仅由 Runtime 容器显式组装；
-- Compose 新增只在 `ingestion` profile 下启动的 CPU 单 Worker Docling 服务；
-- `pyproject.toml` 成为唯一依赖源，删除旧 `requirements.txt` 和过期锁文件，Docker 构建也直接安装项目元数据。
-
-### 2026-08-28：RAG 模块边界与统一服务
-
-- 新增 RAG 公共契约、端口、在线查询服务、建库服务、基础设施适配器和运行时容器；
-- `query_internal_knowledge` 与 `query_financial_reports` 改为薄适配器，共用唯一 `RetrievalService`；
-- 建库成功后的 BM25/语义缓存失效改由 `IngestionService` 统一调度；
-- 将预热状态机从 MCP 层收回 RAG 模块（现位于 `react_agent/rag/operations/warmup.py`），删除 MCP 专属旧链；
-- `react_agent` 包入口改为懒加载 graph，导入独立 RAG 契约不再隐式加载 LangGraph。
-- 评测、Streamlit、MCP 健康检查、财务抽取和数据集生成均改走 RAG 公共服务；Chroma 原生客户端收口到基础设施适配器；
-- 根目录 `check_tables.py` 缩减为 `IngestionService` 兼容入口，移除重复建库与直接缓存失效链路。
-
-### 2026-07-03：MCP Server warmup 精简与 tracing 关闭
-
-- 将 MCP 工具拆分到 `react_agent/mcp_server/`，包含 `app.py`、`responses.py`、`info_tools.py`、`health_tools.py`、`warmup_tools.py`、`rag_tools.py`；预热运行时现已迁移到 RAG 模块；
-- 改造 `mcp_rag_server.py` 为 stdio 薄启动入口：路径锚定、Windows UTF-8 流修复、`.env` 加载、关闭 tracing、stderr + file 日志，不在握手阶段预热重资源；
-- 定位首次慢 query 的关键根因为 LangSmith / LangChain tracing 触发 runtime metadata 采集和 `git describe` 长尾；
-- 删除完整 RAG pipeline warmup，保留 `start_rag_singleton_warmup` / `get_rag_singleton_warmup_status`，现由 `RagAdminService` 统一加载两个进程内模型单例；
-- 默认只注册 `server_info` 与 `query_financial_reports`，`check_knowledge_base`、`start_rag_singleton_warmup`、`get_rag_singleton_warmup_status` 仅在 `MCP_EXPOSE_ADMIN_TOOLS=1` 时暴露；
-- `server_info` 默认只返回普通业务能力，不暴露 hidden admin tools，降低 Claude Code 等 Agent 的信息负担。
-
-### 2026-06-28：工具调用协议健壮性
-
-- 新增 `_ai_tool_call_ids()`，统一检测 `.tool_calls` 与 `.invalid_tool_calls`；
-- 修复 invalid tool call 悬空导致的多轮 400 死锁；
-- 入口净化、路由、异常兜底统一使用同一检测口径；
-- 新增连续 HumanMessage 合并逻辑，减少重试堆积造成的角色交替问题。
-
-### 2026-06-26：文档生成层
-
-- 新增 `docx_tool`，支持 Word 研报生成；
-- 新增 `md_tool`，支持 Markdown 输出；
-- 新增 `_doc_common.py`，复用文档工具公共逻辑；
-- `pyproject.toml` 新增 `python-docx`。
-
-### 2026-06：FastAPI serving 生产化改造
-
-- 新增 `/api/v1` 路由；
-- 实现 token 级 SSE、断连取消、统一错误、request_id、鉴权、限流、预算、Prometheus；
-- 新增 API 回归测试，使用 FakeAgent + fakeredis 避免真实依赖。
-
----
-
-## 13. License
+## 12. License
 
 MIT License
