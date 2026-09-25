@@ -38,7 +38,7 @@ jobs:
 
       - name: Run Ruff
         run: |
-          python -m ruff check react_agent api knowledge_service tests
+          python -m ruff check react_agent api knowledge tests
 
       - name: Run offline tests
         run: |
@@ -47,6 +47,6 @@ jobs:
             -q \
             --cov=react_agent \
             --cov=api \
-            --cov=knowledge_service \
+            --cov=knowledge \
             --cov-report=term \
             --cov-fail-under=35

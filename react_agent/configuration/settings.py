@@ -267,79 +267,20 @@ class RagIngestionConfig(BaseModel):
 # ---------------------------------------------------------------------------
 # 3. YAML 层 Pydantic 模型（沿用你原有的结构，补充 absolute path 修正）
 # ---------------------------------------------------------------------------
-class RagProfile(BaseModel):
-    """根据实际计算设备解析出的在线 RAG 运行参数。"""
-
-    device: Literal["cpu", "cuda"]
-    rerank_candidates: int = Field(ge=1, le=100)
-    rerank_top_n: int = Field(ge=1, le=20)
-    reranker_concurrency: int = Field(ge=1, le=8)
-    reranker_batch_size: int = Field(ge=1, le=128)
-
-
-class RagConfig(BaseModel):
-    """RAG 工具配置；支持 CPU/GPU 两套默认档位及环境变量覆盖。"""
+class RagToolConfig(BaseModel):
+    """Agent 调用远程 Knowledge Service 时的工具策略。"""
 
     max_retries: int = Field(default=2, ge=0)
-    max_content_chars: int = Field(default=800, ge=200, le=5000)
     client_timeout: float = Field(default=150.0, gt=0)
-
-    # 全局字段用于临时强制覆盖；未设置时按设备选择对应档位。
-    rerank_candidates: int | None = Field(default=None, ge=1, le=100)
-    cpu_rerank_candidates: int = Field(default=12, ge=1, le=100)
-    cuda_rerank_candidates: int = Field(default=20, ge=1, le=100)
-    rerank_top_n: int = Field(default=5, ge=1, le=20)
-    reranker_concurrency: int | None = Field(default=None, ge=1, le=8)
-    cpu_reranker_concurrency: int = Field(default=1, ge=1, le=8)
-    cuda_reranker_concurrency: int = Field(default=1, ge=1, le=8)
-    reranker_batch_size: int | None = Field(default=None, ge=1, le=128)
-    cpu_reranker_batch_size: int = Field(default=2, ge=1, le=128)
-    cuda_reranker_batch_size: int = Field(default=32, ge=1, le=128)
 
     @model_validator(mode="before")
     @classmethod
     def _load_from_env(cls, values: Any) -> dict[str, Any]:
         payload = dict(values or {})
-        env_mapping = {
-            "client_timeout": "KNOWLEDGE_SERVICE_TIMEOUT",
-            "rerank_candidates": "RAG_RERANK_CANDIDATES",
-            "cpu_rerank_candidates": "RAG_CPU_RERANK_CANDIDATES",
-            "cuda_rerank_candidates": "RAG_CUDA_RERANK_CANDIDATES",
-            "rerank_top_n": "RAG_RERANK_TOP_N",
-            "reranker_concurrency": "RAG_RERANKER_CONCURRENCY",
-            "cpu_reranker_concurrency": "RAG_CPU_RERANKER_CONCURRENCY",
-            "cuda_reranker_concurrency": "RAG_CUDA_RERANKER_CONCURRENCY",
-            "reranker_batch_size": "RAG_RERANKER_BATCH_SIZE",
-            "cpu_reranker_batch_size": "RAG_CPU_RERANKER_BATCH_SIZE",
-            "cuda_reranker_batch_size": "RAG_CUDA_RERANKER_BATCH_SIZE",
-        }
-        for field_name, env_name in env_mapping.items():
-            value = os.getenv(env_name, "").strip()
-            if value:
-                payload[field_name] = value
+        timeout = os.getenv("KNOWLEDGE_SERVICE_TIMEOUT", "").strip()
+        if timeout:
+            payload["client_timeout"] = timeout
         return payload
-
-    def profile(self, device: Literal["cpu", "cuda"]) -> RagProfile:
-        """返回指定设备的最终配置，显式全局覆盖优先于设备档位。"""
-        is_cuda = device == "cuda"
-        return RagProfile(
-            device=device,
-            rerank_candidates=self.rerank_candidates
-            or (self.cuda_rerank_candidates if is_cuda else self.cpu_rerank_candidates),
-            rerank_top_n=self.rerank_top_n,
-            reranker_concurrency=self.reranker_concurrency
-            or (
-                self.cuda_reranker_concurrency
-                if is_cuda
-                else self.cpu_reranker_concurrency
-            ),
-            reranker_batch_size=self.reranker_batch_size
-            or (
-                self.cuda_reranker_batch_size
-                if is_cuda
-                else self.cpu_reranker_batch_size
-            ),
-        )
 
 
 class ExcelConfig(BaseModel):
@@ -438,7 +379,7 @@ class FileStorageConfig(BaseModel):
 
 
 class ToolsConfig(BaseModel):
-    rag: RagConfig = RagConfig()
+    rag: RagToolConfig = RagToolConfig()
     excel: ExcelConfig = ExcelConfig()
     search: SearchConfig = SearchConfig()
     vector_store: DatabaseConfig = DatabaseConfig()
