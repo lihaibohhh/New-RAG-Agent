@@ -10,7 +10,7 @@ from langchain_core.documents import Document
 def load_all_chunks(db_path: Path) -> list[Document]:
     """通过 RAG 管理服务读取全量 Chunk，不加载 Embedding 模型。"""
     if os.getenv("KNOWLEDGE_SERVICE_URL", "").strip():
-        from react_agent.rag.runtime import create_configured_rag_runtime
+        from knowledge.client import create_configured_rag_runtime
 
         async def read_remote_chunks():
             runtime = create_configured_rag_runtime()
@@ -22,9 +22,13 @@ def load_all_chunks(db_path: Path) -> list[Document]:
         stored_chunks = asyncio.run(read_remote_chunks())
         source_label = os.environ["KNOWLEDGE_SERVICE_URL"]
     else:
-        from react_agent.rag.runtime.offline import create_admin_service
+        from knowledge.runtime import KnowledgeRuntimeConfig
+        from knowledge.runtime.offline import create_admin_service
 
-        stored_chunks = create_admin_service(chroma_dir=str(db_path)).read_chunks_sync()
+        stored_chunks = create_admin_service(
+            config=KnowledgeRuntimeConfig(),
+            chroma_dir=str(db_path),
+        ).read_chunks_sync()
         source_label = str(db_path)
 
     print(f"[generator] 通过 RAG 管理服务读取 chunks：{source_label}")

@@ -20,8 +20,8 @@ from eval.pipeline.reporting import (
 )
 from eval.pipeline.retrieval import batch_retrieve
 from eval.pipeline import ragas_runner as _ragas
+from knowledge.client import create_configured_rag_runtime
 from react_agent.models import load_chat_model
-from react_agent.rag.runtime import create_configured_rag_runtime
 
 logger = logging.getLogger(__name__)
 

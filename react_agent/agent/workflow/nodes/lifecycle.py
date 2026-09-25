@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.runtime import Runtime
 
@@ -29,8 +29,14 @@ from react_agent.agent.prompts import render_tool_recovery_directive
 logger = logging.getLogger(__name__)
 
 
-async def prepare_turn(state: State) -> dict[str, Any]:
+async def prepare_turn(
+    state: State,
+    runtime: Runtime[AgentDependencies],
+) -> dict[str, Any]:
     """在每次新用户输入进入图时重置当前轮业务状态。"""
+    selection = None
+    if runtime.context.skill_registry is not None:
+        selection = runtime.context.skill_registry.select(_latest_human_text(state))
     update: dict[str, Any] = {
         "turn_model_rounds": 0,
         "turn_tool_batches": 0,
@@ -43,7 +49,15 @@ async def prepare_turn(state: State) -> dict[str, Any]:
         "turn_evidence": [],
         "turn_evidence_omitted_count": 0,
         "turn_compaction_usage": None,
+        "selected_skill": selection.to_state() if selection else None,
     }
+    if selection is not None:
+        logger.info(
+            "skill_selected | name=%s version=%s reason=%s",
+            selection.name,
+            selection.version,
+            selection.reason,
+        )
     start = min(
         max(0, state.conversation_evidence_scanned_message_count),
         len(state.messages),
@@ -65,6 +79,22 @@ async def prepare_turn(state: State) -> dict[str, Any]:
             conversation_evidence_scanned_message_count=len(state.messages),
         )
     return update
+
+
+def _latest_human_text(state: State) -> str:
+    for message in reversed(state.messages):
+        if not isinstance(message, HumanMessage):
+            continue
+        if isinstance(message.content, str):
+            return message.content
+        text_parts: list[str] = []
+        for block in message.content or []:
+            if isinstance(block, str):
+                text_parts.append(block)
+            elif isinstance(block, dict) and isinstance(block.get("text"), str):
+                text_parts.append(block["text"])
+        return "\n".join(text_parts)
+    return ""
 
 
 async def compact_history(

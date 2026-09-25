@@ -174,6 +174,9 @@ class State(InputState):
     """瞬态系统控制指令（如反思提示）。reflection_node 写入，call_model 读取后作为 SystemMessage
     拼入当次模型输入并随即清空；不进入 messages 历史，避免过期提示堆积。"""
 
+    selected_skill: Optional[Dict[str, str]] = None
+    """当前用户轮选中的 Skill 名称、版本与原因；正文由 Runtime 注册表解析。"""
+
     # 在现有字段后面添加
 
     consecutive_failures: int = 0

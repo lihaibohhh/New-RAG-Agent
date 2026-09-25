@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from react_agent.rag.contracts import CandidateRetrievalTrace, RagDocument
-from react_agent.rag.evaluation import EvaluationRetrievalService
-from react_agent.rag.infrastructure.retrieval.hybrid_retriever import (
+from knowledge.contracts import CandidateRetrievalTrace, RagDocument
+from knowledge.rag.evaluation import EvaluationRetrievalService
+from knowledge.infrastructure.retrieval.hybrid_retriever import (
     HybridRetrieverAdapter,
 )
 

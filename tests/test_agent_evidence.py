@@ -23,7 +23,7 @@ from react_agent.agent.tool_flow.payload import bound_tool_payload
 from react_agent.agent.workflow.nodes.lifecycle import prepare_turn
 from react_agent.agent.workflow.nodes.model import finalize_model
 from react_agent.agent.workflow.nodes.tools import postprocess_tools
-from react_agent.rag.contracts import RetrievedChunk, RetrievalResult
+from knowledge.contracts import RetrievedChunk, RetrievalResult
 from react_agent.tools.rag import create_rag_tool
 from react_agent.agent.workflow.graph import build_base_graph
 from react_agent.tooling.results import tool_success
@@ -157,7 +157,8 @@ async def test_postprocess_writes_evidence_and_resets_it_next_turn() -> None:
         State(
             turn_evidence=update["turn_evidence"],
             conversation_evidence=update["conversation_evidence"],
-        )
+        ),
+        SimpleNamespace(context=dependencies),
     )
     assert reset["turn_evidence"] == []
     assert reset["turn_evidence_omitted_count"] == 0
@@ -182,7 +183,10 @@ async def test_prepare_turn_backfills_sources_from_legacy_checkpoint() -> None:
         messages=[HumanMessage(content="旧问题"), message, AIMessage(content="旧回答")]
     )
 
-    update = await prepare_turn(state)
+    dependencies = AgentDependencies(
+        config=AgentContext(), model_provider=lambda: object(), tools=()
+    )
+    update = await prepare_turn(state, SimpleNamespace(context=dependencies))
 
     assert update["conversation_evidence"][0]["chunk_id"] == "legacy::4"
     assert update["conversation_evidence_scanned_message_count"] == 3

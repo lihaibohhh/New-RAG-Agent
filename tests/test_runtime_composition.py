@@ -21,15 +21,20 @@ from react_agent.conversations.infrastructure.checkpointer_factory import (
     CheckpointerFactory,
 )
 from react_agent.configuration.settings import LLMConfig, SearchConfig, Settings
-from react_agent.mcp_server.rag_tools import execute_query_financial_reports
-from react_agent.rag.contracts import (
+from knowledge.contracts import (
     RetrievedChunk,
     RetrievalResult,
     WarmupStatus,
 )
-from react_agent.rag.operations import RagWarmupManager
-from react_agent.rag.runtime import create_rag_runtime
-from react_agent.rag.runtime_ports import AgentRagRuntimePort
+from knowledge.rag.operations import RagWarmupManager
+from knowledge.runtime import KnowledgeRuntimeConfig
+from knowledge.runtime import create_knowledge_runtime
+from knowledge.runtime_ports import (
+    AgentRagRuntimePort,
+    IngestionRuntimePort,
+    KnowledgeServerRuntimePort,
+    RagRuntimePort,
+)
 from react_agent.runtime import container
 from react_agent.runtime.container import (
     ApplicationStatus,
@@ -40,6 +45,11 @@ from react_agent.runtime.container import (
 from react_agent.tools.rag import create_rag_tool
 from react_agent.tools.markdown import create_markdown_tool
 from react_agent.tools.search import create_search_tool
+
+
+def create_test_knowledge_runtime():
+    """为组装测试创建显式配置的本地 Runtime。"""
+    return create_knowledge_runtime(KnowledgeRuntimeConfig())
 
 
 class _FakeGraph:
@@ -208,42 +218,6 @@ def test_artifact_tool_uses_runtime_selected_output_dir(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_mcp_query_uses_explicit_service_provider() -> None:
-    service_calls = 0
-
-    class FakeRetrievalService:
-        async def search(self, query: str, *, top_k: int) -> RetrievalResult:
-            return RetrievalResult(query=query, stage=f"top-{top_k}")
-
-    service = FakeRetrievalService()
-
-    def provide_service():
-        nonlocal service_calls
-        service_calls += 1
-        return service
-
-    result = await execute_query_financial_reports(
-        service_provider=provide_service,
-        warmup=lambda _wait: _ready(),
-        query="evidence",
-        top_k=2,
-    )
-
-    assert service_calls == 1
-    assert result["ok"] is True
-    assert result["meta"]["stage"] == "top-2"
-
-
-async def _ready() -> dict:
-    return {
-        "ready": True,
-        "stage": "ready",
-        "waited_seconds": 0,
-        "warmup_status": {"state": "done"},
-    }
-
-
-@pytest.mark.asyncio
 async def test_warmup_state_is_instance_scoped() -> None:
     class FakeRetrievalService:
         async def warmup(self) -> WarmupStatus:
@@ -261,7 +235,7 @@ async def test_warmup_state_is_instance_scoped() -> None:
 
 @pytest.mark.asyncio
 async def test_admin_health_composition_does_not_build_query_pipeline() -> None:
-    rag_runtime = create_rag_runtime()
+    rag_runtime = create_test_knowledge_runtime()
 
     rag_runtime.get_admin_service()
 
@@ -282,7 +256,7 @@ def test_runtime_selects_model_and_tool_catalog(monkeypatch) -> None:
 
     dependencies = container._compose_agent_dependencies(
         AgentContext(),
-        create_rag_runtime(),
+        create_test_knowledge_runtime(),
     )
 
     assert dependencies.resolve_model() == ("model", "provider/model")
@@ -485,8 +459,8 @@ async def test_postgres_missing_connection_string_stops_startup() -> None:
 
 @pytest.mark.asyncio
 async def test_application_services_report_effective_backend(monkeypatch) -> None:
-    monkeypatch.setenv("RAG_RUNTIME_MODE", "local")
-    monkeypatch.delenv("KNOWLEDGE_SERVICE_URL", raising=False)
+    monkeypatch.setenv("RAG_RUNTIME_MODE", "remote")
+    monkeypatch.setenv("KNOWLEDGE_SERVICE_URL", "http://knowledge.test")
     dependencies = AgentDependencies(
         config=AgentContext(),
         model_provider=lambda: object(),
@@ -509,12 +483,13 @@ async def test_application_services_report_effective_backend(monkeypatch) -> Non
 
 def test_agent_and_rag_adapter_have_no_runtime_service_locator_imports() -> None:
     package_root = Path(container.__file__).parent.parent
+    project_root = package_root.parent
     agent_nodes = "\n".join(
         path.read_text(encoding="utf-8")
         for path in (package_root / "agent" / "workflow" / "nodes").glob("*.py")
     )
     rag_adapter = (package_root / "tools" / "rag.py").read_text(encoding="utf-8")
-    mcp_adapter = (package_root / "mcp_server" / "rag_tools.py").read_text(
+    mcp_adapter = (project_root / "mcp_service" / "rag_tools.py").read_text(
         encoding="utf-8"
     )
     application_runtime = (package_root / "runtime" / "container.py").read_text(
@@ -523,8 +498,8 @@ def test_agent_and_rag_adapter_have_no_runtime_service_locator_imports() -> None
 
     assert "react_agent.utils.llm" not in agent_nodes
     assert "react_agent.tools" not in agent_nodes
-    assert "from react_agent.rag.runtime import" not in rag_adapter
-    assert "from react_agent.rag.runtime import" not in mcp_adapter
+    assert "create_configured_rag_runtime" not in rag_adapter
+    assert "create_configured_rag_runtime" not in mcp_adapter
     assert "get_rag_runtime_profile" not in application_runtime
 
 
@@ -537,6 +512,19 @@ def test_agent_rag_runtime_port_exposes_only_query_lifecycle_capabilities() -> N
     assert "get_admin_service" not in public_members
     assert "get_ingestion_service" not in public_members
     assert "get_evaluation_retrieval_service" not in public_members
+
+
+def test_rag_and_ingestion_runtime_ports_are_disjoint() -> None:
+    rag_members = RagRuntimePort.__dict__
+    ingestion_members = IngestionRuntimePort.__dict__
+
+    assert "get_admin_service" in rag_members
+    assert "get_evaluation_retrieval_service" in rag_members
+    assert "get_ingestion_service" not in rag_members
+    assert "get_ingestion_service" in ingestion_members
+    assert "get_retrieval_service" not in ingestion_members
+    assert RagRuntimePort in KnowledgeServerRuntimePort.__bases__
+    assert IngestionRuntimePort in KnowledgeServerRuntimePort.__bases__
 
 
 def test_legacy_agent_stream_and_chat_router_are_removed() -> None:

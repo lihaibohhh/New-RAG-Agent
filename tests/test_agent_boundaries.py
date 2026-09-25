@@ -1122,7 +1122,7 @@ def test_internal_symbols_are_not_imported_across_project_modules() -> None:
     source_roots = (
         project_root / "react_agent",
         project_root / "api",
-        project_root / "knowledge_service",
+        project_root / "knowledge",
         project_root / "eval",
         project_root / "scripts",
     )

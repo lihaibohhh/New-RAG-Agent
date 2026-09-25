@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import fakeredis
 
-from react_agent.rag.contracts import RagDocument
-from react_agent.rag.infrastructure.retrieval.bm25_repository import (
+from knowledge.contracts import RagDocument
+from knowledge.infrastructure.retrieval.bm25_repository import (
     RedisBm25Repository,
 )
-from react_agent.rag.infrastructure.retrieval.bm25_retriever import (
+from knowledge.infrastructure.retrieval.bm25_retriever import (
     Bm25CandidateRetriever,
 )
-from react_agent.rag.infrastructure.retrieval.bm25_tokenizer import (
+from knowledge.infrastructure.retrieval.bm25_tokenizer import (
     bm25_tokenizer_fingerprint,
     normalize_bm25_text,
     tokenize_bm25,

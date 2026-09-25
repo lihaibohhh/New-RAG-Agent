@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from react_agent.rag.contracts import RagDocument
-from react_agent.rag.query import RetrievalService
+from knowledge.contracts import RagDocument
+from knowledge.rag.query import RetrievalService
 
 
 class FakeCache:
