@@ -29,9 +29,13 @@ def test_builtin_industry_market_skill_is_packaged_and_parsed() -> None:
     skill = load_builtin_skill("industry_market_research")
 
     assert skill.name == "industry-market-research"
-    assert skill.version == "0.1.0"
+    assert skill.version == "0.2.0"
     assert "供需" in skill.instructions
     assert "事实、预测和观点" in skill.instructions
+    assert "一手来源" in skill.instructions
+    assert "预测修订" in skill.instructions
+    assert "CAGR" in skill.instructions
+    assert "成稿前质检" in skill.instructions
     assert "不扩大工具权限" in skill.render_for_model()
 
 
@@ -75,7 +79,7 @@ async def test_prepare_turn_records_only_skill_metadata() -> None:
     update = await prepare_turn(state, SimpleNamespace(context=dependencies))
 
     assert update["selected_skill"]["name"] == "industry-market-research"
-    assert update["selected_skill"]["version"] == "0.1.0"
+    assert update["selected_skill"]["version"] == "0.2.0"
     assert "工作流程" not in str(update["selected_skill"])
 
 
@@ -110,6 +114,8 @@ def test_selected_skill_is_injected_into_system_prompt_without_changing_tools() 
         tools_enabled=True,
     )
 
+    assert "面向金融与行业研究场景" in prompt
+    assert "不得将分析包装成确定性投资建议" in prompt
     assert "【当前任务 Skill】" in prompt
     assert "industry-market-research" in prompt
     assert "行业与市场研究工作流" in prompt

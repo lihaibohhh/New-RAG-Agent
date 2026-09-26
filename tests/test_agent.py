@@ -48,7 +48,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ── 必须是第一个 Streamlit 调用 ──────────────────────────────
-st.set_page_config(page_title="Enterprise ReAct Agent", page_icon="🤖")
+st.set_page_config(page_title="Evidence-Based Research Agent", page_icon="🤖")
 
 # ── 登录拦截：未登录不渲染任何后续内容 ──────────────────────
 if "username" not in st.session_state:
@@ -64,7 +64,7 @@ if st.session_state.username is None:
     st.stop()
 
 # ── 以下内容仅登录后可见 ──────────────────────────────────────
-st.title(f"Enterprise ReAct Agent — {st.session_state.username}")
+st.title(f"可信投研与行业研究 Agent — {st.session_state.username}")
 
 
 # ── 应用服务初始化（单例，热重载不重建）─────────────────────

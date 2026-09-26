@@ -57,8 +57,11 @@ async def lifespan(app: FastAPI):
 
 # ── App ────────────────────────────────────────────────────────────────────────
 app = FastAPI(
-    title="ReAct Agent API",
-    description="金融研报问答 Agent — FastAPI serving 层，支持 SSE 流式输出",
+    title="Evidence-Based Research Agent API",
+    description=(
+        "可信证据型金融与行业研究 Agent — FastAPI serving 层，"
+        "支持私有研报检索、公开信息补充、来源追溯与 SSE 流式输出"
+    ),
     version="1.0.0",
     lifespan=lifespan,
 )
