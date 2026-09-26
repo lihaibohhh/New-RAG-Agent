@@ -130,7 +130,7 @@ docker compose --profile ingestion stop docling
 Streamlit：
 
 ```powershell
-conda run -n new_agent python -m streamlit run tests/test_agent.py
+conda run -n new_agent python -m streamlit run scripts/streamlit_app.py
 ```
 
 FastAPI：

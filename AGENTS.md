@@ -30,9 +30,9 @@
 - `api/`：FastAPI 服务、鉴权、限流、指标、错误处理和版本化路由。
 - `tests/api/`：使用 FakeAgent 与 fakeredis 的离线 API 回归测试。
 - `tests/architecture/`：使用 Python AST 校验 Knowledge 模块的静态导入方向；新增或调整跨模块依赖时必须同步审查规则，不得通过删除规则或扩大通配允许范围掩盖越界依赖。
-- `tests/test_agent.py`：Streamlit 应用入口，不是普通单元测试。
+- `scripts/streamlit_app.py`：Streamlit 应用入口，由 `scripts/` 目录统一管理，不是单元测试。
 - `eval/`：RAGAS 数据集生成与评测，可能访问真实模型、知识库和外部服务。
-- `scripts/`：数据检查、财务数据抽取、Redis 验证和调试脚本。
+- `scripts/`：Streamlit 应用入口、PDF 质检和财务数据抽取脚本。
 - `react_agent/configuration/config.yaml`、`react_agent/configuration/deepseek_pricing.yaml`：非敏感工具默认值与价格卡；根目录 `.env`：本地运行环境配置。
 
 ## 环境与命令约定
@@ -88,7 +88,7 @@ conda run -n new_agent python -m pytest tests/api -q
 注意事项：
 
 - 如果环境提示缺少 `pytest` 或其他依赖，先说明并按 `pyproject.toml` 安装，不要改用系统 Python 绕过。
-- 不要把裸 `pytest` 作为默认全量命令；`tests/test_agent.py` 是 Streamlit UI 入口，导入时会执行应用代码。
+- `scripts/streamlit_app.py` 是 Streamlit UI 入口，不应由 pytest 导入或收集。
 - `eval/run_eval.py`、真实 RAG 查询、MCP Inspector、Streamlit 和服务启动都属于集成/手工验证，可能耗时、访问外部服务或产生费用；仅在任务需要且配置齐备时运行，并在结果中明确说明。
 - 修改 Python 代码后，至少对改动文件做语法检查；可使用：
 
@@ -109,7 +109,7 @@ conda run -n new_agent python -m pytest tests/api -q
 conda run -n new_agent python -m uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
 
 # Streamlit
-conda run -n new_agent python -m streamlit run tests/test_agent.py
+conda run -n new_agent python -m streamlit run scripts/streamlit_app.py
 
 # MCP stdio Server
 conda run -n new_agent python mcp_rag_server.py

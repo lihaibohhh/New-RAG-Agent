@@ -4,7 +4,6 @@ check_pdfs.py — 金融研报 PDF 质检脚本
 """
 import fitz
 import hashlib
-import re
 from pathlib import Path
 from collections import defaultdict
 
