@@ -2,24 +2,24 @@ from __future__ import annotations
 
 import pytest
 
-from knowledge.contracts import RagDocument
+from knowledge.contracts import KnowledgeDocument
 from knowledge.rag.query import RetrievalService
 
 
 class FakeCache:
-    def __init__(self, cached: list[RagDocument] | None = None) -> None:
+    def __init__(self, cached: list[KnowledgeDocument] | None = None) -> None:
         self.cached = cached
         self.get_calls = 0
         self.set_calls = 0
 
-    async def get(self, query: str) -> list[RagDocument] | None:
+    async def get(self, query: str) -> list[KnowledgeDocument] | None:
         self.get_calls += 1
         return self.cached
 
     async def set(
         self,
         query: str,
-        documents: list[RagDocument],
+        documents: list[KnowledgeDocument],
         *,
         top_score: float,
     ) -> None:
@@ -30,11 +30,11 @@ class FakeCache:
 
 
 class FakeRetriever:
-    def __init__(self, document: RagDocument) -> None:
+    def __init__(self, document: KnowledgeDocument) -> None:
         self.document = document
         self.calls = 0
 
-    async def retrieve(self, query: str, *, filters=None) -> list[RagDocument]:
+    async def retrieve(self, query: str, *, filters=None) -> list[KnowledgeDocument]:
         self.calls += 1
         return [self.document]
 
@@ -46,7 +46,7 @@ class FakeRetriever:
 
 
 class ModeAwareRetriever(FakeRetriever):
-    def __init__(self, document: RagDocument) -> None:
+    def __init__(self, document: KnowledgeDocument) -> None:
         super().__init__(document)
         self.modes: list[str] = []
 
@@ -56,7 +56,7 @@ class ModeAwareRetriever(FakeRetriever):
         *,
         filters=None,
         mode: str = "hybrid",
-    ) -> list[RagDocument]:
+    ) -> list[KnowledgeDocument]:
         self.calls += 1
         self.modes.append(mode)
         return [self.document]
@@ -66,10 +66,10 @@ class FakeReranker:
     async def rerank(
         self,
         query: str,
-        documents: list[RagDocument],
+        documents: list[KnowledgeDocument],
         *,
         top_n: int,
-    ) -> tuple[list[RagDocument], float]:
+    ) -> tuple[list[KnowledgeDocument], float]:
         return documents[:top_n], 0.9
 
     async def warmup(self) -> None:
@@ -78,11 +78,11 @@ class FakeReranker:
 
 @pytest.mark.asyncio
 async def test_evaluation_can_bypass_query_cache() -> None:
-    cached = RagDocument(
+    cached = KnowledgeDocument(
         content="旧缓存",
         metadata={"source_file": "old.pdf", "page": 1, "chunk_id": "old"},
     )
-    fresh = RagDocument(
+    fresh = KnowledgeDocument(
         content="新检索结果",
         metadata={"source_file": "new.pdf", "page": 2, "chunk_id": "new"},
     )
@@ -105,7 +105,7 @@ async def test_evaluation_can_bypass_query_cache() -> None:
 
 @pytest.mark.asyncio
 async def test_online_default_still_uses_query_cache() -> None:
-    cached = RagDocument(
+    cached = KnowledgeDocument(
         content="缓存结果",
         metadata={"source_file": "cached.pdf", "page": 1, "chunk_id": "cached"},
     )
@@ -126,11 +126,11 @@ async def test_online_default_still_uses_query_cache() -> None:
 
 @pytest.mark.asyncio
 async def test_single_source_evaluation_never_reuses_hybrid_query_cache() -> None:
-    cached = RagDocument(
+    cached = KnowledgeDocument(
         content="混合缓存",
         metadata={"source_file": "cached.pdf", "page": 1, "chunk_id": "cached"},
     )
-    bm25 = RagDocument(
+    bm25 = KnowledgeDocument(
         content="BM25 结果",
         metadata={"source_file": "bm25.pdf", "page": 2, "chunk_id": "bm25"},
     )

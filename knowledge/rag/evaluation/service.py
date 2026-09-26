@@ -7,11 +7,11 @@ from typing import Any
 from knowledge.contracts import (
     EvaluationCandidate,
     EvaluationRetrievalResult,
-    RagDocument,
-    RagValidationError,
-    RetrievalRequest,
+    KnowledgeDocument,
+    KnowledgeValidationError,
 )
-from knowledge.ports import EvaluationHybridRetrieverPort, RerankerPort
+from knowledge.rag.contracts import RetrievalRequest
+from knowledge.rag.ports import EvaluationHybridRetrieverPort, RerankerPort
 from knowledge.rag.query.result_builder import build_chunks
 
 
@@ -55,7 +55,7 @@ class EvaluationRetrievalService:
     ) -> EvaluationRetrievalResult:
         """执行专用评测检索；不允许查询缓存污染 A/B 结果。"""
         if use_query_cache:
-            raise RagValidationError("评测检索管道不允许使用语义查询缓存")
+            raise KnowledgeValidationError("评测检索管道不允许使用语义查询缓存")
         total_started = time.perf_counter()
         request = RetrievalRequest(
             query=query,
@@ -64,7 +64,7 @@ class EvaluationRetrievalService:
         ).normalized()
         mode = str(retrieval_mode or "hybrid").strip().lower()
         if mode not in {"hybrid", "bm25", "vector"}:
-            raise RagValidationError(f"不支持的检索模式: {retrieval_mode}")
+            raise KnowledgeValidationError(f"不支持的检索模式: {retrieval_mode}")
 
         candidate_trace = await self._retriever.retrieve_with_trace(
             request.query,
@@ -127,7 +127,7 @@ class EvaluationRetrievalService:
 
     @staticmethod
     def _snapshots(
-        documents: list[RagDocument] | tuple[RagDocument, ...],
+        documents: list[KnowledgeDocument] | tuple[KnowledgeDocument, ...],
     ) -> tuple[EvaluationCandidate, ...]:
         return tuple(
             EvaluationCandidate(

@@ -1,4 +1,5 @@
 """知识库 Runtime 对应用与协议适配器公开的能力契约。"""
+
 from __future__ import annotations
 
 from typing import Any, Protocol
@@ -108,12 +109,16 @@ class IngestionRuntimePort(Protocol):
     async def close(self) -> None: ...
 
 
-class KnowledgeServerRuntimePort(
-    RagRuntimePort,
-    IngestionRuntimePort,
-    Protocol,
-):
-    """仅供 Knowledge Server 组合根持有的完整能力视图。"""
+class KnowledgeServerRuntimePort(Protocol):
+    """仅连接两个自治模块并统一管理生命周期的 Server 组合视图。"""
+
+    @property
+    def rag_runtime(self) -> RagRuntimePort: ...
+
+    @property
+    def ingestion_runtime(self) -> IngestionRuntimePort: ...
+
+    async def close(self) -> None: ...
 
 
 __all__ = [

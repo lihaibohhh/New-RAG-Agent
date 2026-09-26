@@ -5,7 +5,7 @@ from typing import Literal
 from langchain_core.messages import AIMessage
 from react_agent.agent.contracts.state import State
 from react_agent.agent.policies import TerminationReason
-from react_agent.agent.tool_flow.calls import extract_tool_call_ids
+from react_agent.agent.tool_flow import extract_tool_call_ids
 
 
 logger = logging.getLogger(__name__)

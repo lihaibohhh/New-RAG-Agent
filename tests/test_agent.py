@@ -6,8 +6,11 @@ load_dotenv()
 import asyncio
 import atexit
 import logging
+import queue
 import threading
 import time
+from typing import Any
+
 import streamlit as st
 from langchain_core.messages import HumanMessage
 import os
@@ -34,7 +37,10 @@ from react_agent.observability.display import (
     format_usage_for_user,
 )
 from react_agent.metering.turn import extract_cumulative_snapshot, extract_usage
-from react_agent.observability import log_usage
+from react_agent.observability import (
+    consume_progress_events,
+    log_usage,
+)
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -105,6 +111,38 @@ agent = application_services.agent
 
 def run_async(coro):
     return asyncio.run_coroutine_threadsafe(coro, _loop).result()
+
+
+def run_agent_with_progress(
+    prompt: str,
+    thread_id: str,
+    status,
+) -> dict[str, Any]:
+    """Run one graph execution while rendering bounded progress on the UI thread."""
+    updates: queue.Queue = queue.Queue()
+
+    async def consume_events() -> dict[str, Any]:
+        return await consume_progress_events(
+            agent.stream_events(
+                [HumanMessage(content=prompt)],
+                thread_id=thread_id,
+            ),
+            updates.put_nowait,
+        )
+
+    future = asyncio.run_coroutine_threadsafe(consume_events(), _loop)
+    try:
+        while not future.done() or not updates.empty():
+            try:
+                progress = updates.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            status.update(label=progress.label, state=progress.state)
+        return future.result()
+    except BaseException:
+        if not future.done():
+            future.cancel()
+        raise
 
 
 # ── 会话状态初始化 ────────────────────────────────────────────
@@ -238,20 +276,19 @@ if prompt := st.session_state.pending_prompt:
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        with st.spinner("Agent 正在思考并调度工具..."):
+        progress_status = st.status("Agent 正在启动……", expanded=False)
+        try:
             # ▸ 新增：计时
             t0 = time.perf_counter()
 
-            try:
-                result = run_async(
-                    agent.invoke(
-                        [HumanMessage(content=prompt)],
-                        thread_id=st.session_state.thread_id,
-                    )
-                )
-            except Exception:
-                st.session_state.pending_prompt = None
-                raise
+            # Streamlit Session State 只能在主线程读取；后台协程只接收普通值。
+            current_thread_id = str(st.session_state.thread_id)
+            result = run_agent_with_progress(
+                prompt,
+                current_thread_id,
+                progress_status,
+            )
+            progress_status.update(label="Agent 已完成回答", state="complete")
 
             latency_ms = (time.perf_counter() - t0) * 1000
 
@@ -315,5 +352,9 @@ if prompt := st.session_state.pending_prompt:
             # ▸ 新增：本轮用量摘要（灰色小字，不抢眼）
             parts = [f"{k}: {v}" for k, v in usage_display.items()]
             st.caption(" · ".join(parts))
+        except Exception:
+            progress_status.update(label="Agent 处理失败", state="error")
+            st.session_state.pending_prompt = None
+            raise
 
     st.rerun()

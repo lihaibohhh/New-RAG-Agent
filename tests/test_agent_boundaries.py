@@ -17,16 +17,17 @@ from react_agent.agent.config import AgentContext
 from react_agent.agent.contracts.dependencies import AgentDependencies
 from react_agent.agent.contracts.state import InputState, State
 from react_agent.agent.service import AgentService
-from react_agent.agent.tool_flow.budget import (
+from react_agent.agent.tool_flow import (
+    bound_tool_payload,
     count_attempted_rag_calls_in_current_turn,
     count_successful_rag_calls_in_current_turn,
+    extract_tool_call_ids,
 )
-from react_agent.agent.tool_flow.calls import extract_tool_call_ids
-from react_agent.agent.tool_flow.payload import bound_tool_payload
 from react_agent.agent.workflow.graph import build_base_graph
 from react_agent.agent.workflow.nodes import (
     call_model,
     dynamic_tool_node,
+    finalize_model,
     postprocess_tools,
 )
 from react_agent.agent.workflow.routing import route_after_postprocess
@@ -116,10 +117,22 @@ async def test_last_step_tool_call_returns_a_mergeable_fallback() -> None:
         for event in events
         if event["event"] == "on_chain_end" and event.get("name") == "call_model"
     ]
+    root_ends = [
+        event
+        for event in events
+        if event["event"] == "on_chain_end" and not event.get("parent_ids")
+    ]
     assert len(node_ends) == 1
     assert node_ends[0]["data"]["output"]["termination_reason"] == (
         "UNEXPECTED_RECURSION_BOUNDARY"
     )
+    assert len(root_ends) == 1
+    root_output = root_ends[0]["data"]["output"]
+    assert root_output["termination_reason"] == (
+        "UNEXPECTED_RECURSION_BOUNDARY"
+    )
+    assert "未继续执行新的工具调用" in root_output["messages"][-1].content
+    assert root_output["total_tokens"] == 7
 
 
 @pytest.mark.asyncio
@@ -183,6 +196,83 @@ async def test_no_model_is_called_when_no_graph_step_can_finish() -> None:
 
     with pytest.raises(GraphRecursionError, match="call_model"):
         await call_model(state, runtime)
+
+
+@pytest.mark.asyncio
+async def test_truncated_tool_call_is_not_executed_and_usage_is_preserved(
+    caplog,
+) -> None:
+    class TruncatedModel:
+        def bind_tools(self, _tools):
+            return self
+
+        async def ainvoke(self, _messages, config=None):
+            return AIMessage(
+                content="未完成",
+                tool_calls=[
+                    {"id": "partial", "name": "search", "args": {"query": "x"}}
+                ],
+                response_metadata={"finish_reason": "length"},
+                usage_metadata={
+                    "input_tokens": 100,
+                    "output_tokens": 8,
+                    "total_tokens": 108,
+                },
+            )
+
+    dependencies = AgentDependencies(
+        config=AgentContext(enable_history_truncation=False),
+        model_provider=TruncatedModel,
+        tools=(),
+        model_ref="deepseek/deepseek-flash",
+        reserved_completion_tokens=8,
+    )
+    caplog.set_level("INFO", logger="react_agent.agent.model_execution")
+
+    update = await call_model(
+        State(messages=[HumanMessage(content="问题")], remaining_steps=10),
+        SimpleNamespace(context=dependencies),
+    )
+
+    response = update["messages"][0]
+    assert extract_tool_call_ids(response) == []
+    assert "模型输出达到长度上限" in response.content
+    assert update["termination_reason"] == "MODEL_OUTPUT_TRUNCATED"
+    assert update["total_tokens"] == 108
+    assert "output_limit_tokens=8" in caplog.text
+    assert "output_tokens=8" in caplog.text
+    assert "finish_reason=length" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_truncated_final_answer_keeps_partial_content_and_adds_notice() -> None:
+    class TruncatedModel:
+        async def ainvoke(self, _messages, config=None):
+            return AIMessage(
+                content="部分结论",
+                response_metadata={"stop_reason": "max_tokens"},
+                usage_metadata={
+                    "input_tokens": 50,
+                    "output_tokens": 8,
+                    "total_tokens": 58,
+                },
+            )
+
+    dependencies = AgentDependencies(
+        config=AgentContext(enable_history_truncation=False),
+        model_provider=TruncatedModel,
+        tools=(),
+        model_ref="anthropic/claude-test",
+        reserved_completion_tokens=8,
+    )
+    update = await finalize_model(
+        State(messages=[HumanMessage(content="问题")], remaining_steps=2),
+        SimpleNamespace(context=dependencies),
+    )
+
+    assert update["messages"][0].content.startswith("部分结论")
+    assert "模型输出达到长度上限" in update["messages"][0].content
+    assert update["total_tokens"] == 58
 
 
 @pytest.mark.asyncio
@@ -496,6 +586,11 @@ async def test_business_budget_closes_tool_calls_before_finalizing(
 def test_recursion_limit_must_cover_business_budget() -> None:
     with pytest.raises(ValueError, match="recursion_limit 不足"):
         AgentContext(recursion_limit=20)
+
+
+def test_history_budget_cannot_exceed_total_input_budget() -> None:
+    with pytest.raises(ValueError, match="max_history_tokens 不能大于"):
+        AgentContext(max_history_tokens=101, max_input_tokens=100)
 
 
 def test_agent_context_environment_loading_is_an_adapter(

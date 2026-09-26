@@ -2,15 +2,14 @@ from __future__ import annotations
 
 import pytest
 
-from knowledge.contracts import CandidateRetrievalTrace, RagDocument
+from knowledge.contracts import KnowledgeDocument
+from knowledge.rag.contracts import CandidateRetrievalTrace
 from knowledge.rag.evaluation import EvaluationRetrievalService
-from knowledge.infrastructure.retrieval.hybrid_retriever import (
-    HybridRetrieverAdapter,
-)
+from knowledge.rag.retrieval import HybridRetrievalService
 
 
-def _document(chunk_id: str, content: str | None = None) -> RagDocument:
-    return RagDocument(
+def _document(chunk_id: str, content: str | None = None) -> KnowledgeDocument:
+    return KnowledgeDocument(
         content=content or f"{chunk_id} 正文",
         metadata={
             "chunk_id": chunk_id,
@@ -22,25 +21,14 @@ def _document(chunk_id: str, content: str | None = None) -> RagDocument:
     )
 
 
-class _Repository:
-    def load(self):
-        return None
-
-    def save(self, _backend, _document_count: int) -> None:
-        return None
-
-    def clear(self) -> None:
-        return None
-
-
 class _Vector:
-    def __init__(self, documents: list[RagDocument]) -> None:
+    def __init__(self, documents: list[KnowledgeDocument]) -> None:
         self._documents = documents
 
-    def retrieve(self, _query: str) -> list[RagDocument]:
+    def retrieve(self, _query: str) -> list[KnowledgeDocument]:
         return list(self._documents)
 
-    def list_documents(self) -> list[RagDocument]:
+    def list_documents(self) -> list[KnowledgeDocument]:
         return list(self._documents)
 
     def warmup(self) -> None:
@@ -48,21 +36,29 @@ class _Vector:
 
 
 class _Bm25:
-    def __init__(self, documents: list[RagDocument]) -> None:
+    def __init__(self, documents: list[KnowledgeDocument]) -> None:
         self._documents = documents
 
-    def retrieve(self, _query: str) -> list[RagDocument]:
+    def retrieve(self, _query: str) -> list[KnowledgeDocument]:
         return list(self._documents)
+
+    def prepare(self) -> bool:
+        return True
+
+    def invalidate(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
 
 
 @pytest.mark.asyncio
 async def test_hybrid_trace_preserves_each_candidate_stage() -> None:
     shared = _document("shared")
-    adapter = HybridRetrieverAdapter(
+    adapter = HybridRetrievalService(
         vector_retriever=_Vector([shared, _document("vector-only")]),
-        bm25_repository=_Repository(),
+        bm25_retriever=_Bm25([_document("bm25-only"), shared]),
     )
-    adapter._bm25 = _Bm25([_document("bm25-only"), shared])
 
     trace = await adapter.retrieve_with_trace("问题")
     online_result = await adapter.retrieve("问题")
@@ -83,7 +79,7 @@ async def test_hybrid_trace_preserves_each_candidate_stage() -> None:
 
 
 class _TraceRetriever:
-    def __init__(self, documents: list[RagDocument]) -> None:
+    def __init__(self, documents: list[KnowledgeDocument]) -> None:
         self.documents = documents
 
     async def retrieve_with_trace(self, _query: str, **_kwargs):

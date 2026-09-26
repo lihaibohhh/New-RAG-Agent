@@ -6,12 +6,12 @@ import time
 from typing import Any
 
 from knowledge.contracts import (
-    RagValidationError,
-    RetrievalRequest,
+    KnowledgeValidationError,
     RetrievalResult,
     WarmupStatus,
 )
-from knowledge.ports import (
+from knowledge.rag.contracts import RetrievalRequest
+from knowledge.rag.ports import (
     HybridRetrieverPort,
     RerankerPort,
     SemanticCachePort,
@@ -57,7 +57,7 @@ class RetrievalService:
         request = RetrievalRequest(query=query, top_k=top_k, filters=filters).normalized()
         mode = str(retrieval_mode or "hybrid").strip().lower()
         if mode not in {"hybrid", "bm25", "vector"}:
-            raise RagValidationError(f"不支持的检索模式: {retrieval_mode}")
+            raise KnowledgeValidationError(f"不支持的检索模式: {retrieval_mode}")
         query_cache_enabled = (
             use_query_cache and request.filters is None and mode == "hybrid"
         )

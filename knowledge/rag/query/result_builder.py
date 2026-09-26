@@ -3,14 +3,14 @@ from __future__ import annotations
 
 import logging
 
-from knowledge.contracts import RagDocument, RetrievedChunk
+from knowledge.contracts import KnowledgeDocument, RetrievedChunk
 
 
 logger = logging.getLogger(__name__)
 
 
 def build_chunks(
-    documents: list[RagDocument],
+    documents: list[KnowledgeDocument],
     *,
     max_chars: int,
 ) -> tuple[RetrievedChunk, ...]:

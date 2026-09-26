@@ -244,8 +244,18 @@ class AgentContext:
     def __post_init__(self) -> None:
         apply_environment_overrides(self)
         self._validate_execution_budget()
+        if self.max_history_tokens < 0:
+            raise ValueError("max_history_tokens 不能为负数")
         if self.max_input_tokens < 1:
             raise ValueError("max_input_tokens 必须大于 0")
+        if (
+            self.enable_history_truncation
+            and self.max_history_tokens > self.max_input_tokens
+        ):
+            raise ValueError(
+                "max_history_tokens 不能大于 max_input_tokens："
+                f"{self.max_history_tokens} > {self.max_input_tokens}"
+            )
         if self.context_safety_margin_tokens < 0:
             raise ValueError("context_safety_margin_tokens 不能为负数")
         if self.history_compaction_max_output_tokens < 1:

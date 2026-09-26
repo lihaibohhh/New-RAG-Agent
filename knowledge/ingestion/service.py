@@ -1,4 +1,5 @@
 """RAG 增量建库应用服务。"""
+
 from __future__ import annotations
 
 import asyncio
@@ -10,41 +11,29 @@ from multiprocessing import Pool, cpu_count
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
-
-from knowledge.contracts import IngestionReport, RagDocument
+from knowledge.contracts import IngestionReport, KnowledgeDocument
+from knowledge.ingestion.config import IngestionConfig
 from knowledge.ingestion.document_service import (
     SUPPORTED_EXTENSIONS,
     parse_file_to_documents,
 )
-from knowledge.ports import (
+from knowledge.ingestion.ports import (
+    DocumentParserPort,
     IngestionManifestPort,
     IngestionPreflightPort,
-    DocumentParserPort,
     KnowledgeIndexChangedPort,
     PdfPageCounterPort,
     VectorIndexWriterPort,
 )
-from knowledge.observability import summarize_last_run
+from knowledge.ingestion.observability import summarize_last_run
 
 
 logger = logging.getLogger(__name__)
 
 
-class IngestionConfig(BaseModel):
-    """由组合根注入的建库策略，避免应用用例读取全局配置。"""
-
-    model_config = ConfigDict(extra="forbid", frozen=True, validate_default=True)
-
-    max_pdf_pages: int = Field(default=200, gt=0)
-    batch_size: int = Field(default=1_000, ge=1, le=20_000)
-    workers: int = Field(default=1, ge=1, le=16)
-    fail_fast: bool = True
-
-
 def _parse_one(
     args: tuple[str, str, str, DocumentParserPort],
-) -> tuple[str, str, list[RagDocument], str | None, float]:
+) -> tuple[str, str, list[KnowledgeDocument], str | None, float]:
     """在独立进程中解析一个文件；保持模块顶层以兼容 Windows spawn。"""
     file_path, file_hash, source_root, parser = args
     started = time.perf_counter()
@@ -131,7 +120,9 @@ class IngestionService:
             asyncio.get_running_loop()
         except RuntimeError:
             return asyncio.run(self.ingest(data_dir))
-        raise RuntimeError("事件循环已运行，请使用 await IngestionService.ingest(...)。")
+        raise RuntimeError(
+            "事件循环已运行，请使用 await IngestionService.ingest(...)。"
+        )
 
     def _build_sync(self, data_dir: str) -> dict[str, Any]:
         # Chroma/SQLite 是单写模型，指纹清单也需要与批次提交保持同一临界区。
@@ -141,7 +132,7 @@ class IngestionService:
     def _build_locked(self, data_dir: str) -> dict[str, Any]:
         data_path = Path(data_dir)
         if not data_path.exists():
-            logger.error("[RAG] 数据目录不存在 path=%s", data_dir)
+            logger.error("[INGESTION] 数据目录不存在 path=%s", data_dir)
             return self._empty_result("missing_data_dir", data_dir)
 
         all_files = [
@@ -150,7 +141,7 @@ class IngestionService:
             if path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS
         ]
         if not all_files:
-            logger.warning("[RAG] 数据目录没有支持的文件 path=%s", data_dir)
+            logger.warning("[INGESTION] 数据目录没有支持的文件 path=%s", data_dir)
             return self._empty_result("no_supported_files", data_dir)
 
         hash_record = self._manifest.load()
@@ -163,7 +154,7 @@ class IngestionService:
                     page_count = self._page_counter.count(str(path))
                 except Exception:
                     logger.warning(
-                        "[RAG] PDF 页数检查失败，继续解析 path=%s",
+                        "[INGESTION] PDF 页数检查失败，继续解析 path=%s",
                         path,
                         exc_info=True,
                     )
@@ -233,14 +224,14 @@ class IngestionService:
             for path, fingerprint in new_files
         ]
 
-        buffer: list[tuple[str, str, list[RagDocument]]] = []
+        buffer: list[tuple[str, str, list[KnowledgeDocument]]] = []
         total_written = 0
         batch_counter = 0
         files_done = 0
         cpu_parse_total = 0.0
 
         def flush_batch(
-            batch_chunks: list[RagDocument],
+            batch_chunks: list[KnowledgeDocument],
             completed_files: dict[str, str],
         ) -> None:
             nonlocal total_written, batch_counter
@@ -254,7 +245,7 @@ class IngestionService:
             self._manifest.save(hash_record)
             total_written += len(batch_chunks)
             logger.info(
-                "[RAG] 建库批次完成 batch=%s total_chunks=%s",
+                "[INGESTION] 建库批次完成 batch=%s total_chunks=%s",
                 batch_counter,
                 total_written,
             )
@@ -269,21 +260,27 @@ class IngestionService:
                 files_done += 1
                 cpu_parse_total += elapsed
                 if error:
-                    logger.error("[RAG] 文档解析失败 path=%s error=%s", file_path, error)
+                    logger.error(
+                        "[INGESTION] 文档解析失败 path=%s error=%s",
+                        file_path,
+                        error,
+                    )
                     if fail_fast:
                         raise RuntimeError(
                             f"严格建库因解析失败而停止：{Path(file_path).name}（{error}）"
                         )
                     continue
                 if not chunks:
-                    logger.warning("[RAG] 文档无可写内容 path=%s", file_path)
+                    logger.warning("[INGESTION] 文档无可写内容 path=%s", file_path)
                     continue
 
                 buffer.append((file_path, file_hash, chunks))
                 buffer_chunk_count = sum(len(items) for _, _, items in buffer)
                 while buffer_chunk_count >= batch_size:
-                    batch_chunks: list[RagDocument] = []
-                    remaining_buffer: list[tuple[str, str, list[RagDocument]]] = []
+                    batch_chunks: list[KnowledgeDocument] = []
+                    remaining_buffer: list[
+                        tuple[str, str, list[KnowledgeDocument]]
+                    ] = []
                     completed_files: dict[str, str] = {}
                     taken = 0
                     for path, fingerprint, file_chunks in buffer:
@@ -320,7 +317,7 @@ class IngestionService:
         wall_elapsed = time.perf_counter() - wall_started
         parallel_ratio = round(cpu_parse_total / wall_elapsed, 2) if wall_elapsed else 0
         logger.info(
-            "[RAG] 解析完成 wall_seconds=%.2f cpu_seconds=%.2f workers=%s ratio=%s",
+            "[INGESTION] 解析完成 wall_seconds=%.2f cpu_seconds=%.2f workers=%s ratio=%s",
             wall_elapsed,
             cpu_parse_total,
             workers,

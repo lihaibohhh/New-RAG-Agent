@@ -8,7 +8,7 @@ from typing import Any
 from langchain_core.messages import AIMessage, HumanMessage
 
 from react_agent.agent.context_management.contracts import TurnBlock, TurnSegments
-from react_agent.agent.tool_flow.calls import SYSTEM_SENTINEL_NAMES
+from react_agent.agent.tool_flow import SYSTEM_SENTINEL_NAMES
 
 
 def is_real_human_message(message: Any) -> bool:

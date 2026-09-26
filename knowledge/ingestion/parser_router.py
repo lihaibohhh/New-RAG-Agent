@@ -8,8 +8,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Literal
 
-from knowledge.contracts import OcrPolicy, ParseRequest, ParseResult
-from knowledge.ports import DocumentParserPort
+from knowledge.ingestion.contracts import OcrPolicy, ParseRequest, ParseResult
+from knowledge.ingestion.ports import DocumentParserPort
 
 
 logger = logging.getLogger(__name__)

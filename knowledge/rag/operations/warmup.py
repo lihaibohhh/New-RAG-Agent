@@ -8,7 +8,7 @@ import time
 from collections.abc import Callable
 from typing import Any, Literal, TypedDict
 
-from knowledge.runtime_ports import RetrievalServicePort
+from knowledge.rag.ports import WarmupServicePort
 
 
 logger = logging.getLogger(__name__)
@@ -38,7 +38,7 @@ class RagWarmupManager:
 
     def __init__(
         self,
-        retrieval_service_provider: Callable[[], RetrievalServicePort],
+        retrieval_service_provider: Callable[[], WarmupServicePort],
     ) -> None:
         self._retrieval_service_provider = retrieval_service_provider
         self._task: asyncio.Task | None = None

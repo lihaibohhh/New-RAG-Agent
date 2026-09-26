@@ -8,7 +8,7 @@ from typing import Any
 from langchain_core.messages import AIMessage, ToolMessage
 
 from react_agent.agent.context_management.contracts import ToolExchange
-from react_agent.agent.tool_flow.calls import extract_tool_call_ids
+from react_agent.agent.tool_flow import extract_tool_call_ids
 
 
 logger = logging.getLogger(__name__)

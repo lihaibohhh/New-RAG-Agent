@@ -1,16 +1,16 @@
 """唯一持有本地 Chroma 的 Knowledge Service 应用。"""
+
 from __future__ import annotations
 
 import hmac
 import logging
 from contextlib import asynccontextmanager
-from dataclasses import asdict
 from pathlib import Path, PureWindowsPath
 from typing import Any, Callable
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 
-from knowledge.server.models import (
+from knowledge.transport.schemas import (
     EvaluationSearchRequest,
     IngestionRequest,
     InvalidateRequest,
@@ -18,11 +18,14 @@ from knowledge.server.models import (
     WarmupRequest,
 )
 from knowledge.server.settings import KnowledgeServiceSettings
-from knowledge.contracts import (
-    EvaluationRetrievalResult,
-    RagValidationError,
-    RetrievalResult,
-    StoredChunk,
+from knowledge.contracts import KnowledgeValidationError
+from knowledge.transport.codecs import (
+    evaluation_result_to_payload,
+    health_status_to_payload,
+    ingestion_report_to_payload,
+    retrieval_result_to_payload,
+    stored_chunk_page_to_payload,
+    warmup_response_to_payload,
 )
 from knowledge.runtime_ports import (
     IngestionRuntimePort,
@@ -34,46 +37,6 @@ from knowledge.server.runtime import create_knowledge_runtime
 
 logger = logging.getLogger(__name__)
 RuntimeFactory = Callable[[], KnowledgeServerRuntimePort]
-
-
-def _retrieval_payload(result: RetrievalResult) -> dict[str, Any]:
-    return {
-        "query": result.query,
-        "chunks": [asdict(chunk) for chunk in result.chunks],
-        "stage": result.stage,
-        "cache_hit": result.cache_hit,
-        "candidates_count": result.candidates_count,
-        "reranked_count": result.reranked_count,
-        "top_score": result.top_score,
-        "timings": dict(result.timings),
-    }
-
-
-def _evaluation_retrieval_payload(
-    result: EvaluationRetrievalResult,
-) -> dict[str, Any]:
-    return {
-        "query": result.query,
-        "retrieval_mode": result.retrieval_mode,
-        "chunks": [asdict(chunk) for chunk in result.chunks],
-        "trace": {
-            "stages": {
-                name: [asdict(candidate) for candidate in candidates]
-                for name, candidates in result.stages.items()
-            },
-            "timings": dict(result.timings),
-            "configuration": dict(result.configuration),
-            "degraded_sources": list(result.degraded_sources),
-        },
-    }
-
-
-def _stored_chunk_payload(chunk: StoredChunk) -> dict[str, Any]:
-    return {
-        "chunk_id": chunk.chunk_id,
-        "content": chunk.content,
-        "metadata": chunk.metadata.to_dict(),
-    }
 
 
 def _resolve_ingestion_path(root: Path, relative_path: str) -> Path:
@@ -106,9 +69,11 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         runtime = runtime_factory()
+        rag_view = runtime.rag_runtime
+        ingestion_view = runtime.ingestion_runtime
         app.state.knowledge_runtime = runtime
-        app.state.rag_runtime = runtime
-        app.state.ingestion_runtime = runtime
+        app.state.rag_runtime = rag_view
+        app.state.ingestion_runtime = ingestion_view
         app.state.knowledge_settings = configured
         if configured.require_api_key and not configured.api_key:
             await runtime.close()
@@ -122,7 +87,7 @@ def create_app(
                 "管理与检索接口当前未启用鉴权"
             )
         if configured.warmup_on_start:
-            runtime.operations.start(force=False)
+            rag_view.operations.start(force=False)
         try:
             yield
         finally:
@@ -156,10 +121,10 @@ def create_app(
 
     protected = [Depends(require_api_key)]
 
-    @app.exception_handler(RagValidationError)
+    @app.exception_handler(KnowledgeValidationError)
     async def rag_validation_error(
         _request: Request,
-        exc: RagValidationError,
+        exc: KnowledgeValidationError,
     ) -> Any:
         from fastapi.responses import JSONResponse
 
@@ -193,14 +158,18 @@ def create_app(
         tags=["retrieval"],
     )
     async def search(body: SearchRequest, request: Request) -> dict[str, Any]:
-        result = await rag_runtime(request).get_retrieval_service().search(
-            body.query,
-            top_k=body.top_k,
-            filters=body.filters,
-            use_query_cache=body.use_query_cache,
-            retrieval_mode=body.retrieval_mode,
+        result = (
+            await rag_runtime(request)
+            .get_retrieval_service()
+            .search(
+                body.query,
+                top_k=body.top_k,
+                filters=body.filters,
+                use_query_cache=body.use_query_cache,
+                retrieval_mode=body.retrieval_mode,
+            )
         )
-        return _retrieval_payload(result)
+        return retrieval_result_to_payload(result)
 
     @app.post(
         "/api/v1/evaluation/retrieval/trace",
@@ -216,13 +185,17 @@ def create_app(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Evaluation retrieval API 未启用",
             )
-        result = await rag_runtime(request).get_evaluation_retrieval_service().search(
-            body.query,
-            top_k=body.top_k,
-            filters=body.filters,
-            retrieval_mode=body.retrieval_mode,
+        result = (
+            await rag_runtime(request)
+            .get_evaluation_retrieval_service()
+            .search(
+                body.query,
+                top_k=body.top_k,
+                filters=body.filters,
+                retrieval_mode=body.retrieval_mode,
+            )
         )
-        return _evaluation_retrieval_payload(result)
+        return evaluation_result_to_payload(result)
 
     @app.get(
         "/api/v1/runtime/warmup",
@@ -230,7 +203,7 @@ def create_app(
         tags=["operations"],
     )
     async def warmup_status(request: Request) -> dict[str, Any]:
-        return rag_runtime(request).operations.get_status()
+        return warmup_response_to_payload(rag_runtime(request).operations.get_status())
 
     @app.post(
         "/api/v1/runtime/warmup",
@@ -241,7 +214,7 @@ def create_app(
         manager = rag_runtime(request).operations
         if body.force:
             manager.start(force=True)
-        return await manager.ensure_ready(body.wait_seconds)
+        return warmup_response_to_payload(await manager.ensure_ready(body.wait_seconds))
 
     @app.get(
         "/api/v1/admin/health",
@@ -250,7 +223,7 @@ def create_app(
     )
     async def admin_health(request: Request) -> dict[str, Any]:
         health = await rag_runtime(request).get_admin_service().health()
-        return asdict(health)
+        return health_status_to_payload(health)
 
     @app.post(
         "/api/v1/admin/cache/invalidate",
@@ -261,8 +234,8 @@ def create_app(
         body: InvalidateRequest,
         request: Request,
     ) -> dict[str, Any]:
-        await rag_runtime(request).get_admin_service().invalidate(
-            body.knowledge_base_id
+        await (
+            rag_runtime(request).get_admin_service().invalidate(body.knowledge_base_id)
         )
         return {"status": "invalidated", "knowledge_base_id": body.knowledge_base_id}
 
@@ -277,17 +250,21 @@ def create_app(
         offset: int = Query(default=0, ge=0),
         limit: int = Query(default=500, ge=1, le=1000),
     ) -> dict[str, Any]:
-        items = await rag_runtime(request).get_admin_service().read_chunks(
-            source_file=source_file,
+        items = (
+            await rag_runtime(request)
+            .get_admin_service()
+            .read_chunks(
+                source_file=source_file,
+                offset=offset,
+                limit=limit,
+            )
+        )
+        return stored_chunk_page_to_payload(
+            items,
             offset=offset,
             limit=limit,
+            has_more=len(items) == limit,
         )
-        return {
-            "items": [_stored_chunk_payload(item) for item in items],
-            "offset": offset,
-            "limit": limit,
-            "has_more": len(items) == limit,
-        }
 
     @app.post(
         "/api/v1/ingestions",
@@ -297,10 +274,12 @@ def create_app(
     async def ingest(body: IngestionRequest, request: Request) -> dict[str, Any]:
         root = request.app.state.knowledge_settings.ingestion_root
         data_path = _resolve_ingestion_path(root, body.relative_path)
-        report = await ingestion_runtime(request).get_ingestion_service().ingest(
-            str(data_path)
+        report = (
+            await ingestion_runtime(request)
+            .get_ingestion_service()
+            .ingest(str(data_path))
         )
-        return report.to_dict()
+        return ingestion_report_to_payload(report)
 
     return app
 

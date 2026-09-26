@@ -4,25 +4,54 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any
+from typing import Any, TypeVar
 
 import httpx
+from pydantic import BaseModel, ValidationError
 
 from knowledge.contracts import (
-    ChunkMetadata,
-    EvaluationCandidate,
     EvaluationRetrievalResult,
     IngestionReport,
+    KnowledgeValidationError,
     RagHealthStatus,
-    RagValidationError,
-    RetrievedChunk,
     RetrievalResult,
     StoredChunk,
     WarmupStatus,
 )
+from knowledge.transport.codecs import (
+    DecodedChunkPage,
+    evaluation_result_from_payload,
+    health_status_from_payload,
+    ingestion_report_from_payload,
+    retrieval_result_from_payload,
+    stored_chunk_page_from_payload,
+    warmup_response_from_payload,
+    warmup_response_to_payload,
+    warmup_status_from_payload,
+)
+from knowledge.transport.schemas import (
+    EvaluationSearchRequest,
+    IngestionRequest,
+    InvalidateRequest,
+    SearchRequest,
+    WarmupRequest,
+)
 
 
 logger = logging.getLogger(__name__)
+_RequestT = TypeVar("_RequestT", bound=BaseModel)
+
+
+def _validated_request(
+    request_type: type[_RequestT],
+    **values: Any,
+) -> _RequestT:
+    try:
+        return request_type(**values)
+    except ValidationError as exc:
+        raise KnowledgeValidationError(
+            f"Knowledge Service 请求参数不符合 {request_type.__name__}: {exc}"
+        ) from exc
 
 
 class KnowledgeServiceClient:
@@ -77,7 +106,7 @@ class KnowledgeServiceClient:
                 f"{detail or response.reason_phrase}"
             )
             if response.status_code in {400, 422}:
-                raise RagValidationError(message)
+                raise KnowledgeValidationError(message)
             raise RuntimeError(message)
         payload = response.json()
         if not isinstance(payload, dict):
@@ -104,7 +133,7 @@ class KnowledgeServiceClient:
                 f"{detail or response.reason_phrase}"
             )
             if response.status_code in {400, 422}:
-                raise RagValidationError(message)
+                raise KnowledgeValidationError(message)
             raise RuntimeError(message)
         payload = response.json()
         if not isinstance(payload, dict):
@@ -120,41 +149,22 @@ class KnowledgeServiceClient:
         use_query_cache: bool = True,
         retrieval_mode: str = "hybrid",
     ) -> RetrievalResult:
+        request = _validated_request(
+            SearchRequest,
+            query=query,
+            top_k=top_k,
+            filters=filters,
+            use_query_cache=use_query_cache,
+            retrieval_mode=retrieval_mode,
+        )
         payload = await self._request(
             "POST",
             "/api/v1/retrieval/search",
-            json={
-                "query": query,
-                "top_k": top_k,
-                "filters": filters,
-                "use_query_cache": use_query_cache,
-                "retrieval_mode": retrieval_mode,
-            },
+            json=request.model_dump(mode="json"),
         )
-        chunks = tuple(
-            RetrievedChunk(
-                content=str(item.get("content") or ""),
-                source_file=str(item.get("source_file") or ""),
-                source_page=item.get("source_page"),
-                chunk_id=str(item.get("chunk_id") or ""),
-                score=item.get("score"),
-                doc_type=item.get("doc_type"),
-                industry=item.get("industry"),
-            )
-            for item in payload.get("chunks") or []
-        )
-        return RetrievalResult(
-            query=str(payload.get("query") or query),
-            chunks=chunks,
-            stage=str(payload.get("stage") or "remote"),
-            cache_hit=bool(payload.get("cache_hit")),
-            candidates_count=int(payload.get("candidates_count") or 0),
-            reranked_count=int(payload.get("reranked_count") or 0),
-            top_score=float(payload.get("top_score") or 0.0),
-            timings={
-                str(key): float(value)
-                for key, value in dict(payload.get("timings") or {}).items()
-            },
+        return retrieval_result_from_payload(
+            payload,
+            fallback_query=request.query,
         )
 
     async def evaluation_search(
@@ -168,59 +178,23 @@ class KnowledgeServiceClient:
     ) -> EvaluationRetrievalResult:
         """调用 Knowledge Service 专用评测管道。"""
         if use_query_cache:
-            raise RagValidationError("评测检索管道不允许使用语义查询缓存")
+            raise KnowledgeValidationError("评测检索管道不允许使用语义查询缓存")
+        request = _validated_request(
+            EvaluationSearchRequest,
+            query=query,
+            top_k=top_k,
+            filters=filters,
+            retrieval_mode=retrieval_mode,
+        )
         payload = await self._request(
             "POST",
             "/api/v1/evaluation/retrieval/trace",
-            json={
-                "query": query,
-                "top_k": top_k,
-                "filters": filters,
-                "retrieval_mode": retrieval_mode,
-            },
+            json=request.model_dump(mode="json"),
         )
-        chunks = tuple(
-            RetrievedChunk(
-                content=str(item.get("content") or ""),
-                source_file=str(item.get("source_file") or ""),
-                source_page=item.get("source_page"),
-                chunk_id=str(item.get("chunk_id") or ""),
-                score=item.get("score"),
-                doc_type=item.get("doc_type"),
-                industry=item.get("industry"),
-            )
-            for item in payload.get("chunks") or []
-        )
-        trace = dict(payload.get("trace") or {})
-        raw_stages = dict(trace.get("stages") or {})
-        stages = {
-            str(name): tuple(
-                EvaluationCandidate(
-                    rank=int(item.get("rank") or 0),
-                    chunk_id=str(item.get("chunk_id") or ""),
-                    source_file=str(item.get("source_file") or ""),
-                    source_page=item.get("source_page"),
-                    content_chars=int(item.get("content_chars") or 0),
-                    doc_type=item.get("doc_type"),
-                    industry=item.get("industry"),
-                )
-                for item in items or []
-            )
-            for name, items in raw_stages.items()
-        }
-        return EvaluationRetrievalResult(
-            query=str(payload.get("query") or query),
-            retrieval_mode=str(payload.get("retrieval_mode") or retrieval_mode),
-            chunks=chunks,
-            stages=stages,
-            timings={
-                str(key): float(value)
-                for key, value in dict(trace.get("timings") or {}).items()
-            },
-            configuration=dict(trace.get("configuration") or {}),
-            degraded_sources=tuple(
-                str(value) for value in trace.get("degraded_sources") or []
-            ),
+        return evaluation_result_from_payload(
+            payload,
+            fallback_query=request.query,
+            fallback_retrieval_mode=request.retrieval_mode,
         )
 
     async def request_warmup(
@@ -229,91 +203,72 @@ class KnowledgeServiceClient:
         wait_seconds: int | float = 20,
         force: bool = False,
     ) -> dict[str, Any]:
-        return await self._request(
-            "POST",
-            "/api/v1/runtime/warmup",
-            json={"wait_seconds": wait_seconds, "force": force},
+        request = _validated_request(
+            WarmupRequest,
+            wait_seconds=wait_seconds,
+            force=force,
+        )
+        return warmup_response_to_payload(
+            await self._request(
+                "POST",
+                "/api/v1/runtime/warmup",
+                json=request.model_dump(mode="json"),
+            )
         )
 
     async def warmup(self) -> WarmupStatus:
         """满足 RetrievalService 预热契约，供评测等现有调用方复用。"""
         payload = await self.request_warmup(wait_seconds=120)
-        status = dict(payload.get("warmup_status") or {})
-        if not payload.get("ready"):
-            raise RuntimeError(
-                "Knowledge Service 未完成预热: "
-                f"{status.get('error') or payload.get('stage') or 'unknown'}"
-            )
-        return WarmupStatus(
-            ready=True,
-            timings={
-                str(key): float(value)
-                for key, value in dict(status.get("timings") or {}).items()
-            },
-        )
+        return warmup_status_from_payload(payload)
 
     async def warmup_status(self) -> dict[str, Any]:
-        return await self._request("GET", "/api/v1/runtime/warmup")
+        return warmup_response_to_payload(
+            await self._request("GET", "/api/v1/runtime/warmup")
+        )
 
     async def health(self) -> RagHealthStatus:
         payload = await self._request("GET", "/api/v1/admin/health")
-        return RagHealthStatus(
-            ready=bool(payload.get("ready")),
-            state=str(payload.get("state") or "unknown"),
-            details=dict(payload.get("details") or {}),
-        )
+        return health_status_from_payload(payload)
 
     async def invalidate(self, knowledge_base_id: str = "default") -> None:
+        request = _validated_request(
+            InvalidateRequest,
+            knowledge_base_id=knowledge_base_id,
+        )
         await self._request(
             "POST",
             "/api/v1/admin/cache/invalidate",
-            json={"knowledge_base_id": knowledge_base_id},
+            json=request.model_dump(mode="json"),
         )
 
     async def ingest(self, relative_path: str) -> IngestionReport:
+        request = _validated_request(
+            IngestionRequest,
+            relative_path=relative_path,
+        )
         payload = await self._request(
             "POST",
             "/api/v1/ingestions",
-            json={"relative_path": relative_path},
+            json=request.model_dump(mode="json"),
         )
-        return self._ingestion_report(payload, relative_path)
+        return ingestion_report_from_payload(
+            payload,
+            fallback_data_dir=request.relative_path,
+        )
 
     def ingest_sync(self, relative_path: str) -> IngestionReport:
+        request = _validated_request(
+            IngestionRequest,
+            relative_path=relative_path,
+        )
         payload = self._request_sync(
             "POST",
             "/api/v1/ingestions",
-            json={"relative_path": relative_path},
+            json=request.model_dump(mode="json"),
         )
-        return self._ingestion_report(payload, relative_path)
-
-    @staticmethod
-    def _ingestion_report(
-        payload: dict[str, Any],
-        relative_path: str,
-    ) -> IngestionReport:
-        known = {
-            "data_dir",
-            "status",
-            "files_discovered",
-            "files_selected",
-            "files_processed",
-            "files_skipped",
-            "chunks_written",
-            "cache_invalidated",
-            "details",
-        }
-        details = dict(payload.get("details") or {})
-        details.update({key: value for key, value in payload.items() if key not in known})
-        return IngestionReport(
-            data_dir=str(payload.get("data_dir") or relative_path),
-            status=str(payload.get("status") or "unknown"),
-            files_discovered=int(payload.get("files_discovered") or 0),
-            files_selected=int(payload.get("files_selected") or 0),
-            files_processed=int(payload.get("files_processed") or 0),
-            files_skipped=int(payload.get("files_skipped") or 0),
-            chunks_written=int(payload.get("chunks_written") or 0),
-            cache_invalidated=bool(payload.get("cache_invalidated")),
-            details=details,
+        return ingestion_report_from_payload(
+            payload,
+            fallback_data_dir=request.relative_path,
         )
 
     async def list_chunks_page(
@@ -322,14 +277,16 @@ class KnowledgeServiceClient:
         source_file: str | None,
         offset: int,
         limit: int,
-    ) -> dict[str, Any]:
+    ) -> DecodedChunkPage:
         params: dict[str, Any] = {"offset": offset, "limit": limit}
         if source_file:
             params["source_file"] = source_file
-        return await self._request(
-            "GET",
-            "/api/v1/admin/chunks",
-            params=params,
+        return stored_chunk_page_from_payload(
+            await self._request(
+                "GET",
+                "/api/v1/admin/chunks",
+                params=params,
+            )
         )
 
     def list_chunks_page_sync(
@@ -338,14 +295,16 @@ class KnowledgeServiceClient:
         source_file: str | None,
         offset: int,
         limit: int,
-    ) -> dict[str, Any]:
+    ) -> DecodedChunkPage:
         params: dict[str, Any] = {"offset": offset, "limit": limit}
         if source_file:
             params["source_file"] = source_file
-        return self._request_sync(
-            "GET",
-            "/api/v1/admin/chunks",
-            params=params,
+        return stored_chunk_page_from_payload(
+            self._request_sync(
+                "GET",
+                "/api/v1/admin/chunks",
+                params=params,
+            )
         )
 
     async def close(self) -> None:
@@ -370,14 +329,13 @@ class RemoteRagOperations:
         }
 
     def _record(self, payload: dict[str, Any]) -> None:
-        warmup_status = payload.get("warmup_status")
-        if isinstance(warmup_status, dict):
-            self._last_status = {
-                "task_state": (
-                    "running" if warmup_status.get("state") == "running" else "done"
-                ),
-                "warmup_status": dict(warmup_status),
-            }
+        response = warmup_response_from_payload(payload)
+        warmup_status = response.warmup_status.model_dump(mode="json")
+        self._last_status = {
+            "task_state": response.task_state
+            or ("running" if response.warmup_status.state == "running" else "done"),
+            "warmup_status": warmup_status,
+        }
 
     async def _run(self, force: bool) -> None:
         try:
@@ -452,23 +410,16 @@ class RemoteRagAdminService:
         current = max(0, offset)
         chunks: list[StoredChunk] = []
         while True:
-            payload = await self._client.list_chunks_page(
+            page = await self._client.list_chunks_page(
                 source_file=source_file,
                 offset=current,
                 limit=page_size,
             )
-            items = list(payload.get("items") or [])
-            for item in items:
-                chunks.append(
-                    StoredChunk(
-                        chunk_id=str(item.get("chunk_id") or ""),
-                        content=str(item.get("content") or ""),
-                        metadata=ChunkMetadata.from_mapping(item.get("metadata")),
-                    )
-                )
+            items = list(page.items)
+            chunks.extend(items)
             if limit is not None and len(chunks) >= limit:
                 return tuple(chunks[:limit])
-            if not payload.get("has_more") or not items:
+            if not page.has_more or not items:
                 return tuple(chunks)
             current += len(items)
 
@@ -483,23 +434,16 @@ class RemoteRagAdminService:
         current = max(0, offset)
         chunks: list[StoredChunk] = []
         while True:
-            payload = self._client.list_chunks_page_sync(
+            page = self._client.list_chunks_page_sync(
                 source_file=source_file,
                 offset=current,
                 limit=page_size,
             )
-            items = list(payload.get("items") or [])
-            chunks.extend(
-                StoredChunk(
-                    chunk_id=str(item.get("chunk_id") or ""),
-                    content=str(item.get("content") or ""),
-                    metadata=ChunkMetadata.from_mapping(item.get("metadata")),
-                )
-                for item in items
-            )
+            items = list(page.items)
+            chunks.extend(items)
             if limit is not None and len(chunks) >= limit:
                 return tuple(chunks[:limit])
-            if not payload.get("has_more") or not items:
+            if not page.has_more or not items:
                 return tuple(chunks)
             current += len(items)
 

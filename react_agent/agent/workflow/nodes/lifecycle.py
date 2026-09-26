@@ -17,6 +17,11 @@ from react_agent.agent.context_management.compaction import (
     preflight_compaction,
     summary_to_state,
 )
+from react_agent.metering import (
+    extract_model_usage,
+    is_output_truncated,
+    model_finish_reason,
+)
 from react_agent.agent.context_management.evidence import merge_historical_evidence
 from react_agent.agent.context_management.budgeting import estimate_message_tokens
 from react_agent.agent.context_management.contracts import ContextBudget
@@ -132,7 +137,9 @@ async def compact_history(
     model_input = compaction_messages(plan)
     budget = ContextBudget(
         max_input_tokens=dependencies.config.max_input_tokens,
-        reserved_completion_tokens=dependencies.reserved_completion_tokens,
+        reserved_completion_tokens=(
+            dependencies.config.history_compaction_max_output_tokens
+        ),
         safety_margin_tokens=dependencies.config.context_safety_margin_tokens,
         context_window_tokens=dependencies.model_context_window_tokens,
     )
@@ -152,12 +159,10 @@ async def compact_history(
         "context_compaction"
     ]
     try:
-        compaction_model = dependencies.resolve_model()
-        bind = getattr(compaction_model, "bind", None)
-        if callable(bind):
-            compaction_model = bind(
-                max_tokens=dependencies.config.history_compaction_max_output_tokens
-            )
+        compaction_model = dependencies.limit_model_output(
+            dependencies.resolve_model(),
+            max_tokens=dependencies.config.history_compaction_max_output_tokens,
+        )
         response = await compaction_model.ainvoke(
             model_input, config=model_config
         )
@@ -183,6 +188,18 @@ async def compact_history(
                 retry_new_tokens=retry_new_tokens,
             )
         }
+    response_usage = extract_model_usage(response)
+    logger.info(
+        "model_call_completed | kind=context_compaction model=%s "
+        "output_limit_tokens=%s prompt_tokens=%s output_tokens=%s "
+        "reasoning_tokens=%s finish_reason=%s",
+        dependencies.model_ref,
+        dependencies.config.history_compaction_max_output_tokens,
+        response_usage["prompt_tokens"],
+        response_usage["completion_tokens"],
+        response_usage["reasoning_tokens"],
+        model_finish_reason(response) or "unknown",
+    )
     update = model_usage_update(state, dependencies, response)
     update["turn_compaction_usage"] = {
         "model_name": update["pricing_response_model"],
@@ -192,6 +209,21 @@ async def compact_history(
         "cost_cny": update["estimated_cost_cny"] - state.estimated_cost_cny,
         "priced": update["unpriced_model_count"] == state.unpriced_model_count,
     }
+    if is_output_truncated(response):
+        reason = "output_truncated"
+        update["turn_compaction_usage"]["outcome"] = reason
+        update["compaction_control"] = compaction_control_update(
+            plan,
+            status="rejected",
+            reason=reason,
+            retry_new_tokens=retry_new_tokens,
+        )
+        logger.warning(
+            "history_compaction_rejected | reason=%s source_tokens=%s",
+            reason,
+            plan.source_tokens,
+        )
+        return update
     evaluation = (
         evaluate_compaction(plan, response.content)
         if isinstance(response.content, str)

@@ -24,6 +24,7 @@ from react_agent.agent.context_management.budgeting import estimate_message_toke
 from react_agent.agent.contracts.dependencies import AgentDependencies
 from react_agent.agent.contracts.state import State
 from react_agent.agent.workflow.nodes.lifecycle import compact_history
+from react_agent.models import bind_output_token_limit
 from react_agent.agent.workflow.graph import build_base_graph
 
 
@@ -268,7 +269,15 @@ async def test_compaction_node_calls_model_once_and_counts_usage() -> None:
 
     model = FakeModel()
     dependencies = AgentDependencies(
-        config=_config(), model_provider=lambda: model, tools=()
+        config=_config(),
+        model_provider=lambda: model,
+        tools=(),
+        model_ref="deepseek/deepseek-flash",
+        output_token_limiter=lambda model, *, max_tokens: bind_output_token_limit(
+            model,
+            model_ref="deepseek/deepseek-flash",
+            max_tokens=max_tokens,
+        ),
     )
     state = State(messages=old + recent + current)
     update = await compact_history(
@@ -276,7 +285,7 @@ async def test_compaction_node_calls_model_once_and_counts_usage() -> None:
     )
 
     assert model.calls == 1
-    assert model.bound_kwargs == {"max_tokens": 768}
+    assert model.bound_kwargs == {"extra_body": {"max_tokens": 768}}
     assert update["llm_call_count"] == 1
     assert update["prompt_tokens"] == 140
     assert update["completion_tokens"] == 12
@@ -287,6 +296,49 @@ async def test_compaction_node_calls_model_once_and_counts_usage() -> None:
     state.conversation_summary = update["conversation_summary"]
     assert plan_compaction(state, _config()) is None
     assert model.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_compaction_rejects_truncated_model_output_and_counts_usage() -> None:
+    old, recent, current = _messages()
+
+    class FakeModel:
+        def bind(self, **_kwargs):
+            return self
+
+        async def ainvoke(self, _messages, *, config=None):
+            return AIMessage(
+                content="未完成的摘要",
+                response_metadata={"finish_reason": "length"},
+                usage_metadata={
+                    "input_tokens": 100,
+                    "output_tokens": 768,
+                    "total_tokens": 868,
+                },
+            )
+
+    dependencies = AgentDependencies(
+        config=_config(),
+        model_provider=FakeModel,
+        tools=(),
+        model_ref="deepseek/deepseek-flash",
+        output_token_limiter=lambda model, *, max_tokens: bind_output_token_limit(
+            model,
+            model_ref="deepseek/deepseek-flash",
+            max_tokens=max_tokens,
+        ),
+    )
+    update = await compact_history(
+        State(messages=old + recent + current),
+        SimpleNamespace(context=dependencies),
+        None,
+    )
+
+    assert "conversation_summary" not in update
+    assert update["compaction_control"]["status"] == "rejected"
+    assert update["compaction_control"]["reason"] == "output_truncated"
+    assert update["turn_compaction_usage"]["outcome"] == "output_truncated"
+    assert update["completion_tokens"] == 768
 
 
 @pytest.mark.asyncio

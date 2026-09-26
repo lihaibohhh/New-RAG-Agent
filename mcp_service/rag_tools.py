@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from mcp_service.responses import clamp_int, mcp_err, mcp_ok
-from knowledge.contracts import RagValidationError, RetrievalResult
+from knowledge.contracts import KnowledgeValidationError, RetrievalResult
 from knowledge.runtime_ports import RetrievalServicePort
 from mcp_service.observability import ToolCallTrace
 
@@ -132,7 +132,7 @@ async def execute_query_financial_reports(
             data=_result_data(result),
             meta=meta,
         )
-    except RagValidationError as exc:
+    except KnowledgeValidationError as exc:
         meta = _meta(
             include_meta=include_meta,
             stage="validation",

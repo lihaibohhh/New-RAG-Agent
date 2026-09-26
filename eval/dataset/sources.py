@@ -22,13 +22,11 @@ def load_all_chunks(db_path: Path) -> list[Document]:
         stored_chunks = asyncio.run(read_remote_chunks())
         source_label = os.environ["KNOWLEDGE_SERVICE_URL"]
     else:
-        from knowledge.runtime import KnowledgeRuntimeConfig
-        from knowledge.runtime.offline import create_admin_service
+        from knowledge.rag.offline import read_chunks_sync
 
-        stored_chunks = create_admin_service(
-            config=KnowledgeRuntimeConfig(),
+        stored_chunks = read_chunks_sync(
             chroma_dir=str(db_path),
-        ).read_chunks_sync()
+        )
         source_label = str(db_path)
 
     print(f"[generator] 通过 RAG 管理服务读取 chunks：{source_label}")

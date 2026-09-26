@@ -11,10 +11,14 @@ from langchain_core.runnables import RunnableConfig
 from react_agent.agent.context_management import ContextBudget, build_model_context
 from react_agent.agent.contracts.dependencies import AgentDependencies
 from react_agent.agent.contracts.state import State
-from react_agent.metering.model_usage import meter_model_call
+from react_agent.agent.prompts import render_tool_catalog
+from react_agent.agent.tool_flow import get_tool_call_name
+from react_agent.metering.model_usage import (
+    extract_model_usage,
+    meter_model_call,
+    model_finish_reason,
+)
 from react_agent.agent.time import now_iso_in_timezone
-from react_agent.agent.tool_flow.calls import get_tool_call_name
-from react_agent.agent.tool_flow.catalog import render_tool_catalog
 from react_agent.skills import SkillSelection
 
 
@@ -107,6 +111,19 @@ async def invoke_chat_model(
         logger.error("模型调用异常信息=%s", str(exc))
         logger.error("模型响应正文=%s", response_body)
         raise
+
+    usage = extract_model_usage(response)
+    logger.info(
+        "model_call_completed | kind=%s model=%s output_limit_tokens=%s "
+        "prompt_tokens=%s output_tokens=%s reasoning_tokens=%s finish_reason=%s",
+        "agent" if tools_enabled else "finalizer",
+        dependencies.model_ref,
+        dependencies.reserved_completion_tokens,
+        usage["prompt_tokens"],
+        usage["completion_tokens"],
+        usage["reasoning_tokens"],
+        model_finish_reason(response) or "unknown",
+    )
 
     return response, model_usage_update(state, dependencies, response)
 

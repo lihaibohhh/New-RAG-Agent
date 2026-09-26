@@ -8,14 +8,16 @@ from typing import Any
 
 from knowledge.contracts import (
     ChunkMetadata,
+    KnowledgeDocument,
+    SourceReference,
+)
+from knowledge.ingestion.contracts import (
     OcrPolicy,
     ParserHint,
     ParseRequest,
     ParseResult,
-    RagDocument,
-    SourceReference,
 )
-from knowledge.ports import DocumentParserPort
+from knowledge.ingestion.ports import DocumentParserPort
 
 
 PDF_EXTENSIONS = {".pdf"}
@@ -78,9 +80,9 @@ def parse_result_to_documents(
     result: ParseResult,
     *,
     original_path: str,
-) -> list[RagDocument]:
-    """把解析结果转换为与 LangChain 无关的内部 RAG 文档。"""
-    documents: list[RagDocument] = []
+) -> list[KnowledgeDocument]:
+    """把解析结果转换为与具体存储和检索实现无关的公共知识文档。"""
+    documents: list[KnowledgeDocument] = []
     for chunk in result.chunks:
         parser_metadata = ChunkMetadata.from_mapping(
             _scalar_metadata(chunk.metadata)
@@ -107,7 +109,7 @@ def parse_result_to_documents(
             extra=extra,
         )
         documents.append(
-            RagDocument(
+            KnowledgeDocument(
                 content=chunk.content,
                 metadata=metadata,
                 document_id=chunk.chunk_id,
@@ -123,7 +125,7 @@ def parse_file_to_documents(
     source_root: str | None = None,
     parser_hint: ParserHint = "auto",
     ocr_policy: OcrPolicy = "auto",
-) -> list[RagDocument]:
+) -> list[KnowledgeDocument]:
     """使用显式注入的解析服务同步解析文件，供多进程 worker 调用。"""
     request = ParseRequest(
         file_path=file_path,

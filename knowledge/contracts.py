@@ -4,14 +4,11 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Literal
-
-OcrPolicy = Literal["auto", "force", "disabled"]
-ParserHint = Literal["auto", "local", "docling"]
+from typing import Any
 
 
-class RagValidationError(ValueError):
-    """RAG 请求参数不符合公共契约。"""
+class KnowledgeValidationError(ValueError):
+    """Knowledge Service 请求参数不符合公共契约。"""
 
 
 _CORE_METADATA_KEYS = frozenset(
@@ -231,8 +228,8 @@ class ChunkMetadata(Mapping[str, Any]):
 
 
 @dataclass(frozen=True, init=False)
-class RagDocument:
-    """RAG 内部跨端口传递的文档，隔离 LangChain Document。"""
+class KnowledgeDocument:
+    """跨建库与检索端口传递的中立文档。"""
 
     content: str
     metadata: ChunkMetadata
@@ -250,88 +247,6 @@ class RagDocument:
             self,
             "document_id",
             _optional_text(document_id),
-        )
-
-
-@dataclass(frozen=True)
-class ParseRequest:
-    """一次文档解析请求，不暴露具体解析器实现。"""
-
-    file_path: str
-    source_root: str | None = None
-    parser_hint: ParserHint = "auto"
-    ocr_policy: OcrPolicy = "auto"
-
-    def normalized(self) -> "ParseRequest":
-        file_path = (self.file_path or "").strip()
-        if not file_path:
-            raise RagValidationError("待解析文件路径不能为空")
-        source_root = (self.source_root or "").strip() or None
-        if self.parser_hint not in {"auto", "local", "docling"}:
-            raise RagValidationError("parser_hint 必须是 auto、local 或 docling")
-        if self.ocr_policy not in {"auto", "force", "disabled"}:
-            raise RagValidationError("ocr_policy 必须是 auto、force 或 disabled")
-        return ParseRequest(
-            file_path=file_path,
-            source_root=source_root,
-            parser_hint=self.parser_hint,
-            ocr_policy=self.ocr_policy,
-        )
-
-
-@dataclass(frozen=True)
-class ParsedChunk:
-    """解析阶段的统一片段，独立于 Docling 和 LangChain。"""
-
-    content: str
-    source_file: str
-    source_page: int | None
-    source_pages: tuple[int, ...]
-    chunk_id: str
-    doc_type: str = "text"
-    headings: tuple[str, ...] = ()
-    parser_name: str = "unknown"
-    parser_version: str | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class ParseResult:
-    """文档解析服务的统一结果。"""
-
-    source_file: str
-    parser_name: str
-    chunks: tuple[ParsedChunk, ...] = ()
-    processing_time: float = 0.0
-    warnings: tuple[str, ...] = ()
-    ocr_policy: OcrPolicy | None = None
-    route_reasons: tuple[str, ...] = ()
-
-    @property
-    def has_content(self) -> bool:
-        return bool(self.chunks)
-
-
-@dataclass(frozen=True)
-class RetrievalRequest:
-    """一次知识库检索请求。"""
-
-    query: str
-    top_k: int = 3
-    filters: dict[str, Any] | None = None
-
-    def normalized(self) -> "RetrievalRequest":
-        query = (self.query or "").strip()
-        if not query:
-            raise RagValidationError("检索词不能为空")
-        try:
-            top_k = int(self.top_k)
-        except (TypeError, ValueError) as exc:
-            raise RagValidationError("top_k 必须是整数") from exc
-        return RetrievalRequest(
-            query=query,
-            top_k=max(1, min(top_k, 10)),
-            filters=dict(self.filters or {}) or None,
         )
 
 
@@ -402,19 +317,6 @@ class RetrievalResult:
 
 
 @dataclass(frozen=True)
-class CandidateRetrievalTrace:
-    """BM25/向量候选与融合结果，仅供评测管道消费。"""
-
-    retrieval_mode: str
-    bm25_candidates: tuple[RagDocument, ...] = ()
-    vector_candidates: tuple[RagDocument, ...] = ()
-    fusion_candidates: tuple[RagDocument, ...] = ()
-    filtered_candidates: tuple[RagDocument, ...] = ()
-    degraded_sources: tuple[str, ...] = ()
-    timings: dict[str, float] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
 class EvaluationCandidate:
     """评测阶段的轻量候选快照，不携带原始正文。"""
 
@@ -476,21 +378,14 @@ class RagHealthStatus:
 
 
 __all__ = [
-    "CandidateRetrievalTrace",
     "ChunkMetadata",
     "EvaluationCandidate",
     "EvaluationRetrievalResult",
     "IngestionReport",
-    "OcrPolicy",
-    "ParsedChunk",
-    "ParserHint",
-    "ParseRequest",
-    "ParseResult",
-    "RagDocument",
+    "KnowledgeDocument",
+    "KnowledgeValidationError",
     "RagHealthStatus",
-    "RagValidationError",
     "RetrievedChunk",
-    "RetrievalRequest",
     "RetrievalResult",
     "SourceReference",
     "StoredChunk",
