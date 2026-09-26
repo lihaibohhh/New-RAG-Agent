@@ -38,12 +38,11 @@ jobs:
 
       - name: Run Ruff
         run: |
-          python -m ruff check react_agent api knowledge tests
+          python -m ruff check react_agent api knowledge scripts tests
 
       - name: Run offline tests
         run: |
           python -m pytest tests \
-            --ignore=tests/test_agent.py \
             -q \
             --cov=react_agent \
             --cov=api \

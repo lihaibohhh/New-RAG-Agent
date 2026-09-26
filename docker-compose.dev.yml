@@ -64,15 +64,7 @@ services:
         bind:
           create_host_path: false
 
-      # 当前 Streamlit 从 tests/test_agent.py 启动。
-      - type: bind
-        source: ./tests
-        target: /app/tests
-        read_only: true
-        bind:
-          create_host_path: false
-
-      # 可通过 compose run 执行的开发与诊断脚本。
+      # Streamlit 入口以及可通过 compose run 执行的开发与诊断脚本。
       - type: bind
         source: ./scripts
         target: /app/scripts

@@ -149,7 +149,7 @@ docker compose ps
 
 ```powershell
 # Streamlit
-conda run -n new_agent python -m streamlit run tests/test_agent.py
+conda run -n new_agent python -m streamlit run scripts/streamlit_app.py
 
 # FastAPI
 conda run -n new_agent python -m uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
@@ -217,8 +217,8 @@ src/
 │   └── runtime/            # 应用组合根与生命周期
 ├── mcp_service/            # MCP stdio 适配器
 ├── eval/                   # 数据集与 RAGAS 评测
-├── tests/                  # 离线测试和 Streamlit 入口
-└── scripts/                # 数据检查与调试脚本
+├── tests/                  # 离线测试
+└── scripts/                # Streamlit 入口、数据检查与离线处理脚本
 ```
 
 ## 详细文档

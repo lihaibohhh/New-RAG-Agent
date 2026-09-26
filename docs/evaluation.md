@@ -18,7 +18,7 @@ conda run -n new_agent python -m pytest tests/api -q
 ```
 
 API 测试使用 FakeAgent 和 fakeredis，不访问真实 LLM、Redis、PostgreSQL 或外网。
-`tests/test_agent.py` 是 Streamlit 入口，不应作为普通 pytest 全量测试导入。
+Streamlit 入口位于 `scripts/streamlit_app.py`，不属于 pytest 测试集。
 
 ## 评测模块
 

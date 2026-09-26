@@ -62,4 +62,4 @@ FROM runtime-base AS app
 
 USER app
 
-CMD ["python", "-m", "streamlit", "run", "tests/test_agent.py", "--server.address=0.0.0.0", "--server.port=8501", "--server.headless=true"]
+CMD ["python", "-m", "streamlit", "run", "scripts/streamlit_app.py", "--server.address=0.0.0.0", "--server.port=8501", "--server.headless=true"]

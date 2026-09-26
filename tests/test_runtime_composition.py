@@ -424,7 +424,7 @@ def test_runtime_status_normalizes_checkpoint_backend_aliases() -> None:
 def test_application_entrypoints_use_the_shared_persistence_loader() -> None:
     project_root = Path(__file__).parent.parent
     api_source = (project_root / "api" / "dependencies.py").read_text(encoding="utf-8")
-    streamlit_source = (project_root / "tests" / "test_agent.py").read_text(
+    streamlit_source = (project_root / "scripts" / "streamlit_app.py").read_text(
         encoding="utf-8"
     )
 
