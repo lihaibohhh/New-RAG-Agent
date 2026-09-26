@@ -1,6 +1,7 @@
 """所有 Agent Tool 共用的稳定结果信封。"""
 from __future__ import annotations
 
+import json
 from typing import Any, TypedDict
 
 
@@ -16,6 +17,21 @@ class ToolResult(TypedDict):
     data: Any
     error: ToolErrorDetail | None
     meta: dict[str, Any]
+
+
+def decode_tool_result(content: Any) -> dict[str, Any]:
+    """将工具消息正文解码为 JSON object。
+
+    该函数只统一协议解码与顶层类型校验；解析失败后应该计数、
+    记录错误还是忽略，由各业务调用方决定。
+    """
+    payload = json.loads(content or "{}")
+    if not isinstance(payload, dict):
+        raise TypeError(
+            "工具返回的 JSON 顶层类型应为 object，"
+            f"实际为 {type(payload).__name__}"
+        )
+    return payload
 
 
 def tool_success(
@@ -55,4 +71,10 @@ def tool_error(
     }
 
 
-__all__ = ["ToolErrorDetail", "ToolResult", "tool_error", "tool_success"]
+__all__ = [
+    "ToolErrorDetail",
+    "ToolResult",
+    "decode_tool_result",
+    "tool_error",
+    "tool_success",
+]

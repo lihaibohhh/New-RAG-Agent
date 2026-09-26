@@ -4,8 +4,9 @@ from knowledge.ingestion.document_service import (
     DocumentParsingService,
     UnsupportedDocumentError,
 )
+from knowledge.ingestion.config import IngestionConfig
 from knowledge.ingestion.parser_router import PdfExcludedError, PdfParserRouter
-from knowledge.ingestion.service import IngestionConfig, IngestionService
+from knowledge.ingestion.service import IngestionService
 
 __all__ = [
     "DocumentParsingService",

@@ -17,32 +17,11 @@ from knowledge.client import (
 from knowledge.server.runtime import create_knowledge_runtime_config
 
 
-def test_client_has_no_application_or_server_dependencies() -> None:
-    package_root = Path(__file__).parent.parent / "knowledge" / "client"
-    source = "\n".join(
-        path.read_text(encoding="utf-8") for path in package_root.rglob("*.py")
-    )
-
-    assert "react_agent" not in source
-    assert "knowledge.server" not in source
-    assert "mcp_server" not in source
-    assert "from api" not in source
-
-
 def test_knowledge_namespace_has_no_legacy_top_level_packages() -> None:
     project_root = Path(__file__).parent.parent
 
     assert not (project_root / "knowledge_client").exists()
     assert not (project_root / "knowledge_service").exists()
-
-
-def test_knowledge_server_does_not_depend_on_agent() -> None:
-    package_root = Path(__file__).parent.parent / "knowledge" / "server"
-    source = "\n".join(
-        path.read_text(encoding="utf-8") for path in package_root.rglob("*.py")
-    )
-
-    assert "react_agent" not in source
 
 
 def test_server_runtime_owns_its_environment_projection(
@@ -58,12 +37,12 @@ def test_server_runtime_owns_its_environment_projection(
 
     config = create_knowledge_runtime_config()
 
-    assert config.requested_device == "cpu"
-    assert config.rag.cpu_rerank_candidates == 33
-    assert config.redis.max_connections == 7
+    assert config.shared.requested_device == "cpu"
+    assert config.rag.tuning.cpu_rerank_candidates == 33
+    assert config.rag.redis.max_connections == 7
     assert config.storage.chroma_db_path == str((tmp_path / "chroma").resolve())
-    assert config.docling.enabled is True
-    assert config.ingestion.batch_size == 64
+    assert config.ingestion.docling.enabled is True
+    assert config.ingestion.service.batch_size == 64
 
 
 @pytest.mark.parametrize(
@@ -193,7 +172,11 @@ async def test_ingestion_factory_exposes_only_ingestion_runtime() -> None:
     [
         ({"RAG_RUNTIME_MODE": "local"}, RuntimeError, "只允许 Knowledge Service"),
         ({"RAG_RUNTIME_MODE": "automatic"}, ValueError, "仅支持 remote 或 local"),
-        ({"RAG_RUNTIME_MODE": "remote"}, RuntimeError, "必须配置 KNOWLEDGE_SERVICE_URL"),
+        (
+            {"RAG_RUNTIME_MODE": "remote"},
+            RuntimeError,
+            "必须配置 KNOWLEDGE_SERVICE_URL",
+        ),
     ],
 )
 def test_client_config_rejects_non_remote_or_incomplete_modes(

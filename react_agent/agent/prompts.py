@@ -55,6 +55,28 @@ SYSTEM_PROMPT = """你是一个严谨、以事实为导向的学术与技术AI�
 """
 
 
+def render_tool_catalog(tools: tuple[Any, ...], *, tools_enabled: bool) -> str:
+    """将运行时可用工具渲染为模型可读目录。"""
+    if not tools_enabled:
+        return "当前运行配置已禁用工具调用（tools_enabled=false），本轮不允许使用任何工具。"
+    if not tools:
+        return "当前未配置任何工具。"
+
+    lines = ["你当前可使用以下工具："]
+    for index, tool in enumerate(tools, start=1):
+        name = getattr(tool, "name", None) or getattr(tool, "__name__", "unknown_tool")
+        description = " ".join(str(getattr(tool, "description", "") or "").split())
+        if len(description) > 240:
+            description = description[:239] + "..."
+        detail = description or "暂无描述（建议为工具增加 description）"
+        lines.append(f"{index}) {name}：{detail}")
+    lines.append(
+        "当用户询问'你有哪些工具/能做什么'时，只能按上述目录回答，不得编造。"
+        "如果工具调用失败，请根据错误原因调整参数后重试，不要盲目重复。"
+    )
+    return "\n".join(lines)
+
+
 def render_tool_recovery_directive(errors: list[dict[str, Any]]) -> str:
     """把当前工具批次错误渲染为一次瞬态恢复指令。"""
     summaries: list[str] = []
@@ -86,6 +108,7 @@ def render_finalization_directive(reason: str | None) -> str:
         "RAG_CONSECUTIVE_MISS": "内部知识库连续未检索到相关内容",
         "EVIDENCE_OUTPUT_BUDGET_EXHAUSTED": "检索结果超过可展示预算，部分证据无法读取",
         "GRAPH_STEP_BUDGET_EXHAUSTED": "本轮执行空间即将耗尽",
+        "MODEL_OUTPUT_TRUNCATED": "模型输出达到长度上限",
     }
     detail = descriptions.get(reason or "", "本轮 Agent 已进入主动收口阶段")
     return (
@@ -100,5 +123,6 @@ def render_finalization_directive(reason: str | None) -> str:
 __all__ = [
     "SYSTEM_PROMPT",
     "render_finalization_directive",
+    "render_tool_catalog",
     "render_tool_recovery_directive",
 ]

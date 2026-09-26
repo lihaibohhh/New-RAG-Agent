@@ -19,6 +19,20 @@ class ModelCallMetering:
     cost: CostEstimate
 
 
+def model_finish_reason(message: AIMessage) -> str:
+    """Normalize OpenAI-compatible and Anthropic completion stop reasons."""
+    metadata = getattr(message, "response_metadata", None) or {}
+    if not isinstance(metadata, dict):
+        return ""
+    reason = metadata.get("finish_reason") or metadata.get("stop_reason") or ""
+    return str(reason).strip().lower()
+
+
+def is_output_truncated(message: AIMessage) -> bool:
+    """Return whether the provider stopped because its output cap was reached."""
+    return model_finish_reason(message) in {"length", "max_tokens"}
+
+
 def extract_model_usage(message: AIMessage) -> dict[str, int]:
     """把非流式和流式 LangChain 用量统一为 Agent 的计费字段。"""
     raw: dict[str, Any] = {}
@@ -100,5 +114,7 @@ def meter_model_call(
 __all__ = [
     "ModelCallMetering",
     "extract_model_usage",
+    "is_output_truncated",
     "meter_model_call",
+    "model_finish_reason",
 ]

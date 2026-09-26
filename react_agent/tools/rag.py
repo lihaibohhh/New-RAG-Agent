@@ -7,7 +7,7 @@ from typing import Any
 
 from langchain_core.tools import tool
 
-from knowledge.contracts import RagValidationError, RetrievalResult
+from knowledge.contracts import KnowledgeValidationError, RetrievalResult
 from react_agent.tooling.results import tool_error as _err
 from react_agent.tooling.results import tool_success as _ok
 from react_agent.tooling.retry import with_retry
@@ -60,7 +60,7 @@ def create_rag_tool(
         try:
             result = await retrieval_service_provider().search(q, top_k=3)
             return _to_tool_payload(result)
-        except RagValidationError as exc:
+        except KnowledgeValidationError as exc:
             return _err(
                 tool_name=TOOL_NAME,
                 query=q,

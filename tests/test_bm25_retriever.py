@@ -2,22 +2,22 @@ from __future__ import annotations
 
 import fakeredis
 
-from knowledge.contracts import RagDocument
-from knowledge.infrastructure.retrieval.bm25_repository import (
+from knowledge.contracts import KnowledgeDocument
+from knowledge.rag.infrastructure.retrieval.bm25_repository import (
     RedisBm25Repository,
 )
-from knowledge.infrastructure.retrieval.bm25_retriever import (
+from knowledge.rag.infrastructure.retrieval.bm25_retriever import (
     Bm25CandidateRetriever,
 )
-from knowledge.infrastructure.retrieval.bm25_tokenizer import (
+from knowledge.rag.infrastructure.retrieval.bm25_tokenizer import (
     bm25_tokenizer_fingerprint,
     normalize_bm25_text,
     tokenize_bm25,
 )
 
 
-def _document(chunk_id: str, content: str) -> RagDocument:
-    return RagDocument(
+def _document(chunk_id: str, content: str) -> KnowledgeDocument:
+    return KnowledgeDocument(
         content=content,
         metadata={
             "chunk_id": chunk_id,

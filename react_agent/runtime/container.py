@@ -27,7 +27,7 @@ from react_agent.tools.make_docx import create_docx_tool
 from react_agent.tools.markdown import create_markdown_tool
 from react_agent.tools.rag import create_rag_tool
 from react_agent.tools.search import create_search_tool
-from react_agent.models import load_chat_model
+from react_agent.models import bind_output_token_limit, load_chat_model
 from react_agent.metering.pricing import estimate_configured_model_cost
 from react_agent.skills import build_builtin_skill_registry
 
@@ -90,6 +90,7 @@ def _compose_agent_dependencies(
     rag_runtime: AgentRagRuntimePort,
 ) -> AgentDependencies:
     """Select the model adapter and the exact tool set injected into Agent."""
+    _validate_model_context_budget(agent_context)
     rag_tool = create_rag_tool(
         retrieval_service_provider=rag_runtime.get_retrieval_service,
         max_retries=settings.tools.rag.max_retries,
@@ -124,9 +125,29 @@ def _compose_agent_dependencies(
         skill_registry=build_builtin_skill_registry(),
         model_ref=settings.llm.model,
         cost_estimator=estimate_configured_model_cost,
+        output_token_limiter=partial(
+            bind_output_token_limit,
+            model_ref=settings.llm.model,
+        ),
         model_context_window_tokens=settings.llm.llm_context_window_tokens,
         reserved_completion_tokens=settings.llm.llm_max_tokens,
     )
+
+
+def _validate_model_context_budget(agent_context: AgentContext) -> None:
+    """Reject model-window settings that leave no room for any input."""
+    context_window = settings.llm.llm_context_window_tokens
+    if context_window is None:
+        return
+    reserved = (
+        settings.llm.llm_max_tokens
+        + agent_context.context_safety_margin_tokens
+    )
+    if context_window <= reserved:
+        raise ValueError(
+            "LLM_CONTEXT_WINDOW_TOKENS 必须大于输出预留与安全余量之和："
+            f"context_window={context_window}, reserved={reserved}"
+        )
 
 
 def _create_tavily_client(max_results: int) -> Any:

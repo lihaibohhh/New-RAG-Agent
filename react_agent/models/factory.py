@@ -43,6 +43,48 @@ def _get_secret(attribute: str, environment_key: str, hint: str) -> str:
     return value
 
 
+def _provider_name(model_ref: str) -> str:
+    """Return a normalized provider name without requiring a full model ref."""
+    value = (model_ref or "").strip()
+    if "/" not in value:
+        return value.lower()
+    return value.split("/", 1)[0].strip().lower()
+
+
+def output_token_limit_kwargs(
+    model_ref: str,
+    max_tokens: int,
+) -> dict[str, object]:
+    """Map the output limit to the parameter supported by each provider.
+
+    ``ChatOpenAI`` aliases ``max_tokens`` to OpenAI's
+    ``max_completion_tokens``. DeepSeek's compatible endpoint intentionally
+    does not use that field, so its ``max_tokens`` parameter must be passed
+    through ``extra_body``.
+    """
+    if max_tokens < 1:
+        raise ValueError("max_tokens 必须大于 0")
+    provider = _provider_name(model_ref)
+    if provider in {"deepseek", "ds"}:
+        return {"extra_body": {"max_tokens": max_tokens}}
+    if provider == "openai":
+        return {"max_completion_tokens": max_tokens}
+    return {"max_tokens": max_tokens}
+
+
+def bind_output_token_limit(
+    model: BaseChatModel,
+    *,
+    model_ref: str,
+    max_tokens: int,
+) -> BaseChatModel:
+    """Return a runnable with a provider-correct per-call output limit."""
+    bind = getattr(model, "bind", None)
+    if not callable(bind):
+        return model
+    return bind(**output_token_limit_kwargs(model_ref, max_tokens))
+
+
 def _build_openai(model_name: str, config: ChatModelSettings) -> BaseChatModel:
     try:
         from langchain_openai import ChatOpenAI
@@ -51,7 +93,7 @@ def _build_openai(model_name: str, config: ChatModelSettings) -> BaseChatModel:
     return ChatOpenAI(
         model=model_name,
         temperature=config.temperature,
-        max_tokens=config.max_tokens,
+        max_completion_tokens=config.max_tokens,
         timeout=config.timeout,
         max_retries=config.retries,
     )
@@ -102,7 +144,7 @@ def _build_deepseek(model_name: str, config: ChatModelSettings) -> BaseChatModel
         ),
         api_key=_get_secret("DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY", "例如：sk-..."),
         temperature=config.temperature,
-        max_tokens=config.max_tokens,
+        extra_body={"max_tokens": config.max_tokens},
         timeout=config.timeout,
         max_retries=config.retries,
     )
@@ -126,4 +168,9 @@ def load_chat_model(model_ref: str) -> BaseChatModel:
     )
 
 
-__all__ = ["ChatModelSettings", "load_chat_model"]
+__all__ = [
+    "ChatModelSettings",
+    "bind_output_token_limit",
+    "load_chat_model",
+    "output_token_limit_kwargs",
+]

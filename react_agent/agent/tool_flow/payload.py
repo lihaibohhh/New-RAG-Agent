@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from react_agent.tooling.results import decode_tool_result
+
 
 _RAG_TOOL = "query_internal_knowledge"
 _MIN_VISIBLE_CONTENT_CHARS = 24
@@ -14,10 +16,8 @@ def bound_tool_payload(content: str, max_chars: int) -> str:
     """按工具结果信封结构裁剪正文，同时保留状态、错误和溯源元数据。"""
     floor = max(max_chars, 64)
     try:
-        payload = json.loads(content or "{}")
+        payload = decode_tool_result(content)
     except Exception:
-        return _trim_text(content, floor)
-    if not isinstance(payload, dict):
         return _trim_text(content, floor)
 
     meta = payload.setdefault("meta", {})

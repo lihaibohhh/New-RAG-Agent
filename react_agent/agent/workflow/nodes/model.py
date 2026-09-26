@@ -22,10 +22,11 @@ from react_agent.agent.policies import (
     model_termination_reason,
 )
 from react_agent.agent.prompts import render_finalization_directive
-from react_agent.agent.tool_flow.budget import (
+from react_agent.agent.tool_flow import (
     count_attempted_rag_calls_in_current_turn,
+    extract_tool_call_ids,
 )
-from react_agent.agent.tool_flow.calls import extract_tool_call_ids
+from react_agent.metering import is_output_truncated
 
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,20 @@ async def call_model(
         ),
     )
     next_model_round = state.turn_model_rounds + 1
+    if is_output_truncated(response):
+        logger.warning(
+            "model_output_truncated | node=call_model model_round=%s",
+            next_model_round,
+        )
+        update: dict[str, Any] = {
+            "messages": [_truncated_response(response)],
+            "step_counter": state.step_counter + 1,
+            "turn_model_rounds": next_model_round,
+            "termination_reason": TerminationReason.MODEL_OUTPUT_TRUNCATED.value,
+            "pending_directive": None,
+        }
+        update.update(usage_update)
+        return update
     tool_call_ids = extract_tool_call_ids(response)
     tool_names = tool_names_from_response(response)
     rag_calls = count_attempted_rag_calls_in_current_turn(list(state.messages))
@@ -153,6 +168,9 @@ async def finalize_model(
         allow_tools=False,
         directive=render_finalization_directive(state.termination_reason),
     )
+    if is_output_truncated(response):
+        logger.warning("model_output_truncated | node=finalize_model")
+        response = _truncated_response(response)
     if extract_tool_call_ids(response):
         logger.error(
             "finalizer_returned_tool_calls | reason=%s tools=%s",
@@ -176,6 +194,22 @@ async def finalize_model(
     }
     update.update(usage_update)
     return update
+
+
+def _truncated_response(response: AIMessage) -> AIMessage:
+    """Discard potentially incomplete tool calls and expose a clear outcome."""
+    partial = response.content.strip() if isinstance(response.content, str) else ""
+    notice = (
+        "模型输出达到长度上限，本次结果可能不完整。"
+        "请缩小问题范围，或提高模型输出 Token 上限后重试。"
+    )
+    content = f"{partial}\n\n{notice}" if partial else notice
+    return AIMessage(
+        id=response.id,
+        content=content,
+        response_metadata=response.response_metadata,
+        usage_metadata=response.usage_metadata,
+    )
 
 
 __all__ = ["call_model", "finalize_model"]

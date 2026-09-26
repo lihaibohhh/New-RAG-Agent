@@ -852,6 +852,7 @@ async def test_budget_gate_runs_before_model_provider_resolution() -> None:
         config=AgentContext(
             system_prompt="系统",
             enable_tools=False,
+            max_history_tokens=20,
             max_input_tokens=20,
         ),
         model_provider=model_provider,

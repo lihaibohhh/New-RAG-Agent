@@ -1,23 +1,16 @@
-"""本地知识库 Runtime 与显式配置。"""
+"""本地知识库顶层 Runtime 与共享配置。"""
+
 from knowledge.runtime.config import (
-    DoclingRuntimeConfig,
     KnowledgeRuntimeConfig,
-    ModelRuntimeConfig,
-    RagProfile,
-    RagTuningConfig,
-    RedisRuntimeConfig,
+    SharedResourceConfig,
     StorageRuntimeConfig,
 )
 from knowledge.runtime.container import KnowledgeRuntime, create_knowledge_runtime
 
 __all__ = [
-    "DoclingRuntimeConfig",
     "KnowledgeRuntimeConfig",
-    "ModelRuntimeConfig",
-    "RagProfile",
     "KnowledgeRuntime",
-    "RagTuningConfig",
-    "RedisRuntimeConfig",
+    "SharedResourceConfig",
     "StorageRuntimeConfig",
     "create_knowledge_runtime",
 ]

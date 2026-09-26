@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -235,13 +236,45 @@ async def test_warmup_state_is_instance_scoped() -> None:
 
 @pytest.mark.asyncio
 async def test_admin_health_composition_does_not_build_query_pipeline() -> None:
-    rag_runtime = create_test_knowledge_runtime()
+    runtime = create_test_knowledge_runtime()
+    rag_runtime = runtime.rag_runtime
 
     rag_runtime.get_admin_service()
 
     assert rag_runtime._retrieval_service is None
-    assert rag_runtime._embedding_provider is None
-    await rag_runtime.close()
+    assert runtime._resources._embedding_provider is None
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_local_runtime_exposes_disjoint_module_views() -> None:
+    runtime = create_test_knowledge_runtime()
+
+    assert runtime.rag_runtime is not runtime.ingestion_runtime
+    assert hasattr(runtime.rag_runtime, "get_retrieval_service")
+    assert hasattr(runtime.rag_runtime, "get_admin_service")
+    assert not hasattr(runtime.rag_runtime, "get_ingestion_service")
+    assert hasattr(runtime.ingestion_runtime, "get_ingestion_service")
+    assert not hasattr(runtime.ingestion_runtime, "get_retrieval_service")
+    assert not hasattr(runtime.ingestion_runtime, "get_admin_service")
+    assert not hasattr(runtime, "operations")
+    assert not hasattr(runtime, "get_retrieval_service")
+    assert not hasattr(runtime, "get_evaluation_retrieval_service")
+    assert not hasattr(runtime, "get_admin_service")
+    assert not hasattr(runtime, "get_ingestion_service")
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_ingestion_composition_does_not_build_rag_query_pipeline() -> None:
+    runtime = create_test_knowledge_runtime()
+
+    runtime.ingestion_runtime.get_ingestion_service()
+
+    assert runtime.rag_runtime._retrieval_service is None
+    assert runtime.rag_runtime._hybrid_retriever is None
+    assert runtime._resources._embedding_provider is None
+    await runtime.close()
 
 
 def test_runtime_selects_model_and_tool_catalog(monkeypatch) -> None:
@@ -253,16 +286,33 @@ def test_runtime_selects_model_and_tool_catalog(monkeypatch) -> None:
         "load_chat_model",
         lambda model_ref: ("model", model_ref),
     )
+    monkeypatch.setattr(
+        container,
+        "bind_output_token_limit",
+        lambda model, *, model_ref, max_tokens: (
+            "limited",
+            model,
+            model_ref,
+            max_tokens,
+        ),
+    )
 
+    runtime = create_test_knowledge_runtime()
     dependencies = container._compose_agent_dependencies(
         AgentContext(),
-        create_test_knowledge_runtime(),
+        runtime.rag_runtime,
     )
 
     assert dependencies.resolve_model() == ("model", "provider/model")
     assert dependencies.model_ref == "provider/model"
     assert dependencies.model_context_window_tokens == 8192
     assert dependencies.reserved_completion_tokens == 1024
+    assert dependencies.limit_model_output("base-model", 768) == (
+        "limited",
+        "base-model",
+        "provider/model",
+        768,
+    )
     assert [tool.name for tool in dependencies.tools] == [
         "search",
         "make_excel_table",
@@ -270,6 +320,22 @@ def test_runtime_selects_model_and_tool_catalog(monkeypatch) -> None:
         "docx_tool",
         "md_tool",
     ]
+    asyncio.run(runtime.close())
+
+
+def test_runtime_rejects_model_window_without_input_capacity(monkeypatch) -> None:
+    monkeypatch.setattr(container.settings.llm, "llm_context_window_tokens", 9216)
+    monkeypatch.setattr(container.settings.llm, "llm_max_tokens", 8192)
+
+    runtime = create_test_knowledge_runtime()
+    try:
+        with pytest.raises(ValueError, match="输出预留与安全余量"):
+            container._compose_agent_dependencies(
+                AgentContext(context_safety_margin_tokens=1024),
+                runtime.rag_runtime,
+            )
+    finally:
+        asyncio.run(runtime.close())
 
 
 def test_model_and_search_adapter_settings_own_their_environment(
@@ -517,14 +583,22 @@ def test_agent_rag_runtime_port_exposes_only_query_lifecycle_capabilities() -> N
 def test_rag_and_ingestion_runtime_ports_are_disjoint() -> None:
     rag_members = RagRuntimePort.__dict__
     ingestion_members = IngestionRuntimePort.__dict__
+    server_members = KnowledgeServerRuntimePort.__dict__
 
     assert "get_admin_service" in rag_members
     assert "get_evaluation_retrieval_service" in rag_members
     assert "get_ingestion_service" not in rag_members
     assert "get_ingestion_service" in ingestion_members
     assert "get_retrieval_service" not in ingestion_members
-    assert RagRuntimePort in KnowledgeServerRuntimePort.__bases__
-    assert IngestionRuntimePort in KnowledgeServerRuntimePort.__bases__
+    assert RagRuntimePort not in KnowledgeServerRuntimePort.__bases__
+    assert IngestionRuntimePort not in KnowledgeServerRuntimePort.__bases__
+    assert "rag_runtime" in server_members
+    assert "ingestion_runtime" in server_members
+    assert "close" in server_members
+    assert "operations" not in server_members.get("__annotations__", {})
+    assert "get_retrieval_service" not in server_members
+    assert "get_admin_service" not in server_members
+    assert "get_ingestion_service" not in server_members
 
 
 def test_legacy_agent_stream_and_chat_router_are_removed() -> None:

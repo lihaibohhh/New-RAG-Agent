@@ -16,12 +16,12 @@ from knowledge.contracts import (
     RetrievedChunk,
     RetrievalResult,
     StoredChunk,
-    RagDocument,
+    KnowledgeDocument,
 )
-from knowledge.infrastructure.retrieval.chunk_corpus import (
+from knowledge.rag.infrastructure.retrieval.chunk_corpus import (
     MigratingChunkCorpusAdapter,
 )
-from knowledge.infrastructure.storage.sqlite_chunk_store import (
+from knowledge.foundation.storage.sqlite_chunk_store import (
     SQLiteChunkStoreAdapter,
 )
 from knowledge.client import (
@@ -188,13 +188,12 @@ class FakeIngestionService:
         )
 
 
-class FakeRuntime:
+class FakeRagRuntime:
     def __init__(self) -> None:
         self.operations = FakeOperations()
         self.retrieval = FakeRetrievalService()
         self.evaluation_retrieval = FakeEvaluationRetrievalService()
         self.admin = FakeAdminService()
-        self.ingestion = FakeIngestionService()
         self.closed = False
 
     def get_retrieval_service(self) -> FakeRetrievalService:
@@ -208,10 +207,31 @@ class FakeRuntime:
     def get_admin_service(self) -> FakeAdminService:
         return self.admin
 
+    async def close(self) -> None:
+        self.closed = True
+
+
+class FakeIngestionRuntime:
+    def __init__(self) -> None:
+        self.ingestion = FakeIngestionService()
+        self.closed = False
+
     def get_ingestion_service(self) -> FakeIngestionService:
         return self.ingestion
 
     async def close(self) -> None:
+        self.closed = True
+
+
+class FakeRuntime:
+    def __init__(self) -> None:
+        self.rag_runtime = FakeRagRuntime()
+        self.ingestion_runtime = FakeIngestionRuntime()
+        self.closed = False
+
+    async def close(self) -> None:
+        await self.ingestion_runtime.close()
+        await self.rag_runtime.close()
         self.closed = True
 
 
@@ -259,7 +279,7 @@ async def test_search_requires_key_and_preserves_traceability(service) -> None:
         "doc_type": "text",
         "industry": "半导体",
     }
-    assert runtime.retrieval.calls[0]["retrieval_mode"] == "hybrid"
+    assert runtime.rag_runtime.retrieval.calls[0]["retrieval_mode"] == "hybrid"
     assert runtime.closed is True
 
 
@@ -301,8 +321,10 @@ async def test_evaluation_trace_uses_dedicated_authenticated_endpoint(service) -
     }
     assert "content" not in payload["trace"]["stages"]["bm25"][0]
     assert payload["trace"]["configuration"]["query_cache_enabled"] is False
-    assert runtime.evaluation_retrieval.calls[0]["retrieval_mode"] == "hybrid"
-    assert runtime.retrieval.calls == []
+    assert (
+        runtime.rag_runtime.evaluation_retrieval.calls[0]["retrieval_mode"] == "hybrid"
+    )
+    assert runtime.rag_runtime.retrieval.calls == []
 
 
 @pytest.mark.asyncio
@@ -331,8 +353,8 @@ async def test_evaluation_trace_is_disabled_outside_enabled_profiles(
             )
 
     assert response.status_code == 404
-    assert runtime.evaluation_retrieval.calls == []
-    assert runtime.retrieval.calls == []
+    assert runtime.rag_runtime.evaluation_retrieval.calls == []
+    assert runtime.rag_runtime.retrieval.calls == []
 
 
 @pytest.mark.asyncio
@@ -363,7 +385,9 @@ async def test_ingestion_is_confined_to_server_root(service) -> None:
     assert escaped.status_code == 400
     assert windows_absolute.status_code == 400
     assert accepted.status_code == 200
-    assert runtime.ingestion.paths == [str((root / "allowed").resolve())]
+    assert runtime.ingestion_runtime.ingestion.paths == [
+        str((root / "allowed").resolve())
+    ]
 
 
 @pytest.mark.asyncio
@@ -405,7 +429,7 @@ async def test_remote_runtime_uses_http_service_without_local_chroma(service) ->
     assert health.ready is True
     assert chunks[0].metadata.source_page == 8
     assert report.chunks_written == 2
-    assert server_runtime.retrieval.calls[0]["retrieval_mode"] == "bm25"
+    assert server_runtime.rag_runtime.retrieval.calls[0]["retrieval_mode"] == "bm25"
 
 
 @pytest.mark.asyncio
@@ -414,10 +438,10 @@ async def test_chunk_store_migrates_legacy_corpus_only_once(tmp_path: Path) -> N
         def __init__(self) -> None:
             self.calls = 0
 
-        def list_documents(self) -> list[RagDocument]:
+        def list_documents(self) -> list[KnowledgeDocument]:
             self.calls += 1
             return [
-                RagDocument(
+                KnowledgeDocument(
                     content="规范正文",
                     metadata={
                         "source_file": "legacy.pdf",

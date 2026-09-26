@@ -192,6 +192,10 @@ Agent 包。外部入口统一从 `react_agent.agent` 导入公共对象。LangG
 取两种输入上限的较小值。未配置模型窗口时只执行本地策略上限，不宣称与
 Provider 窗口一致。每次调用生成不进入 Checkpoint 的 `BudgetReport`；
 默认历史/总输入预算分别为 80,000/96,000 估算 Token。
+模型输出限制按 Provider 映射：OpenAI 使用 `max_completion_tokens`，DeepSeek
+通过兼容接口发送 `max_tokens`，Anthropic 使用原生 `max_tokens`。主调用会记录
+配置上限、实际输入/输出、推理 Token 和结束原因；若 Provider 返回 `length`
+或 `max_tokens`，Agent 不会执行可能不完整的工具调用，并显式提示结果被截断。
 `MAX_HISTORY_TOKENS` 按已完成的完整用户轮次裁剪，近期历史保持连续；
 当前轮不会被历史子预算拆开。总预算超限时，先尝试投影旧工具正文以保留轮次，
 仍超限才整轮移除；只剩当前轮时，依次缩短证据索引摘录、工具正文及索引条数。
@@ -236,8 +240,12 @@ RAG 工具结果按整个 JSON 输出预算限幅：优先保留各片段的来�
 `sources` 列表，不复制检索正文。
 
 Streamlit 登录后从共享 Checkpoint 恢复用户消息和最终助手消息，过滤内部
-工具调用规划与 ToolMessage。新回答在展示动画开始前先写入页面会话状态，
-回答期间输入框保持禁用；展示采用快速分块而非逐字符延迟，因此中途 rerun
+工具调用规划与 ToolMessage。回答期间通过单次 `astream_events`
+执行获取真实图进度，只向 `st.status` 投影“分析问题、调用工具、
+分析结果、整理回答”等脱敏状态；不展示提示词、工具参数或检索正文。
+后台事件循环通过线程安全队列通知 Streamlit 主线程，不从后台线程调用
+UI API。新回答在展示动画开始前先写入页面会话状态，回答期间
+输入框保持禁用；展示采用快速分块而非逐字符延迟，因此中途 rerun
 不会吞掉已经生成的完整回答。
 
 ### 5.2 RAG：私有知识库检索
@@ -262,20 +270,62 @@ PDF / DOCX / TXT / Markdown / CSV / Excel
       ├─ 普通文档 → BasicDocumentParserAdapter
       └─ 结构化表格 → StructuredTableParserAdapter
   → 统一 ParseResult / ParsedChunk 契约
-  → 内部 RagDocument 边界转换
+  → 公共 KnowledgeDocument 边界转换
   → BM25 Top-10 + Vector Top-10
   → RRF 融合到最多 20 个候选
   → Cross-Encoder 精排
   → 按配置返回 Top-N（默认 5）给 Agent
 ```
 
-RAG 采用端口与适配器分层：`knowledge/` 是统一命名空间，根层保存
-公共数据契约和能力端口。`knowledge/rag/query/RetrievalService` 是缓存、召回、精排和
-来源归一化的唯一在线编排入口；`knowledge/ingestion/IngestionService` 负责增量建库后
-发布索引变更通知，不直接依赖 RAG；Chroma、Redis、Retriever 和 Reranker 位于
-`knowledge/infrastructure/`，由 Knowledge Service 最外层的实例级 `KnowledgeRuntime` 组装。Agent 与 MCP 的 RAG
-Adapter 都在注册时接收 `RetrievalService` 提供者，只负责协议转换，执行过程中
-不再访问 RAG Service Locator。
+RAG 采用模块自治的端口与适配器分层：`knowledge/contracts.py` 和
+`knowledge/runtime_ports.py` 只保存跨边界公共数据与对外能力接口；RAG 内部请求、
+候选轨迹和依赖端口归 `knowledge/rag/contracts.py`、`knowledge/rag/ports.py` 管理。
+`knowledge/rag/query/RetrievalService` 是缓存、召回、精排和来源归一化的在线编排入口，
+`knowledge/rag/retrieval/HybridRetrievalService` 负责 BM25/向量并行、RRF 融合、过滤和
+失败降级。管理服务归 `knowledge/rag/admin/`，Redis 生命周期、语义缓存、BM25、
+Chroma Retriever、只读管理适配器和 Reranker 等具体实现均位于
+`knowledge/rag/infrastructure/`。`knowledge/ingestion/IngestionService` 负责增量建库后
+发布索引变更通知，不直接依赖 RAG；两者只在实例级 `KnowledgeRuntime` 中汇合。
+Agent 与 MCP 的 RAG Adapter 都在注册时接收 `RetrievalService` 提供者，只负责协议转换，
+执行过程中不再访问 RAG Service Locator。
+
+建库模块同样自治：解析请求、解析结果与 OCR 策略位于
+`knowledge/ingestion/contracts.py`，解析器、清单、页数检查、预检、索引写入与变更通知
+端口位于 `knowledge/ingestion/ports.py`；PDF、Docling、Office/文本、表格解析器和
+Chroma/SQLite 写入协调实现均收归 `knowledge/ingestion/infrastructure/`，建库观测归
+`knowledge/ingestion/observability.py`，来源路径归一化归 `knowledge/ingestion/source.py`。
+跨建库与检索边界只传递中立的
+`KnowledgeDocument`，共享设施不得引用两侧的内部契约或实现。
+
+本地对象图也按模块隔离：`knowledge/rag/runtime.py` 只组装查询、评测、管理、预热和
+RAG 私有资源，`knowledge/ingestion/runtime.py` 只组装解析与建库依赖；
+`knowledge/runtime/resources.py` 惰性持有双方确实共用的 Embedding、Chunk Store 和
+写锁。顶层 `knowledge/runtime/container.py` 仅连接两个模块、桥接建库提交后的 RAG
+缓存失效事件并管理关闭顺序。Knowledge Server 路由分别接收互不暴露能力的 RAG 和
+Ingestion Runtime 视图。顶层 `KnowledgeRuntime` 本身不再转发查询、管理、预热或建库
+方法，`KnowledgeServerRuntimePort` 也只公开两个模块视图与统一 `close()`；Server 不再
+接受缺少独立视图的混合 Runtime 兼容对象。
+
+配置边界与对象图边界保持一致：`knowledge/rag/config.py` 独占检索预算、Redis 和
+Reranker 配置，`knowledge/ingestion/config.py` 独占 Docling、批处理策略和指纹清单路径；
+`knowledge/runtime/config.py` 只定义共享 Embedding/设备、共享存储位置，并在 Server
+组合根聚合两侧配置。模块 Runtime 不接收完整 `KnowledgeRuntimeConfig`，Chroma 路径、
+共享设备和资源提供者均由顶层按最小参数注入，因此任一模块都无法读取另一侧的配置细节。
+
+本地评测数据集需要直接读取指定 Chroma 时，使用 `knowledge/rag/offline.py` 的最小
+Chunk 读取入口。该入口只创建 RAG 自己的只读适配器，不再创建完整
+`KnowledgeRuntime`，因此不会附带 Redis、Embedding、建库对象图或无法关闭的隐藏资源。
+
+模块依赖方向由 `tests/architecture/import_graph.py` 使用 Python AST 提取真实导入，
+并由 `tests/architecture/test_knowledge_dependencies.py` 校验。守卫覆盖 RAG、Ingestion、
+Foundation、Transport、Client、Runtime 与 Server 的禁止依赖，以及 Runtime/Server
+组合根允许接触的模块边界；注释和字符串不会被误判，检查仅在测试阶段运行。
+
+HTTP 边界使用同一套中立传输契约：`knowledge/transport/schemas.py` 定义请求与响应
+Schema，`knowledge/transport/codecs.py` 负责领域对象与 JSON Payload 的双向转换。
+Server 不再手工 `asdict`，Client 也不再逐字段重建 `RetrievedChunk`、评测轨迹、
+健康状态、分页 Chunk 或建库报告；新增字段、默认值和可空值由同一份 Schema 约束。
+传输层不依赖 FastAPI、httpx 或 RAG/Ingestion 的内部实现。
 
 `knowledge/client/` 是独立的远程访问边界，包含 HTTP 协议客户端、
 互不包含的 `RemoteRagRuntime` / `RemoteIngestionRuntime`、显式
@@ -313,7 +363,7 @@ BM25 出现多写者或多份失效状态。
 质量门槛和失败降级。扫描型 PDF 使用 Docling `force OCR`，其他复杂 PDF 使用
 `auto OCR`，简单文字型 PDF 使用本地解析器。当前不做逐页混合解析，避免同一
 文档多解析器结果拼接造成阅读顺序、页码和重复块问题。各解析器只返回
-`ParseResult`，应用端口统一传递 `RagDocument`；LangChain `Document`
+`ParseResult`，应用端口统一传递中立的 `KnowledgeDocument`；LangChain `Document`
 只允许出现在 BM25、Chroma 等具体基础设施适配器内部。
 
 ### 5.3 Tools：Agent 工具层
@@ -817,15 +867,15 @@ MCP 协议消息，诊断日志写入 stderr 或 `MCP_LOG_PATH` 指定的文件�
 src/
 ├── api/                         # FastAPI 服务、鉴权、限流、指标和 v1 路由
 ├── knowledge/                   # 统一 Knowledge 命名空间
-│   ├── contracts.py             # 来源、解析、查询、建库与健康状态契约
-│   ├── ports.py                 # 解析、缓存、召回、精排、建库和存储端口
-│   ├── rag/                     # 在线检索、分阶段评测与预热用例
-│   ├── ingestion/               # 文档解析、PDF 路由与增量建库
-│   ├── admin/                   # 健康检查、缓存失效与 Chunk 读取
-│   ├── infrastructure/          # Chroma、Redis、解析、召回、模型和存储适配器
-│   ├── runtime/                 # 本地对象图、配置、设备策略与资源生命周期
+│   ├── contracts.py             # 跨模块文档、来源、查询、建库与健康状态契约
+│   ├── runtime_ports.py         # 对 Agent、Server 与建库入口暴露的能力视图
+│   ├── foundation/              # Embedding、Chunk Store 等跨模块公共设施
+│   ├── rag/                     # 在线检索的配置、契约、端口、实现与本地对象图
+│   ├── ingestion/               # 建库配置、契约、端口、解析/写入实现与本地对象图
+│   ├── transport/               # HTTP Schema 与领域对象双向 Codec
+│   ├── runtime/                 # 顶层组合根、共享资源/配置与设备策略
 │   ├── client/                  # Knowledge Service HTTP 客户端与远程 Runtime
-│   └── server/                  # ASGI 入口、请求模型和服务端组合根
+│   └── server/                  # ASGI 入口、服务端配置和环境组合根
 ├── react_agent/
 │   ├── agent/                   # Agent 状态、工作流、策略、上下文和工具流
 │   ├── skills/                  # 内置专业工作流及选择、加载契约

@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import pytest
 
-from knowledge.contracts import RagDocument
-from knowledge.infrastructure.retrieval.bm25_repository import (
+from knowledge.contracts import KnowledgeDocument
+from knowledge.rag.infrastructure.retrieval.bm25_index import (
+    LazyBm25CandidateRetrieverAdapter,
+)
+from knowledge.rag.infrastructure.retrieval.bm25_repository import (
     RedisBm25Repository,
 )
-from knowledge.infrastructure.retrieval.hybrid_retriever import (
-    HybridRetrieverAdapter,
-)
+from knowledge.rag.retrieval import HybridRetrievalService
 
 
 class FakeRepository:
@@ -38,24 +39,40 @@ class FailingVector:
 
 
 class FakeBm25:
-    def __init__(self, document: RagDocument) -> None:
+    def __init__(self, document: KnowledgeDocument) -> None:
         self._document = document
 
     def retrieve(self, _query: str):
         return [self._document]
 
+    def prepare(self) -> bool:
+        return True
+
+    def invalidate(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+
+class FakeCorpus:
+    def prepare(self) -> None:
+        return None
+
+    def list_documents(self):
+        return []
+
 
 @pytest.mark.asyncio
 async def test_hybrid_retrieval_degrades_to_bm25_when_hnsw_fails() -> None:
-    document = RagDocument(
+    document = KnowledgeDocument(
         content="BM25 仍可返回的证据",
         metadata={"source_file": "report.pdf", "chunk_id": "chunk-1"},
     )
-    adapter = HybridRetrieverAdapter(
+    adapter = HybridRetrievalService(
         vector_retriever=FailingVector(),
-        bm25_repository=FakeRepository(),
+        bm25_retriever=FakeBm25(document),
     )
-    adapter._bm25 = FakeBm25(document)
 
     result = await adapter.retrieve("测试", mode="hybrid")
     await adapter.close()
@@ -63,15 +80,17 @@ async def test_hybrid_retrieval_degrades_to_bm25_when_hnsw_fails() -> None:
     assert result == [document]
 
 
-def test_stale_bm25_save_is_skipped_after_invalidation_generation() -> None:
+@pytest.mark.asyncio
+async def test_stale_bm25_save_is_skipped_after_invalidation_generation() -> None:
     repository = FakeRepository()
-    adapter = HybridRetrieverAdapter(
-        vector_retriever=FailingVector(),
-        bm25_repository=repository,
+    adapter = LazyBm25CandidateRetrieverAdapter(
+        repository=repository,
+        corpus_reader=FakeCorpus(),
     )
     adapter._generation = 2
 
     adapter._save_if_current(object(), 10, generation=1)
+    await adapter.close()
 
     assert repository.saved == 0
 

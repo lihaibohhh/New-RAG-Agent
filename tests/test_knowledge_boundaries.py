@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from knowledge.contracts import StoredChunk
 from knowledge.ingestion import IngestionConfig, IngestionService
 from knowledge.runtime import KnowledgeRuntimeConfig
 from knowledge.runtime import create_knowledge_runtime
@@ -15,32 +16,156 @@ def test_legacy_agent_rag_package_is_removed() -> None:
     assert not (package_root / "react_agent" / "rag").exists()
 
 
-def test_knowledge_contract_package_does_not_depend_on_service_adapters() -> None:
+def test_knowledge_root_contains_only_public_source_contracts() -> None:
     package_root = Path(__file__).parent.parent / "knowledge"
-    source = "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in package_root.rglob("*.py")
-        if path.relative_to(package_root).parts[0] not in {"client", "server"}
-    )
+    root_modules = {path.name for path in package_root.glob("*.py")}
 
-    assert "react_agent" not in source
-    assert "from fastapi" not in source
-    assert "mcp_server" not in source
+    assert root_modules == {"__init__.py", "contracts.py", "runtime_ports.py"}
+    assert (package_root / "ingestion" / "source.py").is_file()
 
 
-def test_rag_and_ingestion_use_cases_are_independent() -> None:
+def test_rag_owns_internal_contracts_ports_and_adapters() -> None:
     package_root = Path(__file__).parent.parent / "knowledge"
-    rag_source = "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in (package_root / "rag").rglob("*.py")
+    public_contracts = (package_root / "contracts.py").read_text(encoding="utf-8")
+    rag_ports = (package_root / "rag" / "ports.py").read_text(encoding="utf-8")
+
+    assert "class RetrievalRequest" not in public_contracts
+    assert "class CandidateRetrievalTrace" not in public_contracts
+    assert "class SemanticCachePort" in rag_ports
+    assert "class HybridRetrieverPort" in rag_ports
+    assert "class RerankerPort" in rag_ports
+    assert "class ChunkReaderPort" in rag_ports
+    assert "class KnowledgeBaseInspectorPort" in rag_ports
+    assert (package_root / "rag" / "contracts.py").is_file()
+    assert (package_root / "rag" / "ports.py").is_file()
+    assert (package_root / "rag" / "infrastructure").is_dir()
+    assert (package_root / "rag" / "admin" / "service.py").is_file()
+    assert (
+        package_root / "rag" / "infrastructure" / "storage" / "chroma_knowledge_base.py"
+    ).is_file()
+    assert not list((package_root / "admin").rglob("*.py"))
+    assert not (package_root / "foundation" / "ports.py").exists()
+    assert not (package_root / "foundation" / "redis.py").exists()
+    assert not (package_root / "foundation" / "chroma.py").exists()
+    assert not (
+        package_root / "foundation" / "storage" / "chroma_knowledge_base.py"
+    ).exists()
+    assert not (package_root / "runtime" / "offline.py").exists()
+
+
+def test_ingestion_owns_internal_contracts_ports_and_adapters() -> None:
+    package_root = Path(__file__).parent.parent / "knowledge"
+    public_contracts = (package_root / "contracts.py").read_text(encoding="utf-8")
+
+    assert "class ParseRequest" not in public_contracts
+    assert "class ParsedChunk" not in public_contracts
+    assert "class ParseResult" not in public_contracts
+    assert "OcrPolicy" not in public_contracts
+    assert "class KnowledgeDocument" in public_contracts
+    assert "class RagDocument" not in public_contracts
+    assert not (package_root / "ports.py").exists()
+    assert not list((package_root / "infrastructure").rglob("*.py"))
+    assert (package_root / "ingestion" / "contracts.py").is_file()
+    assert (package_root / "ingestion" / "ports.py").is_file()
+    assert (package_root / "ingestion" / "infrastructure").is_dir()
+
+
+def test_top_runtime_only_connects_module_runtimes_and_shared_resources() -> None:
+    package_root = Path(__file__).parent.parent / "knowledge"
+    container_source = (package_root / "runtime" / "container.py").read_text(
+        encoding="utf-8"
     )
-    ingestion_source = "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in (package_root / "ingestion").rglob("*.py")
+    rag_runtime_source = (package_root / "rag" / "runtime.py").read_text(
+        encoding="utf-8"
+    )
+    ingestion_runtime_source = (package_root / "ingestion" / "runtime.py").read_text(
+        encoding="utf-8"
+    )
+    resources_source = (package_root / "runtime" / "resources.py").read_text(
+        encoding="utf-8"
+    )
+    server_source = (package_root / "server" / "app.py").read_text(encoding="utf-8")
+
+    assert "DoclingServiceAdapter" not in container_source
+    assert "RedisSemanticCacheAdapter" not in container_source
+    assert "KnowledgeRuntimeConfig" not in rag_runtime_source
+    assert "KnowledgeRuntimeConfig" not in ingestion_runtime_source
+    assert "class LocalRagRuntime" in rag_runtime_source
+    assert "class LocalIngestionRuntime" in ingestion_runtime_source
+    assert "class SharedKnowledgeResources" in resources_source
+    assert "def get_retrieval_service" not in container_source
+    assert "def get_evaluation_retrieval_service" not in container_source
+    assert "def get_admin_service" not in container_source
+    assert "def get_ingestion_service" not in container_source
+    assert "def operations" not in container_source
+    assert 'getattr(runtime, "rag_runtime", runtime)' not in server_source
+    assert 'getattr(runtime, "ingestion_runtime", runtime)' not in server_source
+
+
+def test_module_runtime_configs_expose_only_owned_settings() -> None:
+    package_root = Path(__file__).parent.parent / "knowledge"
+    config = KnowledgeRuntimeConfig()
+
+    assert (package_root / "rag" / "config.py").is_file()
+    assert (package_root / "ingestion" / "config.py").is_file()
+    assert not hasattr(config.rag, "docling")
+    assert not hasattr(config.rag, "service")
+    assert not hasattr(config.ingestion, "redis")
+    assert not hasattr(config.ingestion, "reranker")
+    assert not hasattr(config.shared, "reranker_model")
+
+
+def test_offline_chunk_reader_does_not_create_full_runtime(monkeypatch) -> None:
+    from knowledge.rag import offline
+
+    observed: dict[str, object] = {}
+
+    class Reader:
+        def __init__(self, *, chroma_dir: str) -> None:
+            observed["chroma_dir"] = chroma_dir
+
+        async def list_chunks(self, **kwargs):
+            observed.update(kwargs)
+            return [StoredChunk("chunk-1", "content")]
+
+    monkeypatch.setattr(offline, "ChromaKnowledgeBaseAdapter", Reader)
+
+    chunks = offline.read_chunks_sync(
+        chroma_dir="test-chroma",
+        source_file="report.pdf",
+        offset=2,
+        limit=3,
     )
 
-    assert "knowledge.ingestion" not in rag_source
-    assert "knowledge.rag" not in ingestion_source
+    assert chunks == (StoredChunk("chunk-1", "content"),)
+    assert observed == {
+        "chroma_dir": "test-chroma",
+        "source_file": "report.pdf",
+        "offset": 2,
+        "limit": 3,
+    }
+    offline_source = (Path(offline.__file__)).read_text(encoding="utf-8")
+    assert "KnowledgeRuntime" not in offline_source
+    assert "knowledge.runtime" not in offline_source
+    assert "EmbeddingProviderAdapter" not in offline_source
+    dataset_source = (
+        Path(__file__).parent.parent / "eval" / "dataset" / "sources.py"
+    ).read_text(encoding="utf-8")
+    assert "knowledge.rag.offline" in dataset_source
+    assert "knowledge.runtime" not in dataset_source
+
+
+def test_http_transport_codecs_are_shared_by_client_and_server() -> None:
+    package_root = Path(__file__).parent.parent / "knowledge"
+    client_source = (package_root / "client" / "remote.py").read_text(encoding="utf-8")
+    server_source = (package_root / "server" / "app.py").read_text(encoding="utf-8")
+
+    assert "RetrievedChunk(" not in client_source
+    assert "EvaluationCandidate(" not in client_source
+    assert "StoredChunk(" not in client_source
+    assert "asdict(" not in server_source
+    assert "_retrieval_payload" not in server_source
+    assert "_evaluation_retrieval_payload" not in server_source
 
 
 def test_ingestion_config_rejects_invalid_resource_limits() -> None:
