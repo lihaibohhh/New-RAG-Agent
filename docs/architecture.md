@@ -30,7 +30,7 @@ Agent 负责研究编排、工具选择、上下文和会话；Knowledge Service
 |---|---|
 | `react_agent/agent/service.py` | 对外对话用例，校验 `thread_id`，封装 invoke/stream |
 | `react_agent/agent/workflow/` | LangGraph 拓扑、条件路由和节点适配 |
-| `react_agent/agent/contracts/` | 图状态和运行时依赖契约 |
+| `react_agent/agent/contracts/` | 图状态、运行时依赖和工具能力契约 |
 | `react_agent/agent/context_management/` | 轮次分段、Token 预算、协议修复、证据索引和历史压缩 |
 | `react_agent/agent/policies.py` | 模型轮次、工具批次、RAG 配额和递归安全策略 |
 | `react_agent/agent/model_execution.py` | 模型绑定、调用、响应和用量更新 |
@@ -38,6 +38,11 @@ Agent 负责研究编排、工具选择、上下文和会话；Knowledge Service
 | `react_agent/skills/` | 专业工作流的选择、缓存加载和瞬态提示注入 |
 | `react_agent/conversations/` | 历史读取、删除和 Checkpointer 适配 |
 | `react_agent/runtime/container.py` | 模型、工具、会话和共享资源的应用组合根 |
+| `agent_tools/` | 独立工具适配器、工具配置与共享结果协议，不反向依赖 Agent |
+
+Agent 不根据具体工具名制定策略。组合根将工具名称映射为知识检索、Web 搜索等稳定
+能力；`agent_tools/contracts/` 再把工具信封标准化为 Agent 可消费的检索结果。工具
+改名、来源字段兼容和原始 JSON 层级变化因此收口在 Runtime 与工具协议边界。
 
 `AgentService` 不负责历史管理；`ConversationService` 不负责对话执行。FastAPI 的
 Chat 和 Sessions 路由分别注入对应服务，但通过组合根共享同一个 Checkpointer。

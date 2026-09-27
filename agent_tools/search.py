@@ -5,9 +5,9 @@ import logging
 from collections.abc import Callable
 from typing import Any
 from langchain_core.tools import tool
-from react_agent.tooling.results import tool_error as _err
-from react_agent.tooling.results import tool_success as _ok
-from react_agent.tooling.retry import with_retry
+from agent_tools.contracts.results import tool_error as _err
+from agent_tools.contracts.results import tool_success as _ok
+from agent_tools.contracts.retry import with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -67,12 +67,12 @@ _DESCRIPTION = (
         "【触发条件】以下情况调用本工具：\n"
         "  - 需要互联网上的最新动态、实时新闻、近期公告\n"
         "  - 需要验证公开事实（公司官网信息、开源版本号、政策发布日期等）\n"
-        "  - query_internal_knowledge 已返回 has_relevant_content=False，"
-        "且用户问题属于可公开查询的宏观/行业信息\n"
+        "  - 知识检索已成功执行但未返回可用证据，"
+        "且用户问题属于可公开查询的宏观或行业信息\n"
         "  示例 query：'2024年新能源补贴政策最新消息'、'比亚迪最新季报发布时间'\n\n"
         "【不触发条件】以下情况禁止调用本工具：\n"
         "  - 用户要求查询内部知识库中的具体财务数值或研报原文\n"
-        "  - query_internal_knowledge 尚未调用（不得跳过直接搜索）\n"
+        "  - 尚未尝试知识检索（不得跳过内部证据检索直接搜索）\n"
         "  - 用户问题涉及私有文档中的具体数据，即使知识库未命中也不得用本工具补充\n\n"
         "【输入】简洁的搜索关键词或短句，不超过300字符\n"
         "  好的输入：'比亚迪 2024 Q3 业绩发布'\n"

@@ -9,7 +9,10 @@ from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.memory import MemorySaver
 
 from react_agent.agent.config import AgentContext
-from react_agent.agent.contracts.dependencies import AgentDependencies
+from react_agent.agent.contracts.dependencies import (
+    AgentDependencies,
+    ToolCapability,
+)
 from react_agent.agent.contracts.state import State
 from react_agent.agent.context_management.evidence import merge_visible_evidence
 from react_agent.agent.context_management.evidence import (
@@ -23,9 +26,24 @@ from react_agent.agent.workflow.nodes.lifecycle import prepare_turn
 from react_agent.agent.workflow.nodes.model import finalize_model
 from react_agent.agent.workflow.nodes.tools import postprocess_tools
 from knowledge.contracts import RetrievedChunk, RetrievalResult
-from react_agent.tools.rag import create_rag_tool
+from agent_tools.rag import create_rag_tool
 from react_agent.agent.workflow.graph import build_base_graph
-from react_agent.tooling.results import tool_success
+from agent_tools.contracts.results import tool_success
+
+
+RETRIEVAL_TOOL_NAMES = frozenset({"query_internal_knowledge"})
+RAG_CAPABILITIES = {
+    "query_internal_knowledge": frozenset({ToolCapability.KNOWLEDGE_RETRIEVAL})
+}
+
+
+def _retrieval_dependencies() -> AgentDependencies:
+    return AgentDependencies(
+        config=AgentContext(),
+        model_provider=lambda: object(),
+        tools=(SimpleNamespace(name="query_internal_knowledge"),),
+        tool_capabilities=RAG_CAPABILITIES,
+    )
 
 
 def _rag_message(query: str, call_id: str, items: list[dict]) -> ToolMessage:
@@ -57,8 +75,12 @@ def test_evidence_merges_visible_chunks_across_batches_without_mutation() -> Non
         ],
     )
 
-    earlier, omitted = merge_visible_evidence([], [first])
-    merged, later_omitted = merge_visible_evidence(earlier, [second])
+    earlier, omitted = merge_visible_evidence(
+        [], [first], retrieval_tool_names=RETRIEVAL_TOOL_NAMES
+    )
+    merged, later_omitted = merge_visible_evidence(
+        earlier, [second], retrieval_tool_names=RETRIEVAL_TOOL_NAMES
+    )
 
     assert omitted == later_omitted == 0
     assert [record["chunk_id"] for record in merged] == ["a::1", "b::2"]
@@ -78,7 +100,12 @@ def test_evidence_ledger_reports_capacity_without_claiming_absence() -> None:
         ],
     )
 
-    records, omitted = merge_visible_evidence([], [message], max_records=1)
+    records, omitted = merge_visible_evidence(
+        [],
+        [message],
+        retrieval_tool_names=RETRIEVAL_TOOL_NAMES,
+        max_records=1,
+    )
 
     assert len(records) == 1
     assert omitted == 1
@@ -100,7 +127,9 @@ def test_evidence_ledger_counts_results_hidden_by_payload_limit() -> None:
     )
     bounded = json.loads(message.content)
 
-    records, omitted = merge_visible_evidence([], [message])
+    records, omitted = merge_visible_evidence(
+        [], [message], retrieval_tool_names=RETRIEVAL_TOOL_NAMES
+    )
 
     assert omitted == bounded["meta"]["total_results"] - len(records)
 
@@ -119,7 +148,9 @@ def test_historical_evidence_keeps_sources_without_copying_body() -> None:
         ],
     )
 
-    records, omitted = merge_historical_evidence([], [message])
+    records, omitted = merge_historical_evidence(
+        [], [message], retrieval_tool_names=RETRIEVAL_TOOL_NAMES
+    )
     rendered = render_historical_evidence_index(records)
 
     assert omitted == 0
@@ -139,9 +170,7 @@ async def test_postprocess_writes_evidence_and_resets_it_next_turn() -> None:
         "call-1",
         [{"source": "a.pdf", "page": 1, "chunk_id": "a", "content": "事实 A"}],
     )
-    dependencies = AgentDependencies(
-        config=AgentContext(), model_provider=lambda: object(), tools=()
-    )
+    dependencies = _retrieval_dependencies()
     state = State(messages=[HumanMessage(content="问题"), message])
 
     update = await postprocess_tools(state, SimpleNamespace(context=dependencies))
@@ -151,9 +180,13 @@ async def test_postprocess_writes_evidence_and_resets_it_next_turn() -> None:
     assert update["tool_runs"][0]["sources"] == [
         {"source_file": "a.pdf", "source_page": 1, "chunk_id": "a"}
     ]
+    assert update["turn_tool_runs"] == update["tool_runs"]
+    assert update["tool_run_count"] == 1
     assert "data" not in update["last_tool_result"]
     reset = await prepare_turn(
         State(
+            turn_tool_runs=update["turn_tool_runs"],
+            tool_run_count=update["tool_run_count"],
             turn_evidence=update["turn_evidence"],
             conversation_evidence=update["conversation_evidence"],
         ),
@@ -161,6 +194,8 @@ async def test_postprocess_writes_evidence_and_resets_it_next_turn() -> None:
     )
     assert reset["turn_evidence"] == []
     assert reset["turn_evidence_omitted_count"] == 0
+    assert reset["turn_tool_runs"] == []
+    assert "tool_run_count" not in reset
     assert "conversation_evidence" not in reset
 
 
@@ -182,9 +217,7 @@ async def test_prepare_turn_backfills_sources_from_legacy_checkpoint() -> None:
         messages=[HumanMessage(content="旧问题"), message, AIMessage(content="旧回答")]
     )
 
-    dependencies = AgentDependencies(
-        config=AgentContext(), model_provider=lambda: object(), tools=()
-    )
+    dependencies = _retrieval_dependencies()
     update = await prepare_turn(state, SimpleNamespace(context=dependencies))
 
     assert update["conversation_evidence"][0]["chunk_id"] == "legacy::4"
@@ -204,7 +237,9 @@ def test_historical_sources_remain_visible_after_rag_turn_is_trimmed() -> None:
             }
         ],
     )
-    records, _ = merge_historical_evidence([], [tool_message])
+    records, _ = merge_historical_evidence(
+        [], [tool_message], retrieval_tool_names=RETRIEVAL_TOOL_NAMES
+    )
     old_turn = [
         HumanMessage(content="查询全球锂矿储量"),
         AIMessage(
@@ -274,7 +309,9 @@ async def test_finalizer_receives_evidence_as_transient_tool_data() -> None:
         "call-1",
         [{"source": "a.pdf", "page": 1, "chunk_id": "a", "content": "事实 A"}],
     )
-    records, _ = merge_visible_evidence([], [message])
+    records, _ = merge_visible_evidence(
+        [], [message], retrieval_tool_names=RETRIEVAL_TOOL_NAMES
+    )
     state = State(
         messages=[
             HumanMessage(content="问题"),
@@ -375,7 +412,10 @@ async def test_graph_merges_two_rag_batches_before_finalization() -> None:
         description="测试 RAG",
     )
     dependencies = AgentDependencies(
-        config=context, model_provider=lambda: model, tools=(tool,)
+        config=context,
+        model_provider=lambda: model,
+        tools=(tool,),
+        tool_capabilities=RAG_CAPABILITIES,
     )
 
     result = (
@@ -467,7 +507,10 @@ async def test_evidence_does_not_leak_into_next_checkpointed_turn() -> None:
         description="测试 RAG",
     )
     dependencies = AgentDependencies(
-        config=context, model_provider=FinalizingModel, tools=(tool,)
+        config=context,
+        model_provider=FinalizingModel,
+        tools=(tool,),
+        tool_capabilities=RAG_CAPABILITIES,
     )
     graph = build_base_graph().compile(checkpointer=MemorySaver())
     run_config = {
@@ -515,15 +558,15 @@ async def test_payload_overflow_is_terminal_error_not_rag_miss() -> None:
     )
 
     batch = parse_tool_batch(
-        [HumanMessage(content="问题"), message], timezone="Asia/Shanghai"
+        [HumanMessage(content="问题"), message],
+        timezone="Asia/Shanghai",
+        retrieval_tool_names=RETRIEVAL_TOOL_NAMES,
     )
 
     assert batch is not None
     assert batch.error_count == 1
     assert batch.consecutive_rag_misses == 0
-    dependencies = AgentDependencies(
-        config=AgentContext(), model_provider=lambda: object(), tools=()
-    )
+    dependencies = _retrieval_dependencies()
     update = await postprocess_tools(
         State(messages=[HumanMessage(content="问题"), message]),
         SimpleNamespace(context=dependencies),
@@ -568,7 +611,9 @@ async def test_real_rag_tool_result_is_json_visible_to_ledger() -> None:
         content=bound_tool_payload(result.content, 600),
     )
 
-    records, omitted = merge_visible_evidence([], [bounded])
+    records, omitted = merge_visible_evidence(
+        [], [bounded], retrieval_tool_names=RETRIEVAL_TOOL_NAMES
+    )
 
     assert omitted == 0
     assert records[0]["chunk_id"] == "report::2"

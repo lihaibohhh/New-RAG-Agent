@@ -8,6 +8,8 @@ from typing import Any
 
 from langchain_core.messages import ToolMessage
 
+from agent_tools.contracts.retrieval import decode_retrieval_outcome
+
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +63,7 @@ def merge_visible_evidence(
     existing: list[dict[str, Any]],
     tool_messages: list[ToolMessage],
     *,
+    retrieval_tool_names: frozenset[str],
     max_records: int = MAX_EVIDENCE_RECORDS,
     max_excerpt_chars: int = MAX_EVIDENCE_EXCERPT_CHARS,
 ) -> tuple[list[dict[str, Any]], int]:
@@ -71,43 +74,29 @@ def merge_visible_evidence(
     by_key = {str(record["key"]): record for record in records}
     omitted = 0
     for message in tool_messages:
-        if message.name != "query_internal_knowledge":
+        if message.name not in retrieval_tool_names:
             continue
         try:
-            payload = json.loads(message.content or "{}")
+            outcome = decode_retrieval_outcome(message.content)
         except (TypeError, ValueError):
             continue
-        if not isinstance(payload, dict) or payload.get("ok") is not True:
+        if outcome is None or not outcome.ok:
             continue
-        data = payload.get("data")
-        if not isinstance(data, dict) or not isinstance(data.get("results"), list):
-            continue
-        meta = payload.get("meta")
-        if not isinstance(meta, dict):
-            meta = {}
-        total = meta.get("total_results", len(data["results"]))
-        if isinstance(total, int) and not isinstance(total, bool):
-            omitted += max(0, total - len(data["results"]))
-        query = str(payload.get("query") or "")[:160]
-        for index, item in enumerate(data["results"]):
-            if not isinstance(item, dict):
-                continue
-            content = str(item.get("content") or "").strip()
+        omitted += max(0, outcome.total_results - len(outcome.evidence))
+        query = outcome.query[:160]
+        for index, item in enumerate(outcome.evidence):
+            content = item.content
             if not content:
                 continue
-            chunk_id = str(item.get("chunk_id") or "")
-            source = str(item.get("source") or item.get("source_file") or "")
-            page = item.get("page", item.get("source_page"))
-            if not isinstance(page, int) or isinstance(page, bool) or page < 1:
-                page = None
+            chunk_id = item.chunk_id
+            source = item.source_file
+            page = item.source_page
             if len(chunk_id) > 512 or len(source) > 512:
                 omitted += 1
                 continue
             key = chunk_id or f"{message.tool_call_id}:{index}"
             excerpt = content[:max_excerpt_chars]
-            truncated = bool(item.get("content_truncated")) or len(content) > len(
-                excerpt
-            )
+            truncated = item.content_truncated or len(content) > len(excerpt)
             if key in by_key:
                 record = by_key[key]
                 if (
@@ -141,6 +130,7 @@ def merge_historical_evidence(
     existing: list[dict[str, Any]],
     tool_messages: list[ToolMessage],
     *,
+    retrieval_tool_names: frozenset[str],
     max_records: int = MAX_HISTORICAL_EVIDENCE_RECORDS,
 ) -> tuple[list[dict[str, Any]], int]:
     """持久化合并 RAG 来源位置，不复制正文，也不依赖摘要模型成功。"""
@@ -152,34 +142,22 @@ def merge_historical_evidence(
     by_key = {str(record.get("key") or ""): record for record in records}
     omitted = 0
     for message in tool_messages:
-        if message.name != "query_internal_knowledge":
+        if message.name not in retrieval_tool_names:
             continue
         try:
-            payload = json.loads(message.content or "{}")
+            outcome = decode_retrieval_outcome(message.content)
         except (TypeError, ValueError):
             continue
-        if not isinstance(payload, dict) or payload.get("ok") is not True:
+        if outcome is None or not outcome.ok:
             continue
-        data = payload.get("data")
-        if not isinstance(data, dict) or not isinstance(data.get("results"), list):
-            continue
-        meta = payload.get("meta")
-        if not isinstance(meta, dict):
-            meta = {}
-        total = meta.get("total_results", len(data["results"]))
-        if isinstance(total, int) and not isinstance(total, bool):
-            omitted += max(0, total - len(data["results"]))
-        query = str(payload.get("query") or "")[:MAX_HISTORICAL_QUERY_CHARS]
+        omitted += max(0, outcome.total_results - len(outcome.evidence))
+        query = outcome.query[:MAX_HISTORICAL_QUERY_CHARS]
         message_id = str(getattr(message, "id", None) or "")
         tool_call_id = str(getattr(message, "tool_call_id", None) or "")
-        for rank, item in enumerate(data["results"], start=1):
-            if not isinstance(item, dict):
-                continue
-            chunk_id = str(item.get("chunk_id") or "")
-            source = str(item.get("source") or item.get("source_file") or "")
-            page = item.get("page", item.get("source_page"))
-            if not isinstance(page, int) or isinstance(page, bool) or page < 1:
-                page = None
+        for rank, item in enumerate(outcome.evidence, start=1):
+            chunk_id = item.chunk_id
+            source = item.source_file
+            page = item.source_page
             if len(chunk_id) > 512 or len(source) > 512:
                 omitted += 1
                 continue

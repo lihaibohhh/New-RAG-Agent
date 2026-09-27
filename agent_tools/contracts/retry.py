@@ -10,7 +10,7 @@ import time
 from collections.abc import Callable, Iterable
 from typing import Any, TypeVar
 
-from react_agent.tooling.results import tool_error
+from agent_tools.contracts.results import tool_error
 
 
 ToolCallable = TypeVar("ToolCallable", bound=Callable[..., Any])

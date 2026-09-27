@@ -2,6 +2,7 @@
 
 from importlib.resources import files
 
+from agent_tools.config import AgentToolsConfig
 from react_agent.configuration.settings import Settings
 from react_agent.metering.pricing import pricing_path
 
@@ -14,7 +15,9 @@ def test_configuration_assets_are_available_in_package(monkeypatch) -> None:
     assert package.joinpath("config.yaml").is_file()
     assert package.joinpath("deepseek_pricing.yaml").is_file()
     assert pricing_path() == package.joinpath("deepseek_pricing.yaml")
-    assert Settings().tools.rag.client_timeout == 150
+    configured = Settings()
+    assert isinstance(configured.tools, AgentToolsConfig)
+    assert configured.tools.rag.client_timeout == 150
 
 
 def test_agent_settings_ignore_knowledge_runtime_tuning_environment(

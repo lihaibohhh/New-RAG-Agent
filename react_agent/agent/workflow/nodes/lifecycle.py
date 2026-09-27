@@ -25,7 +25,10 @@ from react_agent.metering import (
 from react_agent.agent.context_management.evidence import merge_historical_evidence
 from react_agent.agent.context_management.budgeting import estimate_message_tokens
 from react_agent.agent.context_management.contracts import ContextBudget
-from react_agent.agent.contracts.dependencies import AgentDependencies
+from react_agent.agent.contracts.dependencies import (
+    AgentDependencies,
+    ToolCapability,
+)
 from react_agent.agent.contracts.state import State
 from react_agent.agent.model_execution import model_usage_update
 from react_agent.agent.prompts import render_tool_recovery_directive
@@ -51,6 +54,7 @@ async def prepare_turn(
         "consecutive_failures": 0,
         "pending_directive": None,
         "last_tool_result": None,
+        "turn_tool_runs": [],
         "turn_evidence": [],
         "turn_evidence_omitted_count": 0,
         "turn_compaction_usage": None,
@@ -75,6 +79,9 @@ async def prepare_turn(
                 for message in state.messages[start:]
                 if isinstance(message, ToolMessage)
             ],
+            retrieval_tool_names=runtime.context.tool_names_for(
+                ToolCapability.KNOWLEDGE_RETRIEVAL
+            ),
         )
         update.update(
             conversation_evidence=historical,

@@ -1,22 +1,23 @@
-# src/react_agent/tools/sql.py
+"""只读财务指标 SQL Tool 适配器。"""
+
+from __future__ import annotations
+
 import json
-import sqlite3
 import re
-import os
+import sqlite3
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
 from langchain_core.tools import tool
-from react_agent.tooling.results import tool_error as _err
-from react_agent.tooling.results import tool_success as _ok
-from react_agent.configuration.settings import settings
 
-
-DB_PATH = settings.tools.sql_store.DB_PATH
+from agent_tools.contracts.results import tool_error as _err
+from agent_tools.contracts.results import tool_success as _ok
 
 # 安全白名单：只允许 SELECT
 _SAFE_PATTERN = re.compile(r"^\s*SELECT\b", re.IGNORECASE)
 
 _TOOL_NAME = "sql_tool"
-
-model_ref = os.getenv("MODEL", "deepseek/deepseek-v4-flash")
 
 def _extract_sql(raw: str) -> str:
     """
@@ -40,11 +41,11 @@ def _extract_sql(raw: str) -> str:
     return raw.strip()
 
 
-def _query_db(sql: str) -> list[dict]:
+def _query_db(sql: str, db_path: Path) -> list[dict]:
     """执行 SQL，返回字典列表"""
     if not _SAFE_PATTERN.match(sql):
         raise ValueError("只允许 SELECT 查询")
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     try:
         cur = conn.execute(sql)
@@ -90,8 +91,12 @@ financial_metrics（财务经营指标）：
 """
 
 
-@tool
-def sql_tool(query: str) -> str:
+def _run_query(
+    query: str,
+    *,
+    db_path: Path,
+    model_provider: Callable[[], Any],
+) -> str:
     """
     查询金融研报结构化数据库，获取公司财务指标的精确数值。
 
@@ -108,8 +113,7 @@ def sql_tool(query: str) -> str:
     try:
         schema = _get_schema()
 
-        from react_agent.models import load_chat_model
-        llm = load_chat_model(model_ref)
+        llm = model_provider()
 
         sql_prompt = f"""根据以下数据库Schema，将自然语言查询转换为SQL。
 只输出SQL语句，不要任何解释，不要markdown代码块。
@@ -124,7 +128,7 @@ SQL："""
         sql_resp = llm.invoke(sql_prompt)
         sql = _extract_sql(sql_resp.content)
 
-        rows = _query_db(sql)
+        rows = _query_db(sql, db_path)
 
         if not rows:
             return json.dumps(
@@ -200,6 +204,29 @@ SQL："""
             ),
             ensure_ascii=False,
         )
+
+
+def create_sql_tool(
+    *,
+    db_path: str | Path,
+    model_provider: Callable[[], Any],
+) -> Any:
+    """创建显式注入数据库路径与模型提供者的只读SQL工具。"""
+    resolved_db_path = Path(db_path).resolve()
+
+    @tool
+    def sql_tool(query: str) -> str:
+        """查询结构化财务数据库中的公司指标和可追溯来源。"""
+        return _run_query(
+            query,
+            db_path=resolved_db_path,
+            model_provider=model_provider,
+        )
+
+    return sql_tool
+
+
+__all__ = ["create_sql_tool"]
 
 
 # if __name__ == "__main__":

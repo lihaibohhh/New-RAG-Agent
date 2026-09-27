@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from enum import Enum
+from types import MappingProxyType
+from typing import Any, Callable, Mapping
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.tools import BaseTool
@@ -17,6 +19,13 @@ ModelProvider = Callable[[], BaseChatModel]
 OutputTokenLimiter = Callable[..., Any]
 
 
+class ToolCapability(str, Enum):
+    """Agent 用于制定策略的稳定工具能力，而非具体适配器名称。"""
+
+    KNOWLEDGE_RETRIEVAL = "knowledge_retrieval"
+    WEB_SEARCH = "web_search"
+
+
 @dataclass(frozen=True)
 class AgentDependencies:
     """由 Composition Root 提供、由 Agent 图统一消费的运行能力。
@@ -28,6 +37,7 @@ class AgentDependencies:
     config: AgentContext
     model_provider: ModelProvider
     tools: tuple[BaseTool, ...]
+    tool_capabilities: Mapping[str, frozenset[ToolCapability]] | None = None
     skill_registry: SkillRegistry | None = None
     model_ref: str = "unknown"
     cost_estimator: CostEstimator | None = None
@@ -64,6 +74,18 @@ class AgentDependencies:
         if duplicate_names:
             raise ValueError("Agent 工具名称不能重复: " + ", ".join(duplicate_names))
         object.__setattr__(self, "tools", tools)
+        capabilities: dict[str, frozenset[ToolCapability]] = {}
+        for tool_name, raw_capabilities in (self.tool_capabilities or {}).items():
+            if tool_name not in names:
+                raise ValueError(f"工具能力映射引用了未注册工具: {tool_name}")
+            capabilities[tool_name] = frozenset(
+                ToolCapability(capability) for capability in raw_capabilities
+            )
+        object.__setattr__(
+            self,
+            "tool_capabilities",
+            MappingProxyType(capabilities),
+        )
 
     def resolve_model(self) -> BaseChatModel:
         """按需取得由 Runtime 选择的聊天模型。"""
@@ -77,14 +99,23 @@ class AgentDependencies:
         return bind(max_tokens=max_tokens) if callable(bind) else model
 
     def active_tools(self) -> tuple[tuple[BaseTool, ...], frozenset[str]]:
-        """根据 Agent 配置返回本轮允许绑定和执行的工具。"""
+        """返回由 Runtime 注入且受 Agent 总开关控制的工具。"""
         if not self.config.enable_tools:
             return (), frozenset()
-        active = tuple(
-            agent_tool
-            for agent_tool in self.tools
-            if agent_tool.name != "search" or self.config.enable_web_search
-        )
+        active = self.tools
         return active, frozenset(agent_tool.name for agent_tool in active)
 
-__all__ = ["AgentDependencies", "ModelProvider", "OutputTokenLimiter"]
+    def tool_names_for(self, capability: ToolCapability) -> frozenset[str]:
+        """返回具备指定能力的已注册工具名称。"""
+        return frozenset(
+            tool_name
+            for tool_name, capabilities in self.tool_capabilities.items()
+            if capability in capabilities
+        )
+
+__all__ = [
+    "AgentDependencies",
+    "ModelProvider",
+    "OutputTokenLimiter",
+    "ToolCapability",
+]

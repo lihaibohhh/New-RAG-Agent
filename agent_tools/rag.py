@@ -8,9 +8,10 @@ from typing import Any
 from langchain_core.tools import tool
 
 from knowledge.contracts import KnowledgeValidationError, RetrievalResult
-from react_agent.tooling.results import tool_error as _err
-from react_agent.tooling.results import tool_success as _ok
-from react_agent.tooling.retry import with_retry
+from agent_tools.contracts.retrieval import retrieval_meta
+from agent_tools.contracts.results import tool_error as _err
+from agent_tools.contracts.results import tool_success as _ok
+from agent_tools.contracts.retry import with_retry
 
 
 TOOL_NAME = "query_internal_knowledge"
@@ -100,16 +101,16 @@ def _to_tool_payload(result: RetrievalResult) -> dict:
             "results": results,
             "has_relevant_content": has_content,
         },
-        meta={
-            "retrieved_count": len(results),
-            "candidates_count": result.candidates_count,
-            "reranked_count": result.reranked_count,
-            "stage": result.stage,
-            "cache_hit": result.cache_hit,
-            "top_score": round(result.top_score, 4),
-            "has_relevant_content": has_content,
-            "timings": result.timings,
-        },
+        meta=retrieval_meta(
+            has_relevant_content=has_content,
+            retrieved_count=len(results),
+            candidates_count=result.candidates_count,
+            reranked_count=result.reranked_count,
+            stage=result.stage,
+            cache_hit=result.cache_hit,
+            top_score=round(result.top_score, 4),
+            timings=result.timings,
+        ),
     )
 
 

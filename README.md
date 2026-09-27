@@ -212,9 +212,9 @@ src/
 ├── react_agent/
 │   ├── agent/              # Agent 状态、工作流、策略和上下文管理
 │   ├── skills/             # 内置研究工作流
-│   ├── tools/              # RAG、Web、文档和 SQL 工具
 │   ├── conversations/      # 会话契约与 Checkpointer
 │   └── runtime/            # 应用组合根与生命周期
+├── agent_tools/            # RAG、Web、文档和 SQL 工具适配器、配置及共享协议
 ├── mcp_service/            # MCP stdio 适配器
 ├── eval/                   # 数据集与 RAGAS 评测
 ├── tests/                  # 离线测试

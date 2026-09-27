@@ -6,9 +6,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from react_agent.agent.config import AgentContext
-from react_agent.agent.contracts.dependencies import AgentDependencies
+from react_agent.agent.contracts.dependencies import (
+    AgentDependencies,
+    ToolCapability,
+)
 from react_agent.agent.service import AgentService
 from react_agent.conversations import load_conversation_persistence_config
 from react_agent.conversations.contracts import (
@@ -21,7 +25,7 @@ from react_agent.conversations.infrastructure import (
 from react_agent.conversations.infrastructure.checkpointer_factory import (
     CheckpointerFactory,
 )
-from react_agent.configuration.settings import LLMConfig, SearchConfig, Settings
+from react_agent.configuration.settings import LLMConfig, Settings
 from knowledge.contracts import (
     RetrievedChunk,
     RetrievalResult,
@@ -43,9 +47,10 @@ from react_agent.runtime.container import (
     create_application_services,
     get_application_status,
 )
-from react_agent.tools.rag import create_rag_tool
-from react_agent.tools.markdown import create_markdown_tool
-from react_agent.tools.search import create_search_tool
+from agent_tools.documents.markdown import create_markdown_tool
+from agent_tools.config import SearchToolConfig
+from agent_tools.rag import create_rag_tool
+from agent_tools.search import create_search_tool
 
 
 def create_test_knowledge_runtime():
@@ -128,6 +133,7 @@ async def test_agent_service_reads_persisted_usage_baseline() -> None:
         "total_tokens": 120,
         "estimated_cost_cny": 0.12,
         "llm_call_count": 4,
+        "tool_run_count": 9,
         "tool_runs": [{"tool": "rag"}],
     }
     service = AgentService(dependencies, graph)
@@ -137,7 +143,7 @@ async def test_agent_service_reads_persisted_usage_baseline() -> None:
     assert snapshot["total_tokens"] == 120
     assert snapshot["estimated_cost_cny"] == pytest.approx(0.12)
     assert snapshot["llm_call_count"] == 4
-    assert snapshot["tool_runs_count"] == 1
+    assert snapshot["tool_run_count"] == 9
     assert graph.state_config == {"configurable": {"thread_id": "user:restored"}}
 
 
@@ -199,6 +205,9 @@ async def test_search_tool_uses_runtime_selected_client() -> None:
     assert requested_sizes == [7]
     assert payload["ok"] is True
     assert payload["meta"]["max_results"] == 7
+    assert "query_internal_knowledge" not in search_tool.description
+    assert "has_relevant_content" not in search_tool.description
+    assert "知识检索" in search_tool.description
 
 
 def test_artifact_tool_uses_runtime_selected_output_dir(tmp_path) -> None:
@@ -338,6 +347,24 @@ def test_runtime_rejects_model_window_without_input_capacity(monkeypatch) -> Non
         asyncio.run(runtime.close())
 
 
+def test_runtime_does_not_create_or_inject_disabled_web_search(monkeypatch) -> None:
+    def fail_search_factory(**_kwargs):
+        pytest.fail("禁用 Web 搜索时不应创建搜索工具")
+
+    monkeypatch.setattr(container, "create_search_tool", fail_search_factory)
+    runtime = create_test_knowledge_runtime()
+    try:
+        dependencies = container._compose_agent_dependencies(
+            AgentContext(enable_web_search=False),
+            runtime.rag_runtime,
+        )
+    finally:
+        asyncio.run(runtime.close())
+
+    assert "search" not in {tool.name for tool in dependencies.tools}
+    assert dependencies.tool_names_for(ToolCapability.WEB_SEARCH) == frozenset()
+
+
 def test_model_and_search_adapter_settings_own_their_environment(
     monkeypatch,
 ) -> None:
@@ -347,7 +374,7 @@ def test_model_and_search_adapter_settings_own_their_environment(
     monkeypatch.setenv("MAX_SEARCH_RESULTS", "7")
 
     model_settings = LLMConfig()
-    search_settings = SearchConfig()
+    search_settings = SearchToolConfig()
 
     assert model_settings.model == "provider/env-model"
     assert model_settings.llm_temperature == 0.4
@@ -434,21 +461,48 @@ def test_application_entrypoints_use_the_shared_persistence_loader() -> None:
         assert 'checkpoint_backend="postgres"' not in source
 
 
-def test_agent_dependencies_manage_an_immutable_active_tool_catalog() -> None:
+def test_docker_build_and_dev_mount_include_agent_tools() -> None:
+    project_root = Path(__file__).parent.parent
+    dockerfile = (project_root / "Dockerfile").read_text(encoding="utf-8")
+    dev_compose = yaml.safe_load(
+        (project_root / "docker-compose.dev.yml").read_text(encoding="utf-8")
+    )
+
+    assert "COPY --chown=app:app agent_tools ./agent_tools" in dockerfile
+    for service_name in ("agent-app", "eval-runner"):
+        volumes = dev_compose["services"][service_name]["volumes"]
+        assert any(
+            volume.get("source") == "./agent_tools"
+            and volume.get("target") == "/app/agent_tools"
+            for volume in volumes
+            if isinstance(volume, dict)
+        )
+
+
+def test_agent_dependencies_manage_an_immutable_capability_catalog() -> None:
     dependencies = AgentDependencies(
-        config=AgentContext(enable_web_search=False),
+        config=AgentContext(),
         model_provider=lambda: object(),
         tools=[
             SimpleNamespace(name="search"),
             SimpleNamespace(name="query_internal_knowledge"),
         ],
+        tool_capabilities={
+            "search": frozenset({ToolCapability.WEB_SEARCH}),
+            "query_internal_knowledge": frozenset(
+                {ToolCapability.KNOWLEDGE_RETRIEVAL}
+            ),
+        },
     )
 
     active, active_names = dependencies.active_tools()
 
     assert isinstance(dependencies.tools, tuple)
-    assert [tool.name for tool in active] == ["query_internal_knowledge"]
-    assert active_names == frozenset({"query_internal_knowledge"})
+    assert [tool.name for tool in active] == ["search", "query_internal_knowledge"]
+    assert active_names == frozenset({"search", "query_internal_knowledge"})
+    assert dependencies.tool_names_for(ToolCapability.WEB_SEARCH) == frozenset(
+        {"search"}
+    )
 
 
 def test_agent_dependencies_reject_duplicate_or_unnamed_tools() -> None:
@@ -554,7 +608,9 @@ def test_agent_and_rag_adapter_have_no_runtime_service_locator_imports() -> None
         path.read_text(encoding="utf-8")
         for path in (package_root / "agent" / "workflow" / "nodes").glob("*.py")
     )
-    rag_adapter = (package_root / "tools" / "rag.py").read_text(encoding="utf-8")
+    rag_adapter = (project_root / "agent_tools" / "rag.py").read_text(
+        encoding="utf-8"
+    )
     mcp_adapter = (project_root / "mcp_service" / "rag_tools.py").read_text(
         encoding="utf-8"
     )
@@ -563,7 +619,7 @@ def test_agent_and_rag_adapter_have_no_runtime_service_locator_imports() -> None
     )
 
     assert "react_agent.utils.llm" not in agent_nodes
-    assert "react_agent.tools" not in agent_nodes
+    assert "agent_tools" not in agent_nodes
     assert "create_configured_rag_runtime" not in rag_adapter
     assert "create_configured_rag_runtime" not in mcp_adapter
     assert "get_rag_runtime_profile" not in application_runtime

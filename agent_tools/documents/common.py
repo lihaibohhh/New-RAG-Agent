@@ -4,7 +4,7 @@
 被 markdown.py（md_tool）与 make_docx.py（docx_tool）共享。
 将来若新增 pptx_tool / pdf_tool 等文档类工具，也可复用本模块。
 
-下划线前缀表示这是 tools 包的内部实现细节，不对外暴露为工具。
+这是 agent_tools.documents 包的内部实现细节，不对外暴露为工具。
 
 职责边界：
   - 只放「文档生成工具专属」的输入标准化与容错逻辑

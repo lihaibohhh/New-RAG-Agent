@@ -6,6 +6,8 @@ from collections.abc import AsyncIterable, Callable
 from dataclasses import dataclass
 from typing import Any, Literal, Mapping
 
+from agent_tools.presentation import TOOL_PROGRESS_LABELS
+
 
 @dataclass(frozen=True)
 class AgentProgress:
@@ -14,34 +16,6 @@ class AgentProgress:
     stage: str
     label: str
     state: Literal["running", "complete"] = "running"
-
-
-_TOOL_PROGRESS_LABELS: dict[str, tuple[str, str]] = {
-    "query_internal_knowledge": (
-        "正在查询内部知识库……",
-        "知识库查询完成，正在分析结果……",
-    ),
-    "search": (
-        "正在搜索公开信息……",
-        "公开信息搜索完成，正在分析结果……",
-    ),
-    "make_excel_table": (
-        "正在生成 Excel 文件……",
-        "Excel 文件生成完成，正在整理回答……",
-    ),
-    "docx_tool": (
-        "正在生成 Word 报告……",
-        "Word 报告生成完成，正在整理回答……",
-    ),
-    "md_tool": (
-        "正在生成 Markdown 文档……",
-        "Markdown 文档生成完成，正在整理回答……",
-    ),
-    "sql_tool": (
-        "正在查询结构化财务数据……",
-        "财务数据查询完成，正在分析结果……",
-    ),
-}
 
 
 def _safe_tool_name(value: Any) -> str:
@@ -96,7 +70,7 @@ def progress_from_event(event: Mapping[str, Any]) -> AgentProgress | None:
 
     if event_name in {"on_tool_start", "on_tool_end"}:
         tool_name = _safe_tool_name(event.get("name"))
-        labels = _TOOL_PROGRESS_LABELS.get(tool_name)
+        labels = TOOL_PROGRESS_LABELS.get(tool_name)
         if labels is None:
             action = "正在调用" if event_name == "on_tool_start" else "已完成"
             label = f"工具 {tool_name} {action}……"

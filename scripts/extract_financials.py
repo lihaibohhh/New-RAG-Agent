@@ -11,7 +11,7 @@ from react_agent.configuration.settings import settings
 
 
 DB_PATH = pathlib.Path(settings.tools.sql_store.DB_PATH)
-PDF_DIR = pathlib.Path(settings.tools.vector_store.data_dir)
+PDF_DIR = pathlib.Path(settings.data.data_dir)
 
 # LLM 调用失败时的重试参数
 _MAX_RETRIES = 3

@@ -16,12 +16,13 @@ tools:
     timeout: 15
     max_search_results: 10
 
-  vector_store:
-    data_dir: "./data"
-    CHROMA_DB_PATH: "./chroma_db"
-    CHUNK_STORE_PATH: "./data/knowledge/chunks.sqlite3"
-    HASH_RECORD_PATH: "./chroma_db/file_hashes.json"
-
   sql_store:
     DB_PATH: "./data_sql/financials.db"
+
+# 本地辅助脚本使用的数据路径；Knowledge Service 的运行配置由 knowledge 管理。
+data:
+  data_dir: "./data"
+  CHROMA_DB_PATH: "./chroma_db"
+  CHUNK_STORE_PATH: "./data/knowledge/chunks.sqlite3"
+  HASH_RECORD_PATH: "./chroma_db/file_hashes.json"
 

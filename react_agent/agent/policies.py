@@ -96,6 +96,7 @@ def model_termination_reason(
     config: ExecutionBudget,
     *,
     tool_names: list[str],
+    retrieval_tool_names: frozenset[str],
     next_model_round: int,
     completed_tool_batches: int,
     attempted_rag_calls: int,
@@ -105,7 +106,7 @@ def model_termination_reason(
         return None
     if (
         attempted_rag_calls >= config.rag_call_limit
-        and "query_internal_knowledge" in tool_names
+        and any(name in retrieval_tool_names for name in tool_names)
     ):
         return TerminationReason.RAG_CALL_BUDGET_EXHAUSTED.value
     if next_model_round >= config.max_model_rounds:

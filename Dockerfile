@@ -21,6 +21,7 @@ RUN groupadd --gid 10001 app \
 # 专用索引误当成 typing-extensions、flit-core 等通用包的唯一来源。
 # BuildKit 缓存只加速下载，不会进入最终镜像。
 COPY --chown=app:app pyproject.toml ./
+COPY --chown=app:app agent_tools ./agent_tools
 COPY --chown=app:app react_agent ./react_agent
 COPY --chown=app:app knowledge ./knowledge
 COPY --chown=app:app mcp_service ./mcp_service
