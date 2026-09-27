@@ -1,4 +1,4 @@
-"""所有 Agent Tool 共用的稳定结果信封。"""
+"""Agent 与工具适配器共用的稳定结果信封。"""
 from __future__ import annotations
 
 import json

@@ -29,7 +29,7 @@ def extract_cumulative_snapshot(result: dict[str, Any]) -> dict[str, Any]:
     """提取供下一轮差值计算使用的累计状态。"""
     snapshot = {key: result.get(key, 0) for key in _CUMULATIVE_KEYS}
     snapshot.update({key: result.get(key, "") for key in _CURRENT_VALUE_KEYS})
-    snapshot["tool_runs_count"] = len(result.get("tool_runs", []))
+    snapshot["tool_run_count"] = int(result.get("tool_run_count", 0) or 0)
     return snapshot
 
 
@@ -44,10 +44,11 @@ def extract_usage(
         for key in _CUMULATIVE_KEYS
     }
     usage.update({key: result.get(key, "") for key in _CURRENT_VALUE_KEYS})
-    # tool_runs 在 Agent State 中最多保留 50 条，避免窗口滚动产生负数。
+    # 使用不受历史轨迹容量限制的单调计数器；不能根据 tool_runs 长度做差。
     usage["tool_runs_count"] = max(
         0,
-        len(result.get("tool_runs", [])) - int(previous.get("tool_runs_count", 0)),
+        int(result.get("tool_run_count", 0) or 0)
+        - int(previous.get("tool_run_count", 0) or 0),
     )
     return usage
 

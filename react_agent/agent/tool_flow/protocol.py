@@ -7,7 +7,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
 
-from react_agent.tooling.results import tool_error
+from agent_tools.contracts.results import tool_error
 
 
 SYSTEM_SENTINEL_NAMES = frozenset({"system_monitor", "system_terminator"})

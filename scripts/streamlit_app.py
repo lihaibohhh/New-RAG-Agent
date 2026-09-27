@@ -320,10 +320,13 @@ if prompt := st.session_state.pending_prompt:
             st.session_state.last_turn_display = usage_display
 
             current_tool_count = int(usage.get("tool_runs_count", 0))
-            all_tool_runs = list(result.get("tool_runs") or [])
-            current_tool_runs = (
-                all_tool_runs[-current_tool_count:] if current_tool_count else []
-            )
+            current_tool_runs = list(result.get("turn_tool_runs") or [])
+            if current_tool_count != len(current_tool_runs):
+                logger.warning(
+                    "本轮工具计数与轨迹数量不一致: count=%s runs=%s",
+                    current_tool_count,
+                    len(current_tool_runs),
+                )
 
             # Agent 结果一旦返回，先原子化写入页面状态，再做展示动画。
             # 若动画期间发生 rerun，下一次渲染仍能恢复完整回答。

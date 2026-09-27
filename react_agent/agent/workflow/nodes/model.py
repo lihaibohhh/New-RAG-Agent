@@ -10,7 +10,10 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.errors import GraphRecursionError
 from langgraph.runtime import Runtime
 
-from react_agent.agent.contracts.dependencies import AgentDependencies
+from react_agent.agent.contracts.dependencies import (
+    AgentDependencies,
+    ToolCapability,
+)
 from react_agent.agent.contracts.state import State
 from react_agent.agent.model_execution import (
     invoke_chat_model,
@@ -76,10 +79,17 @@ async def call_model(
         return update
     tool_call_ids = extract_tool_call_ids(response)
     tool_names = tool_names_from_response(response)
-    rag_calls = count_attempted_rag_calls_in_current_turn(list(state.messages))
+    retrieval_tool_names = dependencies.tool_names_for(
+        ToolCapability.KNOWLEDGE_RETRIEVAL
+    )
+    rag_calls = count_attempted_rag_calls_in_current_turn(
+        list(state.messages),
+        retrieval_tool_names=retrieval_tool_names,
+    )
     termination_reason = model_termination_reason(
         dependencies.config,
         tool_names=tool_names if tool_call_ids else [],
+        retrieval_tool_names=retrieval_tool_names,
         next_model_round=next_model_round,
         completed_tool_batches=state.turn_tool_batches,
         attempted_rag_calls=rag_calls,

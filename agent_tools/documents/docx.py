@@ -23,9 +23,9 @@ from pathlib import Path
 from typing import Any
 
 from langchain_core.tools import tool
-from react_agent.tooling.results import tool_error as _err
-from react_agent.tooling.results import tool_success as _ok
-from react_agent.tools._doc_common import (
+from agent_tools.contracts.results import tool_error as _err
+from agent_tools.contracts.results import tool_success as _ok
+from agent_tools.documents.common import (
     normalize_sections,
     coerce_metadata,
     build_filename,

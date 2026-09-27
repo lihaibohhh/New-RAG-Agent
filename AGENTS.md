@@ -10,7 +10,7 @@
 
 - `react_agent/agent/`：Agent 状态、节点、路由、工具策略、用量计算、图编译、执行上下文与对话用例。
 - `react_agent/agent/context_management/`：从完整 Agent State 构造单次模型输入，管理轮次分段、Token 预算、工具协议修复、证据索引与后续压缩契约。
-- `react_agent/tooling/`：Agent 与工具适配器共享的 ToolResult 信封和重试执行契约。
+- `agent_tools/contracts/`：Agent 与工具适配器共享的 ToolResult、标准化检索结果和重试执行契约。
 - `react_agent/models/`：LLM Provider 解析、创建与缓存；由 Runtime、评测和显式脚本消费。
 - `react_agent/infrastructure/`：Redis 等跨用例共享的技术资源适配器，不得反向依赖 Agent。
 - `react_agent/observability/`：应用会话用量记录与展示；知识库建库计时归 `knowledge/ingestion/observability.py`。
@@ -25,7 +25,7 @@
 - `knowledge/client/`：独立 Knowledge Service HTTP 客户端，以及互不暴露能力的远程 RAG/Ingestion Runtime；只依赖公共契约，不得反向依赖 Agent、Server 或 MCP。
 - `knowledge/transport/`：Knowledge HTTP 请求/响应 Schema 与领域对象 Codec 的中立唯一实现；不得依赖 FastAPI、httpx、Client、Server 或 RAG/Ingestion 内部类型。
 - `knowledge/server/`：Knowledge Service ASGI 入口、服务端配置和环境组合根；请求/响应模型统一使用 `knowledge.transport`，且该进程是唯一允许打开本地知识库资源的在线进程，不得依赖 `react_agent`。
-- `react_agent/tools/`：RAG、搜索、Excel、Word、Markdown 和 SQL 协议适配器；Agent 实际工具集合由 `react_agent/runtime/container.py` 组装。
+- `agent_tools/`：独立管理 RAG、搜索、Excel、Word、Markdown 和 SQL 协议适配器及其配置模型；不得反向依赖 `react_agent`，Agent 实际工具集合和能力映射由 `react_agent/runtime/container.py` 组装。
 - `mcp_service/`：独立 MCP Server 协议适配器、进程生命周期和工具注册，只依赖 Knowledge 公共契约/客户端；不得依赖 `react_agent`。`mcp_service.main:main` 是正式命令入口，根目录 `mcp_rag_server.py` 仅作兼容转发。
 - `api/`：FastAPI 服务、鉴权、限流、指标、错误处理和版本化路由。
 - `tests/api/`：使用 FakeAgent 与 fakeredis 的离线 API 回归测试。

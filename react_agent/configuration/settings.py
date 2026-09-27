@@ -23,6 +23,8 @@ from typing import Any, Literal
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, SecretStr, model_validator
 
+from agent_tools.config import AgentToolsConfig
+
 
 # ---------------------------------------------------------------------------
 # 0. 定位根目录并加载 .env
@@ -265,50 +267,8 @@ class RagIngestionConfig(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# 3. YAML 层 Pydantic 模型（沿用你原有的结构，补充 absolute path 修正）
+# 3. YAML 层 Pydantic 模型（应用聚合，不拥有工具字段语义）
 # ---------------------------------------------------------------------------
-class RagToolConfig(BaseModel):
-    """Agent 调用远程 Knowledge Service 时的工具策略。"""
-
-    max_retries: int = Field(default=2, ge=0)
-    client_timeout: float = Field(default=150.0, gt=0)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _load_from_env(cls, values: Any) -> dict[str, Any]:
-        payload = dict(values or {})
-        timeout = os.getenv("KNOWLEDGE_SERVICE_TIMEOUT", "").strip()
-        if timeout:
-            payload["client_timeout"] = timeout
-        return payload
-
-
-class ExcelConfig(BaseModel):
-    mode: Literal["timestamp", "overwrite", "append"] = "timestamp"
-    keep_backup: bool = False
-
-
-class SearchConfig(BaseModel):
-    max_retries: int = 2
-    timeout: int = 15
-    max_search_results: int = 10
-
-    @model_validator(mode="before")
-    @classmethod
-    def _load_from_env(cls, values: Any) -> dict[str, Any]:
-        payload = dict(values or {})
-        env_mapping = {
-            "max_retries": "SEARCH_MAX_RETRIES",
-            "timeout": "SEARCH_TIMEOUT",
-            "max_search_results": "MAX_SEARCH_RESULTS",
-        }
-        for field_name, env_name in env_mapping.items():
-            value = os.getenv(env_name, "").strip()
-            if value:
-                payload[field_name] = value
-        return payload
-
-
 class DatabaseConfig(BaseModel):
     data_dir: str = str(_SRC_DIR / "data")
     # Chroma 数据库所在目录
@@ -348,20 +308,6 @@ class DatabaseConfig(BaseModel):
         return self
 
 
-class SqlDataConfig(BaseModel):
-    DB_PATH: str = str(_SRC_DIR / "data_sql" / "financials.db")
-
-    @model_validator(mode="before")
-    @classmethod
-    def _load_from_env(cls, values: Any) -> dict[str, Any]:
-        return _path_env_payload(values, {"DB_PATH": ("SQL_DB_PATH", "DB_PATH")})
-
-    @model_validator(mode="after")
-    def _resolve_path(self) -> "SqlDataConfig":
-        object.__setattr__(self, "DB_PATH", resolve_app_path(self.DB_PATH))
-        return self
-
-
 class FileStorageConfig(BaseModel):
     """Agent 生成文件的持久化目录。"""
 
@@ -378,16 +324,9 @@ class FileStorageConfig(BaseModel):
         return self
 
 
-class ToolsConfig(BaseModel):
-    rag: RagToolConfig = RagToolConfig()
-    excel: ExcelConfig = ExcelConfig()
-    search: SearchConfig = SearchConfig()
-    vector_store: DatabaseConfig = DatabaseConfig()
-    sql_store: SqlDataConfig = SqlDataConfig()
-
-
 class YamlConfig(BaseModel):
-    tools: ToolsConfig = ToolsConfig()
+    tools: AgentToolsConfig = Field(default_factory=AgentToolsConfig)
+    data: DatabaseConfig = Field(default_factory=DatabaseConfig)
 
 
 def _load_yaml() -> YamlConfig:
@@ -440,8 +379,13 @@ class Settings(BaseModel):
         return _SRC_DIR
 
     @property
-    def tools(self) -> ToolsConfig:
+    def tools(self) -> AgentToolsConfig:
         return self.yaml.tools  # 转发给 yaml 层
+
+    @property
+    def data(self) -> DatabaseConfig:
+        """返回非工具专属的本地数据路径配置。"""
+        return self.yaml.data
 
 
 # ---------------------------------------------------------------------------
@@ -479,7 +423,7 @@ if __name__ == "__main__":
     )
     print()
     print()
-    print(f"[YAML]    data_dir = {settings.yaml.tools.vector_store.data_dir}")
+    print(f"[YAML]    data_dir = {settings.data.data_dir}")
     print(f"[YAML]    excel.mode = {settings.yaml.tools.excel.mode}")
     print("=" * 60)
     print("✅ 配置加载完成")

@@ -14,7 +14,10 @@ from react_agent.agent.context_management.evidence import (
     merge_historical_evidence,
     merge_visible_evidence,
 )
-from react_agent.agent.contracts.dependencies import AgentDependencies
+from react_agent.agent.contracts.dependencies import (
+    AgentDependencies,
+    ToolCapability,
+)
 from react_agent.agent.contracts.state import State
 from react_agent.agent.policies import (
     TerminationReason,
@@ -70,9 +73,13 @@ async def postprocess_tools(
 ) -> dict[str, Any]:
     """将最新工具消息归一化，并应用工具批次终止策略。"""
     agent_config = runtime.context.config
+    retrieval_tool_names = runtime.context.tool_names_for(
+        ToolCapability.KNOWLEDGE_RETRIEVAL
+    )
     batch = parse_tool_batch(
         list(state.messages),
         timezone=agent_config.timezone,
+        retrieval_tool_names=retrieval_tool_names,
     )
     if batch is None:
         return {}
@@ -97,6 +104,8 @@ async def postprocess_tools(
         termination_reason = TerminationReason.GRAPH_STEP_BUDGET_EXHAUSTED.value
     update: dict[str, Any] = {
         "tool_runs": batch.runs,
+        "turn_tool_runs": [*state.turn_tool_runs, *batch.runs],
+        "tool_run_count": state.tool_run_count + len(batch.runs),
         "consecutive_failures": batch.consecutive_rag_misses,
         "turn_tool_batches": next_tool_batch,
         "last_tool_batch_errors": batch.errors,
@@ -122,12 +131,14 @@ async def postprocess_tools(
     evidence, omitted = merge_visible_evidence(
         state.turn_evidence,
         recent_tool_messages,
+        retrieval_tool_names=retrieval_tool_names,
     )
     update["turn_evidence"] = evidence
     update["turn_evidence_omitted_count"] = state.turn_evidence_omitted_count + omitted
     historical, historical_omitted = merge_historical_evidence(
         state.conversation_evidence,
         recent_tool_messages,
+        retrieval_tool_names=retrieval_tool_names,
     )
     update["conversation_evidence"] = historical
     update["conversation_evidence_omitted_count"] = (

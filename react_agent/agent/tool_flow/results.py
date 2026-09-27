@@ -7,15 +7,15 @@ from typing import Any
 
 from langchain_core.messages import AnyMessage, ToolMessage
 
+from agent_tools.contracts.retrieval import decode_retrieval_outcome
 from react_agent.agent.time import now_iso_in_timezone
 from react_agent.agent.tool_flow.protocol import (
     extract_recent_tool_messages,
     find_last_real_human_index,
 )
-from react_agent.tooling.results import decode_tool_result
+from agent_tools.contracts.results import decode_tool_result
 
 
-_RAG_TOOL_NAME = "query_internal_knowledge"
 _NON_EXECUTED_RAG_ERROR_CODES = frozenset(
     {
         "GRAPH_STEP_BUDGET_EXHAUSTED",
@@ -36,7 +36,10 @@ class ToolBatch:
     consecutive_rag_misses: int
 
 
-def _current_turn_rag_messages(messages: list[AnyMessage]) -> list[ToolMessage]:
+def _current_turn_rag_messages(
+    messages: list[AnyMessage],
+    retrieval_tool_names: frozenset[str],
+) -> list[ToolMessage]:
     last_human_index = find_last_real_human_index(messages)
     if last_human_index < 0:
         return []
@@ -44,7 +47,7 @@ def _current_turn_rag_messages(messages: list[AnyMessage]) -> list[ToolMessage]:
         message
         for message in messages[last_human_index:]
         if isinstance(message, ToolMessage)
-        and getattr(message, "name", None) == _RAG_TOOL_NAME
+        and getattr(message, "name", None) in retrieval_tool_names
     ]
 
 
@@ -55,7 +58,11 @@ def _try_decode(message: ToolMessage) -> dict[str, Any] | None:
         return None
 
 
-def count_attempted_rag_calls_in_current_turn(messages: list[AnyMessage]) -> int:
+def count_attempted_rag_calls_in_current_turn(
+    messages: list[AnyMessage],
+    *,
+    retrieval_tool_names: frozenset[str],
+) -> int:
     """Count RAG calls accepted for execution in the current user turn.
 
     Successful and failed executions both consume the hard call budget. Calls
@@ -63,7 +70,7 @@ def count_attempted_rag_calls_in_current_turn(messages: list[AnyMessage]) -> int
     conservatively because the tool was already dispatched.
     """
     count = 0
-    for message in _current_turn_rag_messages(messages):
+    for message in _current_turn_rag_messages(messages, retrieval_tool_names):
         payload = _try_decode(message)
         if payload is None:
             count += 1
@@ -80,10 +87,14 @@ def count_attempted_rag_calls_in_current_turn(messages: list[AnyMessage]) -> int
     return count
 
 
-def count_successful_rag_calls_in_current_turn(messages: list[AnyMessage]) -> int:
+def count_successful_rag_calls_in_current_turn(
+    messages: list[AnyMessage],
+    *,
+    retrieval_tool_names: frozenset[str],
+) -> int:
     """统计当前用户轮次中成功完成的私有知识库检索次数。"""
     count = 0
-    for message in _current_turn_rag_messages(messages):
+    for message in _current_turn_rag_messages(messages, retrieval_tool_names):
         payload = _try_decode(message)
         if payload is not None and payload.get("ok") is True:
             count += 1
@@ -94,6 +105,7 @@ def parse_tool_batch(
     messages: list[AnyMessage],
     *,
     timezone: str,
+    retrieval_tool_names: frozenset[str],
 ) -> ToolBatch | None:
     """解析消息尾部工具结果，并计算当前轮连续 RAG 未命中次数。"""
     tool_messages = extract_recent_tool_messages(messages)
@@ -140,7 +152,10 @@ def parse_tool_batch(
         errors=errors,
         error_count=len(errors),
         last_ok_result=last_ok_result,
-        consecutive_rag_misses=_count_consecutive_rag_misses(messages),
+        consecutive_rag_misses=_count_consecutive_rag_misses(
+            messages,
+            retrieval_tool_names,
+        ),
     )
 
 
@@ -148,17 +163,18 @@ def _source_summaries(
     payload: dict[str, Any], *, limit: int = 12
 ) -> list[dict[str, Any]]:
     """为观测面板提取有界来源位置，不复制工具正文。"""
-    data = payload.get("data")
-    if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+    try:
+        outcome = decode_retrieval_outcome(payload)
+    except (TypeError, ValueError):
+        return []
+    if outcome is None:
         return []
     sources: list[dict[str, Any]] = []
     seen: set[tuple[str, Any, str]] = set()
-    for item in data["results"]:
-        if not isinstance(item, dict):
-            continue
-        source = str(item.get("source") or item.get("source_file") or "")
-        page = item.get("page", item.get("source_page"))
-        chunk_id = str(item.get("chunk_id") or "")
+    for item in outcome.evidence:
+        source = item.source_file
+        page = item.source_page
+        chunk_id = item.chunk_id
         if not source and page is None and not chunk_id:
             continue
         key = (source, page, chunk_id)
@@ -177,16 +193,19 @@ def _source_summaries(
     return sources
 
 
-def _count_consecutive_rag_misses(messages: list[AnyMessage]) -> int:
+def _count_consecutive_rag_misses(
+    messages: list[AnyMessage],
+    retrieval_tool_names: frozenset[str],
+) -> int:
     results: list[bool] = []
-    for message in _current_turn_rag_messages(messages):
-        payload = _try_decode(message)
-        if payload is None or payload.get("ok") is not True:
-            continue
+    for message in _current_turn_rag_messages(messages, retrieval_tool_names):
         try:
-            has_content = payload["meta"]["has_relevant_content"]
-        except (KeyError, TypeError):
-            has_content = None
+            outcome = decode_retrieval_outcome(getattr(message, "content", None))
+        except (TypeError, ValueError):
+            continue
+        if outcome is None or not outcome.ok:
+            continue
+        has_content = outcome.has_relevant_content
         if has_content is not None:
             results.append(bool(has_content))
 

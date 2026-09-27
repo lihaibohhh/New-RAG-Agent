@@ -31,7 +31,23 @@ services:
           create_host_path: false
 
   agent-app:
+    command:
+      - python
+      - -m
+      - streamlit
+      - run
+      - scripts/streamlit_app.py
+      - --server.address=0.0.0.0
+      - --server.headless=true
     volumes:
+      # Agent 使用的独立工具适配器、配置与结果协议。
+      - type: bind
+        source: ./agent_tools
+        target: /app/agent_tools
+        read_only: true
+        bind:
+          create_host_path: false
+
       # Streamlit、FastAPI、MCP 和建库任务共用的主要 Python 包。
       - type: bind
         source: ./react_agent
@@ -91,6 +107,13 @@ services:
   eval-runner:
     # 一次性评测容器也读取宿主机最新源码；Python 改动无需重建镜像。
     volumes:
+      - type: bind
+        source: ./agent_tools
+        target: /app/agent_tools
+        read_only: true
+        bind:
+          create_host_path: false
+
       - type: bind
         source: ./react_agent
         target: /app/react_agent

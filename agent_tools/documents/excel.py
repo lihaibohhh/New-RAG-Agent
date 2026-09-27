@@ -6,8 +6,8 @@ from typing import Any
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
-from react_agent.tooling.results import tool_error as _err
-from react_agent.tooling.results import tool_success as _ok
+from agent_tools.contracts.results import tool_error as _err
+from agent_tools.contracts.results import tool_success as _ok
 
 
 class ExcelInput(BaseModel):

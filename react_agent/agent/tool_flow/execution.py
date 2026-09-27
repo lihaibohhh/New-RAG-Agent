@@ -11,7 +11,10 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.prebuilt import ToolNode
 
-from react_agent.agent.contracts.dependencies import AgentDependencies
+from react_agent.agent.contracts.dependencies import (
+    AgentDependencies,
+    ToolCapability,
+)
 from react_agent.agent.contracts.state import State
 from react_agent.agent.policies import TerminationReason
 from react_agent.agent.tool_flow.payload import bound_tool_payload
@@ -22,11 +25,10 @@ from react_agent.agent.tool_flow.protocol import (
 from react_agent.agent.tool_flow.results import (
     count_attempted_rag_calls_in_current_turn,
 )
-from react_agent.tooling.results import tool_error
+from agent_tools.contracts.results import tool_error
 
 
 logger = logging.getLogger(__name__)
-_RAG_TOOL_NAME = "query_internal_knowledge"
 
 
 def bound_tool_messages(messages: list[Any], max_chars: int) -> list[Any]:
@@ -51,6 +53,9 @@ async def execute_dynamic_tools(
     """只执行当前配置允许的工具，并为所有调用生成协议应答。"""
     agent_config = dependencies.config
     active_tools, active_names = dependencies.active_tools()
+    retrieval_tool_names = dependencies.tool_names_for(
+        ToolCapability.KNOWLEDGE_RETRIEVAL
+    )
     try:
         last_message = state.messages[-1] if state.messages else None
         invalid_messages = _invalid_tool_messages(last_message)
@@ -75,12 +80,14 @@ async def execute_dynamic_tools(
             active_names,
         )
         attempted_rag_calls = count_attempted_rag_calls_in_current_turn(
-            list(state.messages)
+            list(state.messages),
+            retrieval_tool_names=retrieval_tool_names,
         )
         allowed_calls, budget_blocked_calls = _apply_rag_call_budget(
             executable_calls,
             attempted=attempted_rag_calls,
             limit=agent_config.rag_call_limit,
+            retrieval_tool_names=retrieval_tool_names,
         )
         if not disabled_calls and not budget_blocked_calls:
             node = ToolNode(active_tools, handle_tool_errors=True)
@@ -180,13 +187,14 @@ def _apply_rag_call_budget(
     *,
     attempted: int,
     limit: int,
+    retrieval_tool_names: frozenset[str],
 ) -> tuple[list[Any], list[Any]]:
     """Reserve remaining RAG slots while preserving non-RAG calls."""
     remaining = max(0, limit - attempted)
     allowed: list[Any] = []
     blocked: list[Any] = []
     for tool_call in calls:
-        if get_tool_call_name(tool_call) != _RAG_TOOL_NAME:
+        if get_tool_call_name(tool_call) not in retrieval_tool_names:
             allowed.append(tool_call)
         elif remaining > 0:
             allowed.append(tool_call)
@@ -212,10 +220,10 @@ def _rag_budget_messages(
     return [
         ToolMessage(
             tool_call_id=tool_call.get("id", ""),
-            name=_RAG_TOOL_NAME,
+            name=get_tool_call_name(tool_call) or "unknown",
             content=json.dumps(
                 tool_error(
-                    tool_name=_RAG_TOOL_NAME,
+                    tool_name=get_tool_call_name(tool_call) or "unknown",
                     query=_tool_query(tool_call),
                     code="RAG_CALL_BUDGET_EXHAUSTED",
                     message="本轮知识库检索次数已达到上限，该调用未执行。",

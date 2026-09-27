@@ -14,9 +14,13 @@ from langgraph.errors import GraphRecursionError
 from langgraph.graph import StateGraph
 
 from react_agent.agent.config import AgentContext
-from react_agent.agent.contracts.dependencies import AgentDependencies
+from react_agent.agent.contracts.dependencies import (
+    AgentDependencies,
+    ToolCapability,
+)
 from react_agent.agent.contracts.state import InputState, State
 from react_agent.agent.service import AgentService
+from react_agent.agent.prompts import SYSTEM_PROMPT
 from react_agent.agent.tool_flow import (
     bound_tool_payload,
     count_attempted_rag_calls_in_current_turn,
@@ -31,8 +35,14 @@ from react_agent.agent.workflow.nodes import (
     postprocess_tools,
 )
 from react_agent.agent.workflow.routing import route_after_postprocess
-from react_agent.tooling.results import tool_error, tool_success
-from react_agent.tooling.retry import with_retry
+from agent_tools.contracts.results import tool_error, tool_success
+from agent_tools.contracts.retry import with_retry
+
+
+RETRIEVAL_TOOL_NAMES = frozenset({"query_internal_knowledge"})
+RAG_CAPABILITIES = {
+    "query_internal_knowledge": frozenset({ToolCapability.KNOWLEDGE_RETRIEVAL})
+}
 
 
 def test_tool_call_ids_cover_valid_invalid_and_provider_payloads() -> None:
@@ -740,6 +750,7 @@ async def test_rag_miss_is_finalized_by_tool_free_model() -> None:
         config=context,
         model_provider=lambda: model,
         tools=(rag_tool,),
+        tool_capabilities=RAG_CAPABILITIES,
     )
 
     result = (
@@ -867,8 +878,14 @@ def test_rag_call_policy_counts_attempts_and_successes_in_current_turn() -> None
         ),
     ]
 
-    assert count_attempted_rag_calls_in_current_turn(messages) == 2
-    assert count_successful_rag_calls_in_current_turn(messages) == 1
+    assert count_attempted_rag_calls_in_current_turn(
+        messages,
+        retrieval_tool_names=RETRIEVAL_TOOL_NAMES,
+    ) == 2
+    assert count_successful_rag_calls_in_current_turn(
+        messages,
+        retrieval_tool_names=RETRIEVAL_TOOL_NAMES,
+    ) == 1
 
 
 @pytest.mark.asyncio
@@ -964,6 +981,7 @@ async def test_rag_call_budget_caps_batch_and_finalizes_with_protocol_closed() -
             ),
             StructuredTool.from_function(search, description="测试搜索工具"),
         ),
+        tool_capabilities=RAG_CAPABILITIES,
     )
 
     result = await build_base_graph().compile().ainvoke(
@@ -1016,6 +1034,8 @@ async def test_rag_call_budget_caps_batch_and_finalizes_with_protocol_closed() -
     assert result["messages"][-1].content == "基于配额内的检索结果生成最终回答。"
     assert sum(run["executed"] is True for run in result["tool_runs"]) == 4
     assert sum(run["executed"] is False for run in result["tool_runs"]) == 3
+    assert result["turn_tool_runs"] == result["tool_runs"]
+    assert result["tool_run_count"] == 7
 
 
 def test_tool_payload_bounding_preserves_envelope_and_traceability() -> None:
@@ -1215,6 +1235,7 @@ def test_context_legacy_entrypoints_are_fully_removed() -> None:
 def test_internal_symbols_are_not_imported_across_project_modules() -> None:
     project_root = Path(__file__).parent.parent
     source_roots = (
+        project_root / "agent_tools",
         project_root / "react_agent",
         project_root / "api",
         project_root / "knowledge",
@@ -1228,7 +1249,9 @@ def test_internal_symbols_are_not_imported_across_project_modules() -> None:
             for node in ast.walk(tree):
                 if not isinstance(node, ast.ImportFrom):
                     continue
-                if not (node.module or "").startswith("react_agent."):
+                if not (node.module or "").startswith(
+                    ("agent_tools.", "react_agent.")
+                ):
                     continue
                 for imported in node.names:
                     if imported.name.startswith("_"):
@@ -1239,10 +1262,25 @@ def test_internal_symbols_are_not_imported_across_project_modules() -> None:
     assert violations == []
 
 
+def test_agent_tools_do_not_depend_on_react_agent() -> None:
+    project_root = Path(__file__).parent.parent
+    tools_root = project_root / "agent_tools"
+    violations = {
+        str(path.relative_to(project_root)): _imports_from(path, "react_agent")
+        for path in _python_sources(tools_root)
+        if _imports_from(path, "react_agent")
+    }
+
+    assert violations == {}
+
+
 def test_agent_does_not_depend_on_outbound_adapter_implementations() -> None:
     package_root = Path(__file__).parent.parent / "react_agent"
     forbidden_prefixes = (
-        "react_agent.tools",
+        "agent_tools.documents",
+        "agent_tools.rag",
+        "agent_tools.search",
+        "agent_tools.sql",
         "react_agent.models",
         "react_agent.infrastructure",
     )
@@ -1258,12 +1296,30 @@ def test_agent_does_not_depend_on_outbound_adapter_implementations() -> None:
     assert violations == {}
 
 
+def test_react_agent_does_not_hardcode_concrete_retrieval_tool_name() -> None:
+    project_root = Path(__file__).parent.parent
+    package_root = project_root / "react_agent"
+    violations = [
+        str(path.relative_to(project_root))
+        for path in _python_sources(package_root)
+        if "query_internal_knowledge" in path.read_text(encoding="utf-8")
+    ]
+
+    assert violations == []
+
+
+def test_default_prompt_describes_retrieval_semantics_not_wire_fields() -> None:
+    assert "query_internal_knowledge" not in SYSTEM_PROMPT
+    assert "has_relevant_content" not in SYSTEM_PROMPT
+    assert "没有返回可用证据" in SYSTEM_PROMPT
+
+
 def test_agent_nodes_remain_thin_orchestration_adapters() -> None:
     project_root = Path(__file__).parent.parent
     nodes_root = project_root / "react_agent" / "agent" / "workflow" / "nodes"
     forbidden_dependencies = (
         "langgraph.prebuilt",
-        "react_agent.tooling",
+        "agent_tools.contracts",
         "tiktoken",
     )
 

@@ -89,6 +89,12 @@ class State(InputState):
     与 tools.py 的统一返回结构天然匹配：ok/data/error/meta
     """
 
+    turn_tool_runs: List[Dict[str, Any]] = field(default_factory=list)
+    """当前用户轮次的完整工具轨迹；进入下一轮时清空。"""
+
+    tool_run_count: int = 0
+    """会话累计工具调用次数；不受 ``tool_runs`` 历史容量限制。"""
+
     tool_error_count: int = 0
     """工具失败次数（后续可用于：连续失败 -> 回退回答/停止调用）。"""
 

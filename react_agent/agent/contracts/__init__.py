@@ -3,6 +3,7 @@
 from react_agent.agent.contracts.dependencies import (
     AgentDependencies,
     ModelProvider,
+    ToolCapability,
 )
 from react_agent.agent.contracts.state import InputState, State
 
@@ -11,4 +12,5 @@ __all__ = [
     "InputState",
     "ModelProvider",
     "State",
+    "ToolCapability",
 ]

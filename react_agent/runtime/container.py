@@ -7,7 +7,10 @@ from functools import partial
 from typing import Any
 
 from react_agent.agent.config import AgentContext
-from react_agent.agent.contracts.dependencies import AgentDependencies
+from react_agent.agent.contracts.dependencies import (
+    AgentDependencies,
+    ToolCapability,
+)
 from react_agent.agent.workflow.graph import compile_agent_graph
 from react_agent.agent.service import AgentService
 from react_agent.conversations.configuration import normalize_checkpoint_backend
@@ -22,11 +25,11 @@ from react_agent.conversations.service import ConversationService
 from react_agent.configuration.settings import settings
 from knowledge.client import create_configured_rag_runtime
 from knowledge.runtime_ports import AgentRagRuntimePort
-from react_agent.tools.excel import create_excel_tool
-from react_agent.tools.make_docx import create_docx_tool
-from react_agent.tools.markdown import create_markdown_tool
-from react_agent.tools.rag import create_rag_tool
-from react_agent.tools.search import create_search_tool
+from agent_tools.documents.docx import create_docx_tool
+from agent_tools.documents.excel import create_excel_tool
+from agent_tools.documents.markdown import create_markdown_tool
+from agent_tools.rag import create_rag_tool
+from agent_tools.search import create_search_tool
 from react_agent.models import bind_output_token_limit, load_chat_model
 from react_agent.metering.pricing import estimate_configured_model_cost
 from react_agent.skills import build_builtin_skill_registry
@@ -96,13 +99,6 @@ def _compose_agent_dependencies(
         max_retries=settings.tools.rag.max_retries,
         timeout=settings.tools.rag.client_timeout,
     )
-    search_tool = create_search_tool(
-        client_provider=_create_tavily_client,
-        max_results=settings.tools.search.max_search_results,
-        api_key_configured=bool(settings.secrets.TAVILY_API_KEY.strip()),
-        max_retries=settings.tools.search.max_retries,
-        timeout=settings.tools.search.timeout,
-    )
     output_dir = settings.storage.OUTPUT_DIR
     excel_tool = create_excel_tool(
         output_dir=output_dir,
@@ -112,16 +108,29 @@ def _compose_agent_dependencies(
     docx_tool = create_docx_tool(output_dir=output_dir)
     markdown_tool = create_markdown_tool(output_dir=output_dir)
     tools: tuple[Any, ...] = (
-        search_tool,
         excel_tool,
         rag_tool,
         docx_tool,
         markdown_tool,
     )
+    capabilities = {
+        rag_tool.name: frozenset({ToolCapability.KNOWLEDGE_RETRIEVAL}),
+    }
+    if agent_context.enable_web_search:
+        search_tool = create_search_tool(
+            client_provider=_create_tavily_client,
+            max_results=settings.tools.search.max_search_results,
+            api_key_configured=bool(settings.secrets.TAVILY_API_KEY.strip()),
+            max_retries=settings.tools.search.max_retries,
+            timeout=settings.tools.search.timeout,
+        )
+        tools = (search_tool, *tools)
+        capabilities[search_tool.name] = frozenset({ToolCapability.WEB_SEARCH})
     return AgentDependencies(
         config=agent_context,
         model_provider=partial(load_chat_model, settings.llm.model),
         tools=tools,
+        tool_capabilities=capabilities,
         skill_registry=build_builtin_skill_registry(),
         model_ref=settings.llm.model,
         cost_estimator=estimate_configured_model_cost,

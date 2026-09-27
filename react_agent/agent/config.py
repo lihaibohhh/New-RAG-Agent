@@ -181,8 +181,7 @@ class AgentContext:
         default=6,
         metadata={
             "description": (
-                "单轮对话内被 Agent 接受并执行的 "
-                "query_internal_knowledge 调用次数硬上限；"
+                "单轮对话内被 Agent 接受并执行的知识检索工具调用次数硬上限；"
                 "成功与失败均占用配额，本地预检拦截不占用。"
             )
         },
@@ -191,7 +190,7 @@ class AgentContext:
     consecutive_failure_threshold: int = field(
         default=2,
         metadata={
-            "description": "RAG 连续无效检索（has_relevant_content=False）次数达到该值后强制拒答终止。"
+            "description": "RAG 连续未返回有效证据的次数达到该值后强制拒答终止。"
             "该值会注入 system_prompt 的拒答规则文案，修改此项无需再手动同步提示词。"
         },
     )
