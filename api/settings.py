@@ -25,7 +25,15 @@ class APISettings(BaseSettings):
         gt=0,
         description="每个 API Key 每日 token 上限（默认 100 万）。超限返回 429。设为极大值可禁用。",
     )
-
+    redis_url: str = Field(
+        default="redis://localhost:6379",
+        validation_alias="REDIS_URL",
+    )
+    redis_max_connections: int = Field(
+        default=20,
+        gt=0,
+        validation_alias="REDIS_MAX_CONNECTIONS",
+    )
     model_config = SettingsConfigDict(
         env_prefix="API_",
         env_file=".env",

@@ -12,7 +12,6 @@
 - `react_agent/agent/context_management/`：从完整 Agent State 构造单次模型输入，管理轮次分段、Token 预算、工具协议修复、证据索引与后续压缩契约。
 - `agent_tools/contracts/`：Agent 与工具适配器共享的 ToolResult、标准化检索结果和重试执行契约。
 - `react_agent/models/`：LLM Provider 解析、创建与缓存；由 Runtime、评测和显式脚本消费。
-- `react_agent/infrastructure/`：Redis 等跨用例共享的技术资源适配器，不得反向依赖 Agent。
 - `react_agent/observability/`：应用会话用量记录与展示；知识库建库计时归 `knowledge/ingestion/observability.py`。
 - `react_agent/conversations/`：会话契约、管理用例、Repository Port 与 Checkpointer 基础设施。
 - `react_agent/runtime/`：选择并注入 LLM、Agent Tools、Conversation 与共享 Checkpointer，管理应用实例生命周期。

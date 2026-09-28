@@ -158,35 +158,6 @@ class LLMConfig(BaseModel):
         return payload
 
 
-class RedisConfig(BaseModel):
-    """Redis 连接配置"""
-
-    REDIS_URL: str = Field(default="redis://localhost:6379")
-    REDIS_MAX_CONNECTIONS: int = Field(default=20)  # 连接池大小
-    SEMANTIC_CACHE_TTL: int = Field(default=3600)  # 语义缓存 TTL，秒
-    SEMANTIC_CACHE_THRESHOLD: float = Field(default=0.95)  # 相似度阈值
-    BM25_INDEX_TTL: int = Field(default=86400)  # BM25 索引缓存，24小时
-    BM25_HMAC_SECRET: str = Field(default="")
-
-    @model_validator(mode="after")
-    def _load_from_env(self) -> "RedisConfig":
-        for field_name in self.__class__.model_fields:
-            val = os.getenv(field_name, "").strip()
-            if not val:
-                continue
-            tp = type(getattr(self, field_name))
-            try:
-                if tp is int:
-                    object.__setattr__(self, field_name, int(val))
-                elif tp is float:
-                    object.__setattr__(self, field_name, float(val))
-                else:
-                    object.__setattr__(self, field_name, val)
-            except Exception:
-                pass
-        return self
-
-
 class PostgresConfig(BaseModel):
     """PostgreSQL Checkpointer 连接与连接池配置。"""
 
@@ -358,7 +329,6 @@ class Settings(BaseModel):
     secrets: SecretsConfig = Field(default_factory=SecretsConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     yaml: YamlConfig = Field(default_factory=_load_yaml)
-    redis: RedisConfig = Field(default_factory=RedisConfig)
     postgres: PostgresConfig = Field(default_factory=PostgresConfig)
     docling: DoclingConfig = Field(default_factory=DoclingConfig)
     ingestion: RagIngestionConfig = Field(default_factory=RagIngestionConfig)

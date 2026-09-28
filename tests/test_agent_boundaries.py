@@ -1282,7 +1282,6 @@ def test_agent_does_not_depend_on_outbound_adapter_implementations() -> None:
         "agent_tools.search",
         "agent_tools.sql",
         "react_agent.models",
-        "react_agent.infrastructure",
     )
     violations: dict[str, list[str]] = {}
     for path in _python_sources(package_root / "agent"):
@@ -1366,6 +1365,7 @@ def test_removed_agent_module_paths_are_not_imported() -> None:
         "react_agent.agent.tool_calls",
         "react_agent.agent.tool_policy",
         "react_agent.agent.usage",
+        "react_agent.infrastructure",
     }
     violations: dict[str, list[str]] = {}
 
@@ -1380,6 +1380,12 @@ def test_removed_agent_module_paths_are_not_imported() -> None:
             violations[str(source_path.relative_to(project_root))] = imports
 
     assert violations == {}
+
+
+def test_react_agent_infrastructure_package_is_removed() -> None:
+    package_root = Path(__file__).parent.parent / "react_agent"
+
+    assert not any((package_root / "infrastructure").glob("*.py"))
 
 
 def test_agent_subpackages_follow_dependency_direction() -> None:
@@ -1442,7 +1448,6 @@ def test_agent_subpackages_follow_dependency_direction() -> None:
 def test_infrastructure_does_not_depend_on_agent() -> None:
     package_root = Path(__file__).parent.parent / "react_agent"
     infrastructure_roots = (
-        package_root / "infrastructure",
         package_root / "models",
         package_root / "observability",
         package_root / "rag" / "infrastructure",

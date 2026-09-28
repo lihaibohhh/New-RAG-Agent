@@ -1,6 +1,9 @@
 from __future__ import annotations
+
 import asyncio
 import logging
+
+from api.redis import close_default_redis
 from react_agent.agent import AgentContext, AgentService
 from react_agent.conversations import (
     ConversationService,
@@ -82,7 +85,12 @@ async def startup_init() -> None:
 async def shutdown_services() -> None:
     """关闭 Composition Root 持有的外部资源并清空进程内实例。"""
     global _services, _services_lock
-    if _services is not None:
-        await close_application_services(_services)
-    _services = None
-    _services_lock = None
+    try:
+        if _services is not None:
+            await close_application_services(_services)
+    finally:
+        try:
+            await close_default_redis()
+        finally:
+            _services = None
+            _services_lock = None
