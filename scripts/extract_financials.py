@@ -247,15 +247,14 @@ def extract_one_pdf(
 # ──────────────────────────────────────────────
 if __name__ == "__main__":
     import asyncio
-    from knowledge.client import create_configured_rag_runtime
+    from knowledge.client import create_configured_rag_service
 
     model_ref = "deepseek/deepseek-v4-flash"
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     init_db(conn)
     llm = load_chat_model(model_ref)
-    rag_runtime = create_configured_rag_runtime()
-    admin_service = rag_runtime.get_admin_service()
+    rag_service = create_configured_rag_service()
 
     pdfs = list(PDF_DIR.rglob("*.pdf"))
     print(f"开始处理 {len(pdfs)} 份研报...")
@@ -276,7 +275,7 @@ if __name__ == "__main__":
             continue
 
         print(f"[{i+1}/{len(pdfs)}] {filename}")
-        n = extract_one_pdf(pdf, llm, conn, admin_service)
+        n = extract_one_pdf(pdf, llm, conn, rag_service)
         print(f"  → 写入 {n} 条记录")
 
         conn.execute(
@@ -286,5 +285,5 @@ if __name__ == "__main__":
         conn.commit()
 
     conn.close()
-    asyncio.run(rag_runtime.close())
+    asyncio.run(rag_service.close())
     print("完成！")

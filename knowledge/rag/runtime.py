@@ -7,6 +7,12 @@ import threading
 from collections.abc import Callable
 from typing import Any, Literal
 
+from knowledge.contracts import (
+    EvaluationRetrievalResult,
+    RagHealthStatus,
+    RetrievalResult,
+    StoredChunk,
+)
 from knowledge.rag.admin import RagAdminService
 from knowledge.rag.infrastructure.cache.semantic_cache import (
     RedisSemanticCacheAdapter,
@@ -23,7 +29,7 @@ from knowledge.rag.infrastructure.retrieval.reranker import (
     RerankerProviderAdapter,
 )
 from knowledge.rag.infrastructure.storage import ChromaKnowledgeBaseAdapter
-from knowledge.rag.config import RagRuntimeConfig
+from knowledge.settings import RagSettings
 from knowledge.rag.operations import RagWarmupManager
 from knowledge.rag.ports import ChunkStorePort, HybridRetrieverPort
 from knowledge.rag.query import RetrievalService
@@ -32,12 +38,12 @@ from knowledge.rag.retrieval import HybridRetrievalService
 logger = logging.getLogger(__name__)
 
 
-class LocalRagRuntime:
-    """只组装并暴露在线检索、评测、管理和预热能力。"""
+class LocalRagService:
+    """组装并直接提供在线检索、评测、管理和预热能力。"""
 
     def __init__(
         self,
-        config: RagRuntimeConfig,
+        config: RagSettings,
         *,
         chroma_dir: str,
         device_provider: Callable[[], Literal["cpu", "cuda"]],
@@ -64,9 +70,9 @@ class LocalRagRuntime:
             url=config.redis.url,
             max_connections=config.redis.max_connections,
         )
-        self.operations = RagWarmupManager(self.get_retrieval_service)
+        self._operations = RagWarmupManager(self._get_retrieval_service)
 
-    def get_retrieval_service(self) -> RetrievalService:
+    def _get_retrieval_service(self) -> RetrievalService:
         if self._retrieval_service is not None:
             return self._retrieval_service
 
@@ -119,12 +125,12 @@ class LocalRagRuntime:
                 )
         return self._retrieval_service
 
-    def get_evaluation_retrieval_service(self):
+    def _get_evaluation_retrieval_service(self):
         """返回只供 eval-runner 使用的无缓存分阶段检索用例。"""
         if self._evaluation_retrieval_service is not None:
             return self._evaluation_retrieval_service
 
-        self.get_retrieval_service()
+        self._get_retrieval_service()
         with self._lock:
             if self._evaluation_retrieval_service is None:
                 from knowledge.rag.evaluation import EvaluationRetrievalService
@@ -145,7 +151,7 @@ class LocalRagRuntime:
                 )
         return self._evaluation_retrieval_service
 
-    def get_admin_service(self) -> RagAdminService:
+    def _get_admin_service(self) -> RagAdminService:
         if self._admin_service is not None:
             return self._admin_service
         with self._lock:
@@ -156,12 +162,12 @@ class LocalRagRuntime:
     def _build_admin_service(self) -> RagAdminService:
         return RagAdminService(
             cache_invalidator_provider=self._get_cache_invalidator,
-            status_provider=self.operations.get_status,
+            status_provider=self._operations.get_status,
             knowledge_base=ChromaKnowledgeBaseAdapter(chroma_dir=self._chroma_dir),
             chunk_reader=self._get_chunk_corpus(),
         )
 
-    def create_cache_invalidator(self) -> RagCacheInvalidator:
+    def _create_cache_invalidator(self) -> RagCacheInvalidator:
         """创建可由顶层组合根连接到建库提交事件的 RAG 失效处理器。"""
         return RagCacheInvalidator(
             bm25_cache=self._create_bm25_repository(),
@@ -221,7 +227,7 @@ class LocalRagRuntime:
         return self._chunk_corpus
 
     def _get_cache_invalidator(self) -> RagCacheInvalidator:
-        self.get_retrieval_service()
+        self._get_retrieval_service()
         if self._cache_invalidator is None:
             raise RuntimeError("RAG 缓存失效协调器尚未完成组装")
         return self._cache_invalidator
@@ -229,10 +235,89 @@ class LocalRagRuntime:
     def _current_hybrid_retriever(self) -> HybridRetrieverPort | None:
         return self._hybrid_retriever
 
+    async def search(
+        self,
+        query: str,
+        *,
+        top_k: int = 3,
+        filters: dict[str, Any] | None = None,
+        use_query_cache: bool = True,
+        retrieval_mode: str = "hybrid",
+    ) -> RetrievalResult:
+        return await self._get_retrieval_service().search(
+            query,
+            top_k=top_k,
+            filters=filters,
+            use_query_cache=use_query_cache,
+            retrieval_mode=retrieval_mode,
+        )
+
+    async def evaluation_search(
+        self,
+        query: str,
+        *,
+        top_k: int = 3,
+        filters: dict[str, Any] | None = None,
+        retrieval_mode: str = "hybrid",
+        use_query_cache: bool = False,
+    ) -> EvaluationRetrievalResult:
+        if use_query_cache:
+            raise ValueError("评测检索管道不允许使用语义查询缓存")
+        return await self._get_evaluation_retrieval_service().search(
+            query,
+            top_k=top_k,
+            filters=filters,
+            retrieval_mode=retrieval_mode,
+        )
+
+    async def start_warmup(self, force: bool = False) -> dict[str, Any]:
+        return self._operations.start(force=force)
+
+    async def get_warmup_status(self) -> dict[str, Any]:
+        return self._operations.get_status()
+
+    async def ensure_ready(
+        self,
+        wait_seconds: int | float = 20,
+    ) -> dict[str, Any]:
+        return await self._operations.ensure_ready(wait_seconds)
+
+    async def health(self) -> RagHealthStatus:
+        return await self._get_admin_service().health()
+
+    async def invalidate(self, knowledge_base_id: str = "default") -> None:
+        await self._get_admin_service().invalidate(knowledge_base_id)
+
+    async def read_chunks(
+        self,
+        *,
+        source_file: str | None = None,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> tuple[StoredChunk, ...]:
+        return await self._get_admin_service().read_chunks(
+            source_file=source_file,
+            offset=offset,
+            limit=limit,
+        )
+
+    def read_chunks_sync(
+        self,
+        *,
+        source_file: str | None = None,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> tuple[StoredChunk, ...]:
+        return self._get_admin_service().read_chunks_sync(
+            source_file=source_file,
+            offset=offset,
+            limit=limit,
+        )
+
     async def close(self) -> None:
         """停止 RAG 后台任务并释放模块独占资源。"""
         resources = (
-            ("operations", self.operations),
+            ("operations", self._operations),
             ("retriever", self._hybrid_retriever),
             ("reranker", self._reranker),
             ("redis", self._redis_resources),
@@ -255,4 +340,4 @@ class LocalRagRuntime:
         self._reranker = None
 
 
-__all__ = ["LocalRagRuntime"]
+__all__ = ["LocalRagService"]

@@ -6,8 +6,9 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
+from knowledge.contracts import IngestionReport
 from knowledge.ingestion.document_service import DocumentParsingService
-from knowledge.ingestion.config import IngestionRuntimeConfig
+from knowledge.settings import IngestionSettings
 from knowledge.ingestion.infrastructure.parsing.basic_document_parser import (
     BasicDocumentParserAdapter,
 )
@@ -38,15 +39,15 @@ from knowledge.ingestion.ports import (
     KnowledgeIndexChangedPort,
     VectorIndexWriterPort,
 )
-from knowledge.ingestion.service import IngestionService
+from knowledge.ingestion.service import IngestionPipeline
 
 
-class LocalIngestionRuntime:
-    """只组装并暴露文档解析与增量建库能力。"""
+class LocalIngestionService:
+    """组装并直接提供文档解析与增量建库能力。"""
 
     def __init__(
         self,
-        config: IngestionRuntimeConfig,
+        config: IngestionSettings,
         *,
         chroma_dir: str,
         embedding_provider: Callable[[], Any],
@@ -60,15 +61,15 @@ class LocalIngestionRuntime:
         self._chunk_store_provider = chunk_store_provider
         self._knowledge_write_lock = knowledge_write_lock
         self._index_changed_provider = index_changed_provider
-        self._ingestion_service: IngestionService | None = None
+        self._ingestion_service: IngestionPipeline | None = None
         self._document_parsing_service: DocumentParsingService | None = None
         self._lock = threading.RLock()
 
-    def get_ingestion_service(self) -> IngestionService:
+    def _get_ingestion_pipeline(self) -> IngestionPipeline:
         if self._ingestion_service is not None:
             return self._ingestion_service
 
-        document_parser = self.get_document_parsing_service()
+        document_parser = self._get_document_parsing_service()
         with self._lock:
             if self._ingestion_service is None:
                 docling_config = self._config.docling
@@ -79,7 +80,7 @@ class LocalIngestionRuntime:
                     task_timeout=docling_config.task_timeout,
                     poll_interval=docling_config.poll_interval,
                 )
-                self._ingestion_service = IngestionService(
+                self._ingestion_service = IngestionPipeline(
                     writer=CompositeVectorIndexWriter(
                         ChromaVectorWriterAdapter(
                             chroma_dir=self._chroma_dir,
@@ -99,11 +100,17 @@ class LocalIngestionRuntime:
                     ),
                     document_parser=document_parser,
                     index_changed=self._index_changed_provider(),
-                    config=self._config.service,
+                    config=self._config.batch,
                 )
         return self._ingestion_service
 
-    def get_document_parsing_service(self) -> DocumentParsingService:
+    async def ingest(self, path: str, /) -> IngestionReport:
+        return await self._get_ingestion_pipeline().ingest(path)
+
+    def ingest_sync(self, path: str, /) -> IngestionReport:
+        return self._get_ingestion_pipeline().ingest_sync(path)
+
+    def _get_document_parsing_service(self) -> DocumentParsingService:
         if self._document_parsing_service is not None:
             return self._document_parsing_service
         with self._lock:
@@ -146,9 +153,9 @@ class LocalIngestionRuntime:
         )
 
     async def close(self) -> None:
-        """释放建库对象图持有的引用；共享资源由顶层 Runtime 关闭。"""
+        """释放建库对象图持有的引用；共享资源由顶层组合根关闭。"""
         self._ingestion_service = None
         self._document_parsing_service = None
 
 
-__all__ = ["LocalIngestionRuntime"]
+__all__ = ["LocalIngestionService"]

@@ -16,12 +16,12 @@
 - `react_agent/conversations/`：会话契约、管理用例、Repository Port 与 Checkpointer 基础设施。
 - `react_agent/runtime/`：选择并注入 LLM、Agent Tools、Conversation 与共享 Checkpointer，管理应用实例生命周期。
 - `react_agent/configuration/`：应用级配置模型、环境/YAML 加载与非敏感默认配置文件；Agent 编排代码不得放入此目录。
-- `knowledge/`：统一知识库命名空间；根层只保留跨模块公共契约、对外能力接口、公共设施和显式配置。在线 RAG 与建库通过独立 Runtime Port 暴露，仅在 Server 组合根汇合。
+- `knowledge/`：统一知识库命名空间；根层只保留跨模块公共契约、`RagService`/`IngestionService` 对外能力接口和统一 `settings.py`。在线 RAG 与建库仅在 Server 组合根汇合。
 - `knowledge/foundation/`：只容纳 RAG 与建库确实共用、且不依赖两侧内部类型的公共设施；不得放入单侧模块专属的端口或适配器。
-- `knowledge/rag/`：自治管理在线查询、候选召回、管理、离线读取、评测、预热、模块配置、内部契约/端口、对象图，以及 Redis、语义缓存、BM25、Chroma Retriever/只读管理、Reranker 等具体实现；不得依赖 `knowledge.ingestion` 或顶层业务基础设施实现。
-- `knowledge/ingestion/`：文档解析、PDF 路由和增量建库用例，并自治管理模块配置、来源标识、内部契约、端口、观测、对象图与解析/写入适配器；不得依赖 `knowledge.rag`。
-- `knowledge/runtime/`：Knowledge Server 顶层组合根、共享资源/配置生命周期和跨模块事件连接；顶层 Runtime 只暴露独立的 `rag_runtime`、`ingestion_runtime` 视图和统一关闭能力，不得转发模块业务方法、直接组装内部组件或把完整顶层配置传给任一模块 Runtime。
-- `knowledge/client/`：独立 Knowledge Service HTTP 客户端，以及互不暴露能力的远程 RAG/Ingestion Runtime；只依赖公共契约，不得反向依赖 Agent、Server 或 MCP。
+- `knowledge/rag/`：自治管理在线查询、候选召回、管理、离线读取、评测、预热、内部契约/端口、对象图，以及 Redis、语义缓存、BM25、Chroma Retriever/只读管理、Reranker 等具体实现；不得依赖 `knowledge.ingestion` 或顶层业务基础设施实现。
+- `knowledge/ingestion/`：文档解析、PDF 路由和增量建库用例，并自治管理来源标识、内部契约、端口、观测、对象图与解析/写入适配器；不得依赖 `knowledge.rag`。
+- `knowledge/runtime/`：Knowledge Server 顶层组合根、共享资源生命周期和跨模块事件连接；只公开 `rag`、`ingestion` 两个业务服务和统一关闭能力。
+- `knowledge/client/`：独立 Knowledge Service HTTP 客户端，以及分别实现公共契约的 `HttpRagService`/`HttpIngestionService`；只依赖公共契约，不得反向依赖 Agent、Server 或 MCP。
 - `knowledge/transport/`：Knowledge HTTP 请求/响应 Schema 与领域对象 Codec 的中立唯一实现；不得依赖 FastAPI、httpx、Client、Server 或 RAG/Ingestion 内部类型。
 - `knowledge/server/`：Knowledge Service ASGI 入口、服务端配置和环境组合根；请求/响应模型统一使用 `knowledge.transport`，且该进程是唯一允许打开本地知识库资源的在线进程，不得依赖 `react_agent`。
 - `agent_tools/`：独立管理 RAG、搜索、Excel、Word、Markdown 和 SQL 协议适配器及其配置模型；不得反向依赖 `react_agent`，Agent 实际工具集合和能力映射由 `react_agent/runtime/container.py` 组装。
@@ -53,8 +53,7 @@
 - 从 `.env.example` 复制本地 `.env`，按需配置 DeepSeek/OpenAI、Tavily、Redis、PostgreSQL 等服务。
 - 不读取、输出、记录或提交 `.env` 中的真实密钥；日志、异常消息、测试夹具和示例中也不得泄露凭据。
 - Agent 配置入口是 `react_agent/configuration/settings.py`；工具配置优先级为：Conda/系统环境变量 > `.env` > `react_agent/configuration/config.yaml` > 代码默认值。
-- Knowledge Server 的 HTTP 边界配置位于 `knowledge/server/settings.py`，本地 Runtime 环境配置投影位于 `knowledge/server/runtime.py`；不得借用 Agent settings。
-- RAG 专属配置定义在 `knowledge/rag/config.py`，建库专属配置定义在 `knowledge/ingestion/config.py`；`knowledge/runtime/config.py` 只保留共享资源配置和顶层聚合，跨模块路径或资源应由组合根以最小参数注入。
+- Knowledge 的 RAG、建库、存储、HTTP 边界和客户端配置统一定义在 `knowledge/settings.py`；`knowledge/server/runtime.py` 只负责从环境创建配置并组装服务，不得借用 Agent settings。
 - 新增配置时同步更新所属边界的配置模型和 `.env.example`；只有 Agent 工具层的非敏感默认值适合放入 `react_agent/configuration/config.yaml`。
 - 测试应使用假密钥和 mock/fake 依赖。不要为普通回归测试调用真实 LLM、Tavily、Redis、PostgreSQL 或外网服务。
 

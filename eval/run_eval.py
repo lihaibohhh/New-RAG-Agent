@@ -20,7 +20,7 @@ from eval.pipeline.reporting import (
 )
 from eval.pipeline.retrieval import batch_retrieve
 from eval.pipeline import ragas_runner as _ragas
-from knowledge.client import create_configured_rag_runtime
+from knowledge.client import create_configured_rag_service
 from react_agent.models import load_chat_model
 
 logger = logging.getLogger(__name__)
@@ -155,17 +155,17 @@ async def main() -> None:
         config.top_n,
         config.concurrency,
     )
-    runtime = create_configured_rag_runtime()
+    rag_service = create_configured_rag_service()
     try:
         retrieval_service = (
-            runtime.get_retrieval_service()
+            rag_service.search
             if config.allow_query_cache
-            else runtime.get_evaluation_retrieval_service()
+            else rag_service.evaluation_search
         )
         if config.allow_query_cache:
             logger.warning("查询缓存已启用，本次不会产生分阶段评测 Trace")
         logger.info("评测前执行显式预热...")
-        warmup_status = await runtime.operations.ensure_ready(120)
+        warmup_status = await rag_service.ensure_ready(120)
         if not warmup_status.get("ready"):
             raise RuntimeError(f"RAG 预热失败: {warmup_status}")
         records = await batch_retrieve(
@@ -178,7 +178,7 @@ async def main() -> None:
             retrieval_mode=config.retrieval_mode,
         )
     finally:
-        await runtime.close()
+        await rag_service.close()
     logger.info(
         "检索完成：%s/%s 条无异常，%s/%s 条有 contexts",
         sum(bool(record.get("retrieve_ok")) for record in records),

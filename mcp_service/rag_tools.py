@@ -2,12 +2,11 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from mcp_service.responses import clamp_int, mcp_err, mcp_ok
 from knowledge.contracts import KnowledgeValidationError, RetrievalResult
-from knowledge.runtime_ports import RetrievalServicePort
+from knowledge.services import RagService
 from mcp_service.observability import ToolCallTrace
 
 if TYPE_CHECKING:
@@ -23,15 +22,10 @@ QUERY_FINANCIAL_REPORTS_DESCRIPTION = (
     "返回正文以及来源文档、页码、chunk_id、doc_type、industry 等可用元数据。"
 )
 
-WarmupCallable = Callable[[int | float], Awaitable[dict[str, Any]]]
-RetrievalServiceProvider = Callable[[], RetrievalServicePort]
-
-
 def register_rag_tools(
     server: FastMCP,
     *,
-    service_provider: RetrievalServiceProvider,
-    warmup: WarmupCallable,
+    rag_service: RagService,
 ) -> None:
     @server.tool(description=QUERY_FINANCIAL_REPORTS_DESCRIPTION)
     async def query_financial_reports(
@@ -45,15 +39,13 @@ def register_rag_tools(
             top_k=top_k,
             wait_for_ready_seconds=wait_for_ready_seconds,
             include_meta=include_meta,
-            service_provider=service_provider,
-            warmup=warmup,
+            rag_service=rag_service,
         )
 
 
 async def execute_query_financial_reports(
     *,
-    service_provider: RetrievalServiceProvider,
-    warmup: WarmupCallable,
+    rag_service: RagService,
     query: str,
     top_k: int = 3,
     wait_for_ready_seconds: int = 20,
@@ -90,7 +82,7 @@ async def execute_query_financial_reports(
         )
 
     try:
-        ready = await warmup(safe_wait)
+        ready = await rag_service.ensure_ready(safe_wait)
     except Exception as exc:
         logger.exception("[RAG-MCP] 预热检查异常 query_chars=%s", len(q))
         meta = _meta(
@@ -120,7 +112,7 @@ async def execute_query_financial_reports(
         )
 
     try:
-        result = await service_provider().search(q, top_k=safe_top_k)
+        result = await rag_service.search(q, top_k=safe_top_k)
         meta = _result_meta(
             result,
             top_k=safe_top_k,

@@ -4,15 +4,15 @@ from __future__ import annotations
 import argparse
 import asyncio
 
-from knowledge.client import create_configured_ingestion_runtime
+from knowledge.client import create_configured_ingestion_service
 
 
 async def _ingest_knowledge_base(data_dir: str | None):
-    runtime = create_configured_ingestion_runtime()
+    service = create_configured_ingestion_service()
     try:
-        return await runtime.get_ingestion_service().ingest(data_dir or ".")
+        return await service.ingest(data_dir or ".")
     finally:
-        await runtime.close()
+        await service.close()
 
 
 def build_vector_db(data_dir: str | None = None) -> dict:

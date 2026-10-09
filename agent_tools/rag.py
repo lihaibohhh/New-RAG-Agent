@@ -2,12 +2,10 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
-from typing import Any
-
 from langchain_core.tools import tool
 
 from knowledge.contracts import KnowledgeValidationError, RetrievalResult
+from knowledge.services import RagService
 from agent_tools.contracts.retrieval import retrieval_meta
 from agent_tools.contracts.results import tool_error as _err
 from agent_tools.contracts.results import tool_success as _ok
@@ -28,7 +26,7 @@ _DESCRIPTION = (
 
 def create_rag_tool(
     *,
-    retrieval_service_provider: Callable[[], Any],
+    retrieval_service: RagService,
     max_retries: int,
     timeout: float,
 ):
@@ -48,7 +46,7 @@ def create_rag_tool(
         retry_timeouts=False,
     )
     async def query_internal_knowledge(query: str) -> dict:
-        """调用已注入的 RetrievalService，并转换为 Tool 返回结构。"""
+        """调用已注入的 RagService，并转换为 Tool 返回结构。"""
         q = (query or "").strip()
         if not q:
             return _err(
@@ -59,7 +57,7 @@ def create_rag_tool(
             )
 
         try:
-            result = await retrieval_service_provider().search(q, top_k=3)
+            result = await retrieval_service.search(q, top_k=3)
             return _to_tool_payload(result)
         except KnowledgeValidationError as exc:
             return _err(

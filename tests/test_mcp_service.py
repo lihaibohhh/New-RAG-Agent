@@ -60,35 +60,24 @@ def test_mcp_response_envelope_remains_json_safe() -> None:
 
 @pytest.mark.asyncio
 async def test_mcp_query_uses_only_injected_rag_capabilities() -> None:
-    service_calls = 0
-
-    class FakeRetrievalService:
+    class FakeRagService:
         async def search(self, query: str, *, top_k: int) -> RetrievalResult:
             return RetrievalResult(query=query, stage=f"top-{top_k}")
 
-    service = FakeRetrievalService()
-
-    def provide_service() -> FakeRetrievalService:
-        nonlocal service_calls
-        service_calls += 1
-        return service
-
-    async def ready(_wait: int | float) -> dict:
-        return {
-            "ready": True,
-            "stage": "ready",
-            "waited_seconds": 0,
-            "warmup_status": {"state": "done"},
-        }
+        async def ensure_ready(self, _wait: int | float) -> dict:
+            return {
+                "ready": True,
+                "stage": "ready",
+                "waited_seconds": 0,
+                "warmup_status": {"state": "done"},
+            }
 
     result = await execute_query_financial_reports(
-        service_provider=provide_service,
-        warmup=ready,
+        rag_service=FakeRagService(),
         query="evidence",
         top_k=2,
     )
 
-    assert service_calls == 1
     assert result["ok"] is True
     assert result["meta"]["stage"] == "top-2"
     assert result["meta"]["status"] == "ok"
@@ -98,20 +87,20 @@ async def test_mcp_query_uses_only_injected_rag_capabilities() -> None:
 
 @pytest.mark.asyncio
 async def test_mcp_query_does_not_resolve_service_when_warmup_is_not_ready() -> None:
-    def unexpected_service():
-        raise AssertionError("预热未完成时不应解析检索服务")
+    class WarmingRagService:
+        async def ensure_ready(self, _wait: int | float) -> dict:
+            return {
+                "ready": False,
+                "stage": "warming_up",
+                "retry_after_seconds": 2,
+                "warmup_status": {"state": "running"},
+            }
 
-    async def warming(_wait: int | float) -> dict:
-        return {
-            "ready": False,
-            "stage": "warming_up",
-            "retry_after_seconds": 2,
-            "warmup_status": {"state": "running"},
-        }
+        async def search(self, *_args, **_kwargs):
+            raise AssertionError("预热未完成时不应执行检索")
 
     result = await execute_query_financial_reports(
-        service_provider=unexpected_service,
-        warmup=warming,
+        rag_service=WarmingRagService(),
         query="evidence",
     )
 
@@ -121,11 +110,11 @@ async def test_mcp_query_does_not_resolve_service_when_warmup_is_not_ready() -> 
     assert result["meta"]["status"] == "not_ready"
 
 
-class _FakeOperations:
-    def start(self, force: bool = False) -> dict:
+class _FakeRagService:
+    async def start_warmup(self, force: bool = False) -> dict:
         return {"stage": "started", "force": force}
 
-    def get_status(self) -> dict:
+    async def get_warmup_status(self) -> dict:
         return {"task_state": "none", "warmup_status": {"state": "not_started"}}
 
     async def ensure_ready(self, _wait_seconds: int | float = 20) -> dict:
@@ -135,24 +124,11 @@ class _FakeOperations:
         return None
 
 
-class _FakeRagRuntime:
-    operations = _FakeOperations()
-
-    def get_retrieval_service(self):
-        return object()
-
-    def get_admin_service(self):
-        return object()
-
-    async def close(self) -> None:
-        return None
-
-
 @pytest.mark.asyncio
 async def test_mcp_server_registers_minimal_tool_catalog(monkeypatch) -> None:
     monkeypatch.delenv("MCP_EXPOSE_ADMIN_TOOLS", raising=False)
 
-    server = create_mcp_server(rag_runtime=_FakeRagRuntime())
+    server = create_mcp_server(rag_service=_FakeRagService())
     tools = await server.list_tools()
 
     assert {tool.name for tool in tools} == {
@@ -165,7 +141,7 @@ async def test_mcp_server_registers_minimal_tool_catalog(monkeypatch) -> None:
 async def test_mcp_server_registers_admin_tools_only_when_enabled(monkeypatch) -> None:
     monkeypatch.setenv("MCP_EXPOSE_ADMIN_TOOLS", "true")
 
-    server = create_mcp_server(rag_runtime=_FakeRagRuntime())
+    server = create_mcp_server(rag_service=_FakeRagService())
     tools = await server.list_tools()
 
     assert {tool.name for tool in tools} == {
@@ -257,7 +233,7 @@ def test_application_closes_runtime_when_stdio_server_stops() -> None:
     runtime = Runtime()
     application = McpServiceApplication(
         server=StoppingServer(),
-        rag_runtime=runtime,
+        rag_service=runtime,
     )
 
     with pytest.raises(RuntimeError, match="server stopped"):

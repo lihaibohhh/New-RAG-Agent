@@ -1,35 +1,26 @@
 """Public client for the standalone Knowledge Service."""
 
 from knowledge.client.access import (
-    create_configured_ingestion_runtime,
-    create_configured_rag_runtime,
-    create_remote_ingestion_runtime,
-    create_remote_rag_runtime,
-    load_client_config,
+    KnowledgeClientSettings,
+    create_configured_ingestion_service,
+    create_configured_rag_service,
+    create_ingestion_service,
+    create_rag_service,
+    load_client_settings,
 )
-from knowledge.client.config import KnowledgeClientConfig
-from knowledge.client.http import KnowledgeServiceClient
-from knowledge.client.remote import (
-    RemoteEvaluationRetrievalService,
-    RemoteIngestionRuntime,
-    RemoteIngestionService,
-    RemoteRagAdminService,
-    RemoteRagOperations,
-    RemoteRagRuntime,
+from knowledge.client.http import (
+    HttpIngestionService,
+    HttpRagService,
+    KnowledgeServiceClient,
 )
-
 __all__ = [
-    "KnowledgeClientConfig",
+    "HttpIngestionService",
+    "HttpRagService",
+    "KnowledgeClientSettings",
     "KnowledgeServiceClient",
-    "RemoteEvaluationRetrievalService",
-    "RemoteIngestionService",
-    "RemoteIngestionRuntime",
-    "RemoteRagAdminService",
-    "RemoteRagOperations",
-    "RemoteRagRuntime",
-    "create_configured_ingestion_runtime",
-    "create_configured_rag_runtime",
-    "create_remote_ingestion_runtime",
-    "create_remote_rag_runtime",
-    "load_client_config",
+    "create_configured_ingestion_service",
+    "create_configured_rag_service",
+    "create_ingestion_service",
+    "create_rag_service",
+    "load_client_settings",
 ]
