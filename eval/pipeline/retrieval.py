@@ -21,7 +21,8 @@ async def retrieve_for_one(
     """通过统一检索服务检索一条样本并保存阶段 Trace。"""
     question = record["question"]
     try:
-        result = await retrieval_service.search(
+        search = getattr(retrieval_service, "search", retrieval_service)
+        result = await search(
             question,
             top_k=top_n,
             use_query_cache=use_query_cache,

@@ -12,6 +12,7 @@ from knowledge.contracts import (
     KnowledgeValidationError,
     RagHealthStatus,
     RetrievalResult,
+    StoredChunk,
     WarmupStatus,
 )
 from knowledge.transport.codecs import (
@@ -305,4 +306,130 @@ class KnowledgeServiceClient:
         await self._client.aclose()
 
 
-__all__ = ["KnowledgeServiceClient"]
+class HttpRagService:
+    """RAG 服务的 HTTP 实现；调用方无需感知 Remote Runtime。"""
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        api_key: str = "",
+        timeout: float = 150.0,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self._client = KnowledgeServiceClient(
+            base_url=base_url,
+            api_key=api_key,
+            timeout=timeout,
+            transport=transport,
+        )
+
+    async def search(self, query: str, **kwargs: Any) -> RetrievalResult:
+        return await self._client.search(query, **kwargs)
+
+    async def evaluation_search(
+        self,
+        query: str,
+        **kwargs: Any,
+    ) -> EvaluationRetrievalResult:
+        return await self._client.evaluation_search(query, **kwargs)
+
+    async def start_warmup(self, force: bool = False) -> dict[str, Any]:
+        return await self._client.request_warmup(wait_seconds=0, force=force)
+
+    async def get_warmup_status(self) -> dict[str, Any]:
+        return await self._client.warmup_status()
+
+    async def ensure_ready(
+        self,
+        wait_seconds: int | float = 20,
+    ) -> dict[str, Any]:
+        return await self._client.request_warmup(wait_seconds=wait_seconds)
+
+    async def health(self) -> RagHealthStatus:
+        return await self._client.health()
+
+    async def invalidate(self, knowledge_base_id: str = "default") -> None:
+        await self._client.invalidate(knowledge_base_id)
+
+    async def read_chunks(
+        self,
+        *,
+        source_file: str | None = None,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> tuple[StoredChunk, ...]:
+        page_size = min(limit or 1000, 1000)
+        current = max(0, offset)
+        chunks: list[StoredChunk] = []
+        while True:
+            page = await self._client.list_chunks_page(
+                source_file=source_file,
+                offset=current,
+                limit=page_size,
+            )
+            items = list(page.items)
+            chunks.extend(items)
+            if limit is not None and len(chunks) >= limit:
+                return tuple(chunks[:limit])
+            if not page.has_more or not items:
+                return tuple(chunks)
+            current += len(items)
+
+    def read_chunks_sync(
+        self,
+        *,
+        source_file: str | None = None,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> tuple[StoredChunk, ...]:
+        page_size = min(limit or 1000, 1000)
+        current = max(0, offset)
+        chunks: list[StoredChunk] = []
+        while True:
+            page = self._client.list_chunks_page_sync(
+                source_file=source_file,
+                offset=current,
+                limit=page_size,
+            )
+            items = list(page.items)
+            chunks.extend(items)
+            if limit is not None and len(chunks) >= limit:
+                return tuple(chunks[:limit])
+            if not page.has_more or not items:
+                return tuple(chunks)
+            current += len(items)
+
+    async def close(self) -> None:
+        await self._client.close()
+
+
+class HttpIngestionService:
+    """建库服务的 HTTP 实现。"""
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        api_key: str = "",
+        timeout: float = 150.0,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self._client = KnowledgeServiceClient(
+            base_url=base_url,
+            api_key=api_key,
+            timeout=timeout,
+            transport=transport,
+        )
+
+    async def ingest(self, path: str, /) -> IngestionReport:
+        return await self._client.ingest(path)
+
+    def ingest_sync(self, path: str, /) -> IngestionReport:
+        return self._client.ingest_sync(path)
+
+    async def close(self) -> None:
+        await self._client.close()
+
+
+__all__ = ["HttpIngestionService", "HttpRagService", "KnowledgeServiceClient"]

@@ -5,9 +5,9 @@ from pathlib import Path
 import pytest
 
 from knowledge.contracts import StoredChunk
-from knowledge.ingestion import IngestionConfig, IngestionService
-from knowledge.runtime import KnowledgeRuntimeConfig
-from knowledge.runtime import create_knowledge_runtime
+from knowledge.ingestion import IngestionBatchSettings, IngestionPipeline
+from knowledge.runtime import create_knowledge_services
+from knowledge.settings import KnowledgeSettings
 
 
 def test_legacy_agent_rag_package_is_removed() -> None:
@@ -20,7 +20,12 @@ def test_knowledge_root_contains_only_public_source_contracts() -> None:
     package_root = Path(__file__).parent.parent / "knowledge"
     root_modules = {path.name for path in package_root.glob("*.py")}
 
-    assert root_modules == {"__init__.py", "contracts.py", "runtime_ports.py"}
+    assert root_modules == {
+        "__init__.py",
+        "contracts.py",
+        "services.py",
+        "settings.py",
+    }
     assert (package_root / "ingestion" / "source.py").is_file()
 
 
@@ -90,8 +95,8 @@ def test_top_runtime_only_connects_module_runtimes_and_shared_resources() -> Non
     assert "RedisSemanticCacheAdapter" not in container_source
     assert "KnowledgeRuntimeConfig" not in rag_runtime_source
     assert "KnowledgeRuntimeConfig" not in ingestion_runtime_source
-    assert "class LocalRagRuntime" in rag_runtime_source
-    assert "class LocalIngestionRuntime" in ingestion_runtime_source
+    assert "class LocalRagService" in rag_runtime_source
+    assert "class LocalIngestionService" in ingestion_runtime_source
     assert "class SharedKnowledgeResources" in resources_source
     assert "def get_retrieval_service" not in container_source
     assert "def get_evaluation_retrieval_service" not in container_source
@@ -104,10 +109,11 @@ def test_top_runtime_only_connects_module_runtimes_and_shared_resources() -> Non
 
 def test_module_runtime_configs_expose_only_owned_settings() -> None:
     package_root = Path(__file__).parent.parent / "knowledge"
-    config = KnowledgeRuntimeConfig()
+    config = KnowledgeSettings()
 
-    assert (package_root / "rag" / "config.py").is_file()
-    assert (package_root / "ingestion" / "config.py").is_file()
+    assert (package_root / "settings.py").is_file()
+    assert not (package_root / "rag" / "config.py").exists()
+    assert not (package_root / "ingestion" / "config.py").exists()
     assert not hasattr(config.rag, "docling")
     assert not hasattr(config.rag, "service")
     assert not hasattr(config.ingestion, "redis")
@@ -175,7 +181,7 @@ def test_ingestion_config_rejects_invalid_resource_limits() -> None:
         {"workers": 0},
     ):
         try:
-            IngestionConfig(**kwargs)
+            IngestionBatchSettings(**kwargs)
         except ValueError:
             pass
         else:
@@ -204,14 +210,14 @@ async def test_ingestion_service_uses_injected_pdf_limit(tmp_path: Path) -> None
             raise AssertionError("没有写入 chunk 时不应失效缓存")
 
     (tmp_path / "oversized.pdf").write_bytes(b"")
-    service = IngestionService(
+    service = IngestionPipeline(
         writer=UnusedDependency(),
         manifest=Manifest(),
         page_counter=PageCounter(),
         preflight=UnusedDependency(),
         document_parser=UnusedDependency(),
         index_changed=CacheInvalidator(),
-        config=IngestionConfig(max_pdf_pages=1),
+        config=IngestionBatchSettings(max_pdf_pages=1),
     )
 
     report = await service.ingest(str(tmp_path))
@@ -232,7 +238,7 @@ async def test_ingestion_publishes_index_change_after_committed_write() -> None:
             self.calls += 1
 
     observer = IndexChanged()
-    service = IngestionService(
+    service = IngestionPipeline(
         writer=object(),
         manifest=object(),
         page_counter=object(),
@@ -253,9 +259,9 @@ async def test_ingestion_publishes_index_change_after_committed_write() -> None:
 
 
 @pytest.mark.asyncio
-async def test_local_runtime_requires_explicit_configuration() -> None:
-    config = KnowledgeRuntimeConfig()
-    runtime = create_knowledge_runtime(config)
+async def test_local_services_require_explicit_configuration() -> None:
+    config = KnowledgeSettings()
+    runtime = create_knowledge_services(config)
 
     assert runtime._config is config
     await runtime.close()

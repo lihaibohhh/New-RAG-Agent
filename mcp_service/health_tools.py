@@ -4,10 +4,9 @@ health_tools.py:
 """
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Any
 from mcp.server.fastmcp import FastMCP
-from knowledge.runtime_ports import RagAdminServicePort
+from knowledge.services import RagService
 from mcp_service.observability import ToolCallTrace
 from mcp_service.responses import mcp_err, mcp_ok
 
@@ -15,7 +14,7 @@ from mcp_service.responses import mcp_err, mcp_ok
 def register_health_tools(
     server: FastMCP,
     *,
-    service_provider: Callable[[], RagAdminServicePort],
+    rag_service: RagService,
 ) -> None:
     """
     注册知识库健康检查工具。
@@ -28,7 +27,7 @@ def register_health_tools(
     async def check_knowledge_base() -> dict[str, Any]:
         trace = ToolCallTrace.start("check_knowledge_base")
         try:
-            health = await service_provider().health()
+            health = await rag_service.health()
             knowledge_base = dict(health.details.get("knowledge_base") or {})
 
             return mcp_ok(

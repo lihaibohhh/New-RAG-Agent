@@ -7,14 +7,14 @@ import pytest
 import check_tables
 from knowledge.contracts import IngestionReport
 from knowledge.client import (
-    KnowledgeClientConfig,
-    RemoteIngestionRuntime,
-    RemoteRagRuntime,
-    create_remote_ingestion_runtime,
-    create_remote_rag_runtime,
-    load_client_config,
+    HttpIngestionService,
+    HttpRagService,
+    KnowledgeClientSettings,
+    create_ingestion_service,
+    create_rag_service,
+    load_client_settings,
 )
-from knowledge.server.runtime import create_knowledge_runtime_config
+from knowledge.server.runtime import create_knowledge_settings
 
 
 def test_knowledge_namespace_has_no_legacy_top_level_packages() -> None:
@@ -35,14 +35,14 @@ def test_server_runtime_owns_its_environment_projection(
     monkeypatch.setenv("DOCLING_ENABLED", "true")
     monkeypatch.setenv("RAG_INGESTION_BATCH_SIZE", "64")
 
-    config = create_knowledge_runtime_config()
+    config = create_knowledge_settings()
 
     assert config.shared.requested_device == "cpu"
     assert config.rag.tuning.cpu_rerank_candidates == 33
     assert config.rag.redis.max_connections == 7
     assert config.storage.chroma_db_path == str((tmp_path / "chroma").resolve())
     assert config.ingestion.docling.enabled is True
-    assert config.ingestion.service.batch_size == 64
+    assert config.ingestion.batch.batch_size == 64
 
 
 @pytest.mark.parametrize(
@@ -74,7 +74,7 @@ def test_server_runtime_rejects_invalid_numeric_environment(
     monkeypatch.setenv(name, value)
 
     with pytest.raises(ValueError):
-        create_knowledge_runtime_config()
+        create_knowledge_settings()
 
 
 @pytest.mark.parametrize(
@@ -93,7 +93,7 @@ def test_server_runtime_rejects_invalid_boolean_environment(
     monkeypatch.setenv(name, "sometimes")
 
     with pytest.raises(ValueError):
-        create_knowledge_runtime_config()
+        create_knowledge_settings()
 
 
 @pytest.mark.parametrize(
@@ -111,11 +111,11 @@ def test_server_runtime_rejects_invalid_enum_environment(
     monkeypatch.setenv(name, value)
 
     with pytest.raises(ValueError):
-        create_knowledge_runtime_config()
+        create_knowledge_settings()
 
 
 def test_client_config_is_explicit_and_normalized() -> None:
-    config = KnowledgeClientConfig(
+    config = KnowledgeClientSettings(
         base_url=" https://knowledge.example/ ",
         api_key=" secret ",
         timeout=30.0,
@@ -126,8 +126,8 @@ def test_client_config_is_explicit_and_normalized() -> None:
     assert config.timeout == 30.0
 
 
-def test_load_client_config_from_supplied_environment() -> None:
-    config = load_client_config(
+def test_load_client_settings_from_supplied_environment() -> None:
+    config = load_client_settings(
         {
             "RAG_RUNTIME_MODE": "remote",
             "KNOWLEDGE_SERVICE_URL": "http://knowledge.test/",
@@ -136,7 +136,7 @@ def test_load_client_config_from_supplied_environment() -> None:
         }
     )
 
-    assert config == KnowledgeClientConfig(
+    assert config == KnowledgeClientSettings(
         base_url="http://knowledge.test",
         api_key="test-secret",
         timeout=12.5,
@@ -144,27 +144,27 @@ def test_load_client_config_from_supplied_environment() -> None:
 
 
 @pytest.mark.asyncio
-async def test_explicit_factory_creates_remote_only_runtime() -> None:
-    runtime = create_remote_rag_runtime(
-        KnowledgeClientConfig(base_url="http://knowledge.test")
+async def test_explicit_factory_creates_http_rag_service() -> None:
+    service = create_rag_service(
+        KnowledgeClientSettings(base_url="http://knowledge.test")
     )
 
-    assert isinstance(runtime, RemoteRagRuntime)
-    assert not hasattr(runtime, "_embedding_provider")
-    await runtime.close()
+    assert isinstance(service, HttpRagService)
+    assert not hasattr(service, "_embedding_provider")
+    await service.close()
 
 
 @pytest.mark.asyncio
-async def test_ingestion_factory_exposes_only_ingestion_runtime() -> None:
-    runtime = create_remote_ingestion_runtime(
-        KnowledgeClientConfig(base_url="http://knowledge.test")
+async def test_ingestion_factory_exposes_only_ingestion_service() -> None:
+    service = create_ingestion_service(
+        KnowledgeClientSettings(base_url="http://knowledge.test")
     )
 
-    assert isinstance(runtime, RemoteIngestionRuntime)
-    assert hasattr(runtime, "get_ingestion_service")
-    assert not hasattr(runtime, "get_retrieval_service")
-    assert not hasattr(runtime, "get_admin_service")
-    await runtime.close()
+    assert isinstance(service, HttpIngestionService)
+    assert hasattr(service, "ingest")
+    assert not hasattr(service, "search")
+    assert not hasattr(service, "health")
+    await service.close()
 
 
 @pytest.mark.parametrize(
@@ -185,33 +185,33 @@ def test_client_config_rejects_non_remote_or_incomplete_modes(
     message: str,
 ) -> None:
     with pytest.raises(error_type, match=message):
-        load_client_config(environ)
+        load_client_settings(environ)
 
 
-def test_build_script_closes_remote_runtime(monkeypatch) -> None:
+def test_build_script_closes_ingestion_service(monkeypatch) -> None:
     class IngestionService:
         async def ingest(self, relative_path: str) -> IngestionReport:
             return IngestionReport(data_dir=relative_path, status="completed")
 
-    class Runtime:
+    class Service:
         def __init__(self) -> None:
             self.closed = False
 
-        def get_ingestion_service(self) -> IngestionService:
-            return IngestionService()
+        async def ingest(self, relative_path: str) -> IngestionReport:
+            return await IngestionService().ingest(relative_path)
 
         async def close(self) -> None:
             self.closed = True
 
-    runtime = Runtime()
+    service = Service()
     monkeypatch.setattr(
         check_tables,
-        "create_configured_ingestion_runtime",
-        lambda: runtime,
+        "create_configured_ingestion_service",
+        lambda: service,
     )
 
     report = check_tables.build_vector_db("reports")
 
     assert report["data_dir"] == "reports"
     assert report["status"] == "completed"
-    assert runtime.closed is True
+    assert service.closed is True

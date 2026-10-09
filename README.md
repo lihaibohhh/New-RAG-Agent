@@ -203,10 +203,12 @@ RAG 数据集生成、确定性检索评测和 RAGAS 流程见
 src/
 ├── api/                    # FastAPI、鉴权、限流、指标和版本化路由
 ├── knowledge/
+│   ├── services.py         # RagService / IngestionService 公共接口
+│   ├── settings.py         # Knowledge 统一配置模型与环境投影
 │   ├── rag/                # 在线检索、缓存、精排和评测
 │   ├── ingestion/          # 文档解析和增量建库
 │   ├── runtime/            # Knowledge 组合根与共享资源
-│   ├── client/             # Knowledge Service HTTP 客户端
+│   ├── client/             # 远程 RagService / IngestionService 实现
 │   ├── transport/          # 中立 HTTP Schema 与 Codec
 │   └── server/             # Knowledge Service ASGI 入口
 ├── react_agent/

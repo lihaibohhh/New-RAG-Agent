@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from knowledge.foundation.chunk_store import SQLiteChunkStoreAdapter
 from knowledge.foundation.embedding import EmbeddingProviderAdapter
-from knowledge.runtime.config import SharedResourceConfig
+from knowledge.settings import SharedSettings
 from knowledge.runtime.device import resolve_runtime_device
 
 
@@ -16,7 +16,7 @@ class SharedKnowledgeResources:
 
     def __init__(
         self,
-        config: SharedResourceConfig,
+        config: SharedSettings,
         *,
         chunk_store_path: str,
     ) -> None:

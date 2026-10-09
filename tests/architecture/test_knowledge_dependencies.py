@@ -93,6 +93,8 @@ FORBIDDEN_DEPENDENCIES: dict[str, tuple[str, ...]] = {
         "fastapi",
     ),
     "knowledge.server": (
+        "knowledge.rag",
+        "knowledge.ingestion",
         "knowledge.foundation",
         "knowledge.client",
         "react_agent",
@@ -103,22 +105,13 @@ FORBIDDEN_DEPENDENCIES: dict[str, tuple[str, ...]] = {
 }
 
 RUNTIME_MODULE_ALLOWLIST: dict[str, dict[str, tuple[str, ...]]] = {
-    "knowledge.runtime.config": {
-        "knowledge.rag": ("knowledge.rag.config",),
-        "knowledge.ingestion": ("knowledge.ingestion.config",),
-    },
     "knowledge.runtime.container": {
         "knowledge.rag": ("knowledge.rag.runtime",),
         "knowledge.ingestion": ("knowledge.ingestion.runtime",),
     },
 }
 
-SERVER_MODULE_ALLOWLIST: dict[str, dict[str, tuple[str, ...]]] = {
-    "knowledge.server.runtime": {
-        "knowledge.rag": ("knowledge.rag.config",),
-        "knowledge.ingestion": ("knowledge.ingestion.config",),
-    },
-}
+SERVER_MODULE_ALLOWLIST: dict[str, dict[str, tuple[str, ...]]] = {}
 
 
 @pytest.fixture(scope="module")

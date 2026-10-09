@@ -11,7 +11,7 @@ from mcp_service.health_tools import register_health_tools
 from mcp_service.info_tools import register_info_tools
 from mcp_service.rag_tools import register_rag_tools
 from mcp_service.warmup_tools import register_warmup_tools
-from knowledge.runtime_ports import RagRuntimePort
+from knowledge.services import RagService
 
 MCP_SERVER_NAME = "financial-rag"
 ADMIN_TOOLS_ENV = "MCP_EXPOSE_ADMIN_TOOLS"
@@ -45,7 +45,7 @@ def _server_instructions(expose_admin_tools: bool) -> str:
     return instructions
 
 
-def create_mcp_server(*, rag_runtime: RagRuntimePort) -> FastMCP:
+def create_mcp_server(*, rag_service: RagService) -> FastMCP:
     """
     创建 MCP Server 实例，并集中注册 MCP 工具。
 
@@ -62,14 +62,13 @@ def create_mcp_server(*, rag_runtime: RagRuntimePort) -> FastMCP:
     if expose_admin_tools:
         register_health_tools(
             server,
-            service_provider=rag_runtime.get_admin_service,
+            rag_service=rag_service,
         )
-        register_warmup_tools(server, manager=rag_runtime.operations)
+        register_warmup_tools(server, rag_service=rag_service)
 
     register_rag_tools(
         server,
-        service_provider=rag_runtime.get_retrieval_service,
-        warmup=rag_runtime.operations.ensure_ready,
+        rag_service=rag_service,
     )
 
     return server

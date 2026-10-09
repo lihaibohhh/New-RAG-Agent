@@ -592,7 +592,7 @@ async def test_real_rag_tool_result_is_json_visible_to_ledger() -> None:
             )
 
     tool = create_rag_tool(
-        retrieval_service_provider=FakeRetrievalService,
+        retrieval_service=FakeRetrievalService(),
         max_retries=0,
         timeout=5,
     )

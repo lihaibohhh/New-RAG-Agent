@@ -119,6 +119,10 @@ REDIS_MAX_CONNECTIONS=20
 
 ## Knowledge Service
 
+Knowledge 所有配置模型与环境变量投影都集中在
+`knowledge/settings.py`。RAG 和建库模块只接收各自的 `RagSettings` 和
+`IngestionSettings`，不依赖对方配置。
+
 Agent、MCP 和在线评测推荐使用远程模式：
 
 ```env

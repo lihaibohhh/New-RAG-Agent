@@ -32,14 +32,9 @@ from knowledge.contracts import (
     WarmupStatus,
 )
 from knowledge.rag.operations import RagWarmupManager
-from knowledge.runtime import KnowledgeRuntimeConfig
-from knowledge.runtime import create_knowledge_runtime
-from knowledge.runtime_ports import (
-    AgentRagRuntimePort,
-    IngestionRuntimePort,
-    KnowledgeServerRuntimePort,
-    RagRuntimePort,
-)
+from knowledge.runtime import create_knowledge_services
+from knowledge.services import IngestionService, RagService
+from knowledge.settings import KnowledgeSettings
 from react_agent.runtime import container
 from react_agent.runtime.container import (
     ApplicationStatus,
@@ -54,8 +49,8 @@ from agent_tools.search import create_search_tool
 
 
 def create_test_knowledge_runtime():
-    """为组装测试创建显式配置的本地 Runtime。"""
-    return create_knowledge_runtime(KnowledgeRuntimeConfig())
+    """为组装测试创建显式配置的本地 Knowledge 服务。"""
+    return create_knowledge_services(KnowledgeSettings())
 
 
 class _FakeGraph:
@@ -169,7 +164,7 @@ async def test_rag_tool_uses_only_injected_retrieval_service() -> None:
 
     service = FakeRetrievalService()
     rag_tool = create_rag_tool(
-        retrieval_service_provider=lambda: service,
+        retrieval_service=service,
         max_retries=0,
         timeout=1,
     )
@@ -246,26 +241,26 @@ async def test_warmup_state_is_instance_scoped() -> None:
 @pytest.mark.asyncio
 async def test_admin_health_composition_does_not_build_query_pipeline() -> None:
     runtime = create_test_knowledge_runtime()
-    rag_runtime = runtime.rag_runtime
+    rag_service = runtime.rag
 
-    rag_runtime.get_admin_service()
+    rag_service._get_admin_service()
 
-    assert rag_runtime._retrieval_service is None
+    assert rag_service._retrieval_service is None
     assert runtime._resources._embedding_provider is None
     await runtime.close()
 
 
 @pytest.mark.asyncio
-async def test_local_runtime_exposes_disjoint_module_views() -> None:
+async def test_local_composition_exposes_two_direct_services() -> None:
     runtime = create_test_knowledge_runtime()
 
-    assert runtime.rag_runtime is not runtime.ingestion_runtime
-    assert hasattr(runtime.rag_runtime, "get_retrieval_service")
-    assert hasattr(runtime.rag_runtime, "get_admin_service")
-    assert not hasattr(runtime.rag_runtime, "get_ingestion_service")
-    assert hasattr(runtime.ingestion_runtime, "get_ingestion_service")
-    assert not hasattr(runtime.ingestion_runtime, "get_retrieval_service")
-    assert not hasattr(runtime.ingestion_runtime, "get_admin_service")
+    assert runtime.rag is not runtime.ingestion
+    assert hasattr(runtime.rag, "search")
+    assert hasattr(runtime.rag, "health")
+    assert not hasattr(runtime.rag, "ingest")
+    assert hasattr(runtime.ingestion, "ingest")
+    assert not hasattr(runtime.ingestion, "search")
+    assert not hasattr(runtime.ingestion, "health")
     assert not hasattr(runtime, "operations")
     assert not hasattr(runtime, "get_retrieval_service")
     assert not hasattr(runtime, "get_evaluation_retrieval_service")
@@ -278,10 +273,10 @@ async def test_local_runtime_exposes_disjoint_module_views() -> None:
 async def test_ingestion_composition_does_not_build_rag_query_pipeline() -> None:
     runtime = create_test_knowledge_runtime()
 
-    runtime.ingestion_runtime.get_ingestion_service()
+    runtime.ingestion._get_ingestion_pipeline()
 
-    assert runtime.rag_runtime._retrieval_service is None
-    assert runtime.rag_runtime._hybrid_retriever is None
+    assert runtime.rag._retrieval_service is None
+    assert runtime.rag._hybrid_retriever is None
     assert runtime._resources._embedding_provider is None
     await runtime.close()
 
@@ -309,7 +304,7 @@ def test_runtime_selects_model_and_tool_catalog(monkeypatch) -> None:
     runtime = create_test_knowledge_runtime()
     dependencies = container._compose_agent_dependencies(
         AgentContext(),
-        runtime.rag_runtime,
+        runtime.rag,
     )
 
     assert dependencies.resolve_model() == ("model", "provider/model")
@@ -341,7 +336,7 @@ def test_runtime_rejects_model_window_without_input_capacity(monkeypatch) -> Non
         with pytest.raises(ValueError, match="输出预留与安全余量"):
             container._compose_agent_dependencies(
                 AgentContext(context_safety_margin_tokens=1024),
-                runtime.rag_runtime,
+                runtime.rag,
             )
     finally:
         asyncio.run(runtime.close())
@@ -356,7 +351,7 @@ def test_runtime_does_not_create_or_inject_disabled_web_search(monkeypatch) -> N
     try:
         dependencies = container._compose_agent_dependencies(
             AgentContext(enable_web_search=False),
-            runtime.rag_runtime,
+            runtime.rag,
         )
     finally:
         asyncio.run(runtime.close())
@@ -589,7 +584,7 @@ async def test_application_services_report_effective_backend(monkeypatch) -> Non
     monkeypatch.setattr(
         container,
         "_compose_agent_dependencies",
-        lambda _context, _rag_runtime: dependencies,
+        lambda _context, _rag_service: dependencies,
     )
 
     services = await create_application_services(
@@ -625,36 +620,26 @@ def test_agent_and_rag_adapter_have_no_runtime_service_locator_imports() -> None
     assert "get_rag_runtime_profile" not in application_runtime
 
 
-def test_agent_rag_runtime_port_exposes_only_query_lifecycle_capabilities() -> None:
-    public_members = AgentRagRuntimePort.__dict__
+def test_rag_service_exposes_direct_business_capabilities() -> None:
+    public_members = RagService.__dict__
 
-    assert "operations" in public_members["__annotations__"]
-    assert "get_retrieval_service" in public_members
+    assert "search" in public_members
+    assert "ensure_ready" in public_members
     assert "close" in public_members
+    assert "get_retrieval_service" not in public_members
     assert "get_admin_service" not in public_members
-    assert "get_ingestion_service" not in public_members
-    assert "get_evaluation_retrieval_service" not in public_members
+    assert "ingest" not in public_members
 
 
-def test_rag_and_ingestion_runtime_ports_are_disjoint() -> None:
-    rag_members = RagRuntimePort.__dict__
-    ingestion_members = IngestionRuntimePort.__dict__
-    server_members = KnowledgeServerRuntimePort.__dict__
+def test_rag_and_ingestion_service_contracts_are_disjoint() -> None:
+    rag_members = RagService.__dict__
+    ingestion_members = IngestionService.__dict__
 
-    assert "get_admin_service" in rag_members
-    assert "get_evaluation_retrieval_service" in rag_members
-    assert "get_ingestion_service" not in rag_members
-    assert "get_ingestion_service" in ingestion_members
-    assert "get_retrieval_service" not in ingestion_members
-    assert RagRuntimePort not in KnowledgeServerRuntimePort.__bases__
-    assert IngestionRuntimePort not in KnowledgeServerRuntimePort.__bases__
-    assert "rag_runtime" in server_members
-    assert "ingestion_runtime" in server_members
-    assert "close" in server_members
-    assert "operations" not in server_members.get("__annotations__", {})
-    assert "get_retrieval_service" not in server_members
-    assert "get_admin_service" not in server_members
-    assert "get_ingestion_service" not in server_members
+    assert "search" in rag_members
+    assert "evaluation_search" in rag_members
+    assert "ingest" not in rag_members
+    assert "ingest" in ingestion_members
+    assert "search" not in ingestion_members
 
 
 def test_legacy_agent_stream_and_chat_router_are_removed() -> None:

@@ -17,8 +17,8 @@ Application Runtime
           │
           ▼
 Knowledge Service HTTP API
-    ├── RAG Runtime
-    └── Ingestion Runtime
+    ├── RagService
+    └── IngestionService
 ```
 
 Agent 负责研究编排、工具选择、上下文和会话；Knowledge Service 是在线知识库资源的
@@ -86,23 +86,25 @@ Skill 只在当前用户轮中选择和注入，不扩大 Runtime 已注册的�
 
 ## Knowledge 模块边界
 
-`knowledge/` 根层只保存跨模块公共契约、能力接口和组合设施：
+`knowledge/` 根层只保存跨模块公共契约、两个业务服务接口和统一配置：
 
 | 模块 | 边界 |
 |---|---|
+| `knowledge/services.py` | `RagService` 与 `IngestionService` 的对外能力契约 |
+| `knowledge/settings.py` | RAG、建库、存储、服务端与客户端的唯一配置定义 |
 | `knowledge/rag/` | 在线查询、混合召回、精排、缓存、评测和预热 |
 | `knowledge/ingestion/` | 文档解析、OCR 路由、增量建库和索引写入 |
 | `knowledge/foundation/` | 双方确实共享且不依赖内部类型的基础设施 |
 | `knowledge/runtime/` | 顶层资源生命周期与跨模块事件连接 |
 | `knowledge/transport/` | HTTP Schema 与领域对象 Codec |
-| `knowledge/client/` | 独立 HTTP 客户端及远程 RAG/Ingestion Runtime |
-| `knowledge/server/` | ASGI 入口、服务端配置和环境组合根 |
+| `knowledge/client/` | 实现同一业务接口的 HTTP RAG/Ingestion 服务 |
+| `knowledge/server/` | ASGI 薄适配层与环境组合入口 |
 
 依赖约束：
 
 - RAG 与 Ingestion 不互相依赖。
 - Transport 不依赖 FastAPI、httpx、Client、Server 或模块内部类型。
-- Agent 和 MCP 仅依赖 Knowledge 公共契约或远程客户端。
+- Agent、MCP、评测和脚本直接依赖 `RagService` 或 `IngestionService`，不再经过 Runtime 视图和 service getter。
 - 只有 Knowledge Service 在线进程可以打开本地 Chroma、BM25 和 Chunk Store。
 - 静态导入方向由 `tests/architecture/` 使用 Python AST 校验。
 
@@ -142,7 +144,7 @@ PDF / DOCX / TXT / Markdown / CSV / Excel
 ```
 
 普通文本型 PDF 使用本地解析；复杂、扫描、表格密集或多栏 PDF 可以路由到 Docling。
-建库提交后由顶层 Runtime 连接事件，不让 Ingestion 反向依赖 RAG。
+建库提交后由顶层组合根连接事件，不让 Ingestion 反向依赖 RAG。
 
 ## API 与 MCP
 

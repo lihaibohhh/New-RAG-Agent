@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from knowledge.contracts import IngestionReport, KnowledgeDocument
-from knowledge.ingestion.config import IngestionConfig
+from knowledge.settings import IngestionBatchSettings
 from knowledge.ingestion.document_service import (
     SUPPORTED_EXTENSIONS,
     parse_file_to_documents,
@@ -62,7 +62,7 @@ def _file_hash(path: Path) -> str:
     return digest.hexdigest()
 
 
-class IngestionService:
+class IngestionPipeline:
     """编排扫描、增量判定、解析、批处理、写库和缓存失效。"""
 
     def __init__(
@@ -74,7 +74,7 @@ class IngestionService:
         preflight: IngestionPreflightPort,
         document_parser: DocumentParserPort,
         index_changed: KnowledgeIndexChangedPort,
-        config: IngestionConfig | None = None,
+        config: IngestionBatchSettings | None = None,
     ) -> None:
         self._writer = writer
         self._manifest = manifest
@@ -82,7 +82,7 @@ class IngestionService:
         self._preflight = preflight
         self._document_parser = document_parser
         self._index_changed = index_changed
-        self._config = config or IngestionConfig()
+        self._config = config or IngestionBatchSettings()
         self._build_lock = threading.Lock()
 
     async def ingest(self, data_dir: str) -> IngestionReport:
@@ -121,7 +121,7 @@ class IngestionService:
         except RuntimeError:
             return asyncio.run(self.ingest(data_dir))
         raise RuntimeError(
-            "事件循环已运行，请使用 await IngestionService.ingest(...)。"
+            "事件循环已运行，请使用 await IngestionPipeline.ingest(...)。"
         )
 
     def _build_sync(self, data_dir: str) -> dict[str, Any]:
@@ -359,4 +359,4 @@ class IngestionService:
         }
 
 
-__all__ = ["IngestionConfig", "IngestionService"]
+__all__ = ["IngestionPipeline"]

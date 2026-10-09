@@ -7,7 +7,7 @@ import pytest
 from asgi_lifespan import LifespanManager
 
 from knowledge.server.app import create_app
-from knowledge.server.settings import KnowledgeServiceSettings
+from knowledge.settings import KnowledgeServiceSettings, KnowledgeSettings
 from knowledge.contracts import (
     EvaluationCandidate,
     EvaluationRetrievalResult,
@@ -23,10 +23,10 @@ from knowledge.rag.infrastructure.retrieval.chunk_corpus import (
 )
 from knowledge.foundation.chunk_store import SQLiteChunkStoreAdapter
 from knowledge.client import (
-    RemoteIngestionRuntime,
-    RemoteRagRuntime,
-    create_configured_ingestion_runtime,
-    create_configured_rag_runtime,
+    HttpIngestionService,
+    HttpRagService,
+    create_configured_ingestion_service,
+    create_configured_rag_service,
 )
 
 
@@ -45,18 +45,18 @@ def test_service_settings_reject_invalid_boolean_environment_values(
     monkeypatch.setenv(name, "tru")
 
     with pytest.raises(ValueError, match=name):
-        KnowledgeServiceSettings.from_env()
+        KnowledgeSettings.from_env()
 
 
 class FakeOperations:
     def __init__(self) -> None:
         self.started = False
 
-    def start(self, force: bool = False) -> dict:
+    async def start(self, force: bool = False) -> dict:
         self.started = True
         return {"stage": "started", "force": force}
 
-    def get_status(self) -> dict:
+    async def get_status(self) -> dict:
         return {
             "task_state": "done",
             "warmup_status": {"state": "done", "timings": {"fake": 0.1}},
@@ -169,7 +169,7 @@ class FakeAdminService:
         return all_chunks[offset : offset + limit if limit is not None else None]
 
 
-class FakeIngestionService:
+class _FakeIngestionPipeline:
     def __init__(self) -> None:
         self.paths: list[str] = []
 
@@ -186,7 +186,7 @@ class FakeIngestionService:
         )
 
 
-class FakeRagRuntime:
+class FakeRagService:
     def __init__(self) -> None:
         self.operations = FakeOperations()
         self.retrieval = FakeRetrievalService()
@@ -194,48 +194,65 @@ class FakeRagRuntime:
         self.admin = FakeAdminService()
         self.closed = False
 
-    def get_retrieval_service(self) -> FakeRetrievalService:
-        return self.retrieval
+    async def search(self, query: str, **kwargs) -> RetrievalResult:
+        return await self.retrieval.search(query, **kwargs)
 
-    def get_evaluation_retrieval_service(
+    async def evaluation_search(
         self,
-    ) -> FakeEvaluationRetrievalService:
-        return self.evaluation_retrieval
+        query: str,
+        **kwargs,
+    ) -> EvaluationRetrievalResult:
+        return await self.evaluation_retrieval.search(query, **kwargs)
 
-    def get_admin_service(self) -> FakeAdminService:
-        return self.admin
+    async def start_warmup(self, force: bool = False) -> dict:
+        return await self.operations.start(force=force)
+
+    async def get_warmup_status(self) -> dict:
+        return await self.operations.get_status()
+
+    async def ensure_ready(self, wait_seconds: float = 20) -> dict:
+        return await self.operations.ensure_ready(wait_seconds)
+
+    async def health(self) -> RagHealthStatus:
+        return await self.admin.health()
+
+    async def invalidate(self, knowledge_base_id: str = "default") -> None:
+        await self.admin.invalidate(knowledge_base_id)
+
+    async def read_chunks(self, **kwargs) -> tuple[StoredChunk, ...]:
+        return await self.admin.read_chunks(**kwargs)
 
     async def close(self) -> None:
         self.closed = True
 
 
-class FakeIngestionRuntime:
+class FakeIngestionService:
     def __init__(self) -> None:
+        self.delegate = _FakeIngestionPipeline()
+        self.closed = False
+
+    async def ingest(self, path: str) -> IngestionReport:
+        return await self.delegate.ingest(path)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class FakeServices:
+    def __init__(self) -> None:
+        self.rag = FakeRagService()
         self.ingestion = FakeIngestionService()
         self.closed = False
 
-    def get_ingestion_service(self) -> FakeIngestionService:
-        return self.ingestion
-
     async def close(self) -> None:
-        self.closed = True
-
-
-class FakeRuntime:
-    def __init__(self) -> None:
-        self.rag_runtime = FakeRagRuntime()
-        self.ingestion_runtime = FakeIngestionRuntime()
-        self.closed = False
-
-    async def close(self) -> None:
-        await self.ingestion_runtime.close()
-        await self.rag_runtime.close()
+        await self.ingestion.close()
+        await self.rag.close()
         self.closed = True
 
 
 @pytest.fixture
 def service(tmp_path: Path):
-    runtime = FakeRuntime()
+    runtime = FakeServices()
     app = create_app(
         runtime_factory=lambda: runtime,
         service_settings=KnowledgeServiceSettings(
@@ -277,7 +294,7 @@ async def test_search_requires_key_and_preserves_traceability(service) -> None:
         "doc_type": "text",
         "industry": "半导体",
     }
-    assert runtime.rag_runtime.retrieval.calls[0]["retrieval_mode"] == "hybrid"
+    assert runtime.rag.retrieval.calls[0]["retrieval_mode"] == "hybrid"
     assert runtime.closed is True
 
 
@@ -320,16 +337,16 @@ async def test_evaluation_trace_uses_dedicated_authenticated_endpoint(service) -
     assert "content" not in payload["trace"]["stages"]["bm25"][0]
     assert payload["trace"]["configuration"]["query_cache_enabled"] is False
     assert (
-        runtime.rag_runtime.evaluation_retrieval.calls[0]["retrieval_mode"] == "hybrid"
+        runtime.rag.evaluation_retrieval.calls[0]["retrieval_mode"] == "hybrid"
     )
-    assert runtime.rag_runtime.retrieval.calls == []
+    assert runtime.rag.retrieval.calls == []
 
 
 @pytest.mark.asyncio
 async def test_evaluation_trace_is_disabled_outside_enabled_profiles(
     tmp_path: Path,
 ) -> None:
-    runtime = FakeRuntime()
+    runtime = FakeServices()
     app = create_app(
         runtime_factory=lambda: runtime,
         service_settings=KnowledgeServiceSettings(
@@ -351,8 +368,8 @@ async def test_evaluation_trace_is_disabled_outside_enabled_profiles(
             )
 
     assert response.status_code == 404
-    assert runtime.rag_runtime.evaluation_retrieval.calls == []
-    assert runtime.rag_runtime.retrieval.calls == []
+    assert runtime.rag.evaluation_retrieval.calls == []
+    assert runtime.rag.retrieval.calls == []
 
 
 @pytest.mark.asyncio
@@ -383,7 +400,7 @@ async def test_ingestion_is_confined_to_server_root(service) -> None:
     assert escaped.status_code == 400
     assert windows_absolute.status_code == 400
     assert accepted.status_code == 200
-    assert runtime.ingestion_runtime.ingestion.paths == [
+    assert runtime.ingestion.delegate.paths == [
         str((root / "allowed").resolve())
     ]
 
@@ -392,31 +409,31 @@ async def test_ingestion_is_confined_to_server_root(service) -> None:
 async def test_remote_runtime_uses_http_service_without_local_chroma(service) -> None:
     app, server_runtime, _ = service
     async with LifespanManager(app):
-        remote = RemoteRagRuntime(
+        remote = HttpRagService(
             base_url="http://knowledge.test",
             api_key="test-secret",
             transport=httpx.ASGITransport(app=app),
         )
-        assert not hasattr(remote, "get_ingestion_service")
-        ingestion_remote = RemoteIngestionRuntime(
+        assert not hasattr(remote, "ingest")
+        ingestion_remote = HttpIngestionService(
             base_url="http://knowledge.test",
             api_key="test-secret",
             transport=httpx.ASGITransport(app=app),
         )
-        result = await remote.get_retrieval_service().search(
+        result = await remote.search(
             "测试查询",
             top_k=2,
             use_query_cache=False,
             retrieval_mode="bm25",
         )
-        traced = await remote.get_evaluation_retrieval_service().search(
+        traced = await remote.evaluation_search(
             "评测查询",
             top_k=3,
             retrieval_mode="hybrid",
         )
-        health = await remote.get_admin_service().health()
-        chunks = await remote.get_admin_service().read_chunks(limit=1)
-        report = await ingestion_remote.get_ingestion_service().ingest("allowed")
+        health = await remote.health()
+        chunks = await remote.read_chunks(limit=1)
+        report = await ingestion_remote.ingest("allowed")
         await remote.close()
         await ingestion_remote.close()
 
@@ -427,7 +444,7 @@ async def test_remote_runtime_uses_http_service_without_local_chroma(service) ->
     assert health.ready is True
     assert chunks[0].metadata.source_page == 8
     assert report.chunks_written == 2
-    assert server_runtime.rag_runtime.retrieval.calls[0]["retrieval_mode"] == "bm25"
+    assert server_runtime.rag.retrieval.calls[0]["retrieval_mode"] == "bm25"
 
 
 @pytest.mark.asyncio
@@ -464,28 +481,28 @@ async def test_chunk_store_migrates_legacy_corpus_only_once(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
-async def test_configured_runtime_selects_remote_client(monkeypatch) -> None:
+async def test_configured_factory_selects_http_rag_service(monkeypatch) -> None:
     monkeypatch.setenv("RAG_RUNTIME_MODE", "remote")
     monkeypatch.setenv("KNOWLEDGE_SERVICE_URL", "http://knowledge.test")
     monkeypatch.setenv("KNOWLEDGE_SERVICE_API_KEY", "test-secret")
 
-    runtime = create_configured_rag_runtime()
+    service = create_configured_rag_service()
 
-    assert isinstance(runtime, RemoteRagRuntime)
-    assert not hasattr(runtime, "_embedding_provider")
-    await runtime.close()
+    assert isinstance(service, HttpRagService)
+    assert not hasattr(service, "_embedding_provider")
+    await service.close()
 
 
 @pytest.mark.asyncio
-async def test_configured_ingestion_runtime_is_separate(monkeypatch) -> None:
+async def test_configured_ingestion_service_is_separate(monkeypatch) -> None:
     monkeypatch.setenv("RAG_RUNTIME_MODE", "remote")
     monkeypatch.setenv("KNOWLEDGE_SERVICE_URL", "http://knowledge.test")
 
-    runtime = create_configured_ingestion_runtime()
+    service = create_configured_ingestion_service()
 
-    assert isinstance(runtime, RemoteIngestionRuntime)
-    assert not hasattr(runtime, "get_retrieval_service")
-    await runtime.close()
+    assert isinstance(service, HttpIngestionService)
+    assert not hasattr(service, "search")
+    await service.close()
 
 
 def test_configured_remote_runtime_requires_service_url(monkeypatch) -> None:
@@ -493,14 +510,14 @@ def test_configured_remote_runtime_requires_service_url(monkeypatch) -> None:
     monkeypatch.delenv("KNOWLEDGE_SERVICE_URL", raising=False)
 
     with pytest.raises(RuntimeError, match="必须配置 KNOWLEDGE_SERVICE_URL"):
-        create_configured_rag_runtime()
+        create_configured_rag_service()
 
 
 def test_configured_runtime_rejects_unknown_mode(monkeypatch) -> None:
     monkeypatch.setenv("RAG_RUNTIME_MODE", "automatic")
 
     with pytest.raises(ValueError, match="仅支持 remote 或 local"):
-        create_configured_rag_runtime()
+        create_configured_rag_service()
 
 
 def test_configured_runtime_rejects_local_mode_outside_service(monkeypatch) -> None:
@@ -508,4 +525,4 @@ def test_configured_runtime_rejects_local_mode_outside_service(monkeypatch) -> N
     monkeypatch.delenv("KNOWLEDGE_SERVICE_URL", raising=False)
 
     with pytest.raises(RuntimeError, match="只允许 Knowledge Service"):
-        create_configured_rag_runtime()
+        create_configured_rag_service()

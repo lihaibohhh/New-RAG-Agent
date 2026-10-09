@@ -23,8 +23,8 @@ from react_agent.conversations.infrastructure.langgraph_repository import (
 )
 from react_agent.conversations.service import ConversationService
 from react_agent.configuration.settings import settings
-from knowledge.client import create_configured_rag_runtime
-from knowledge.runtime_ports import AgentRagRuntimePort
+from knowledge.client import create_configured_rag_service
+from knowledge.services import RagService
 from agent_tools.documents.docx import create_docx_tool
 from agent_tools.documents.excel import create_excel_tool
 from agent_tools.documents.markdown import create_markdown_tool
@@ -44,7 +44,7 @@ class ApplicationServices:
     conversation_persistence: ConversationPersistenceConfig
     effective_checkpoint_backend: str
     _checkpointer_factory: CheckpointerFactory = field(repr=False, compare=False)
-    _rag_runtime: AgentRagRuntimePort = field(repr=False, compare=False)
+    _rag_service: RagService = field(repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -71,8 +71,8 @@ async def create_application_services(
     """Create, configure and connect the complete application object graph."""
     checkpointer_factory = CheckpointerFactory()
     checkpointer = await checkpointer_factory.create(conversation_config)
-    rag_runtime = create_configured_rag_runtime()
-    dependencies = _compose_agent_dependencies(agent_context, rag_runtime)
+    rag_service = create_configured_rag_service()
+    dependencies = _compose_agent_dependencies(agent_context, rag_service)
     graph = compile_agent_graph(checkpointer)
     return ApplicationServices(
         agent=AgentService(dependencies, graph),
@@ -84,18 +84,18 @@ async def create_application_services(
             checkpointer
         ),
         _checkpointer_factory=checkpointer_factory,
-        _rag_runtime=rag_runtime,
+        _rag_service=rag_service,
     )
 
 
 def _compose_agent_dependencies(
     agent_context: AgentContext,
-    rag_runtime: AgentRagRuntimePort,
+    rag_service: RagService,
 ) -> AgentDependencies:
     """Select the model adapter and the exact tool set injected into Agent."""
     _validate_model_context_budget(agent_context)
     rag_tool = create_rag_tool(
-        retrieval_service_provider=rag_runtime.get_retrieval_service,
+        retrieval_service=rag_service,
         max_retries=settings.tools.rag.max_retries,
         timeout=settings.tools.rag.client_timeout,
     )
@@ -180,7 +180,7 @@ def get_application_status(services: ApplicationServices) -> ApplicationStatus:
 async def close_application_services(services: ApplicationServices) -> None:
     """Release only the resources owned by this application object graph."""
     try:
-        await services._rag_runtime.close()
+        await services._rag_service.close()
     finally:
         await services._checkpointer_factory.close()
 
@@ -191,4 +191,4 @@ async def warmup_application_services(
     wait_seconds: int | float = 120,
 ) -> dict[str, Any]:
     """Trigger the RAG operational use case without exposing its runtime container."""
-    return await services._rag_runtime.operations.ensure_ready(wait_seconds)
+    return await services._rag_service.ensure_ready(wait_seconds)

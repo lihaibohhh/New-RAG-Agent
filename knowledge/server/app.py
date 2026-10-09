@@ -6,7 +6,7 @@ import hmac
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path, PureWindowsPath
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 
@@ -17,7 +17,8 @@ from knowledge.transport.schemas import (
     SearchRequest,
     WarmupRequest,
 )
-from knowledge.server.settings import KnowledgeServiceSettings
+from knowledge.services import IngestionService, RagService
+from knowledge.settings import KnowledgeServiceSettings, KnowledgeSettings
 from knowledge.contracts import KnowledgeValidationError
 from knowledge.transport.codecs import (
     evaluation_result_to_payload,
@@ -27,16 +28,20 @@ from knowledge.transport.codecs import (
     stored_chunk_page_to_payload,
     warmup_response_to_payload,
 )
-from knowledge.runtime_ports import (
-    IngestionRuntimePort,
-    KnowledgeServerRuntimePort,
-    RagRuntimePort,
-)
-from knowledge.server.runtime import create_knowledge_runtime
+from knowledge.server.runtime import create_knowledge_services_from_env
 
 
 logger = logging.getLogger(__name__)
-RuntimeFactory = Callable[[], KnowledgeServerRuntimePort]
+
+
+class KnowledgeServicesPort(Protocol):
+    rag: RagService
+    ingestion: IngestionService
+
+    async def close(self) -> None: ...
+
+
+RuntimeFactory = Callable[[], KnowledgeServicesPort]
 
 
 def _resolve_ingestion_path(root: Path, relative_path: str) -> Path:
@@ -60,20 +65,18 @@ def _resolve_ingestion_path(root: Path, relative_path: str) -> Path:
 
 def create_app(
     *,
-    runtime_factory: RuntimeFactory = create_knowledge_runtime,
+    runtime_factory: RuntimeFactory = create_knowledge_services_from_env,
     service_settings: KnowledgeServiceSettings | None = None,
 ) -> FastAPI:
     """创建可注入测试 Runtime 的 Knowledge Service。"""
-    configured = service_settings or KnowledgeServiceSettings.from_env()
+    configured = service_settings or KnowledgeSettings.from_env().service
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         runtime = runtime_factory()
-        rag_view = runtime.rag_runtime
-        ingestion_view = runtime.ingestion_runtime
-        app.state.knowledge_runtime = runtime
-        app.state.rag_runtime = rag_view
-        app.state.ingestion_runtime = ingestion_view
+        app.state.knowledge_services = runtime
+        app.state.rag_service = runtime.rag
+        app.state.ingestion_service = runtime.ingestion
         app.state.knowledge_settings = configured
         if configured.require_api_key and not configured.api_key:
             await runtime.close()
@@ -87,7 +90,7 @@ def create_app(
                 "管理与检索接口当前未启用鉴权"
             )
         if configured.warmup_on_start:
-            rag_view.operations.start(force=False)
+            await runtime.rag.start_warmup(force=False)
         try:
             yield
         finally:
@@ -99,11 +102,11 @@ def create_app(
         lifespan=lifespan,
     )
 
-    def rag_runtime(request: Request) -> RagRuntimePort:
-        return request.app.state.rag_runtime
+    def rag_service(request: Request) -> RagService:
+        return request.app.state.rag_service
 
-    def ingestion_runtime(request: Request) -> IngestionRuntimePort:
-        return request.app.state.ingestion_runtime
+    def ingestion_service(request: Request) -> IngestionService:
+        return request.app.state.ingestion_service
 
     def require_api_key(
         request: Request,
@@ -137,7 +140,7 @@ def create_app(
     @app.get("/api/v1/health/ready", tags=["system"])
     async def ready(request: Request) -> dict[str, Any]:
         try:
-            health = await rag_runtime(request).get_admin_service().health()
+            health = await rag_service(request).health()
         except Exception as exc:
             logger.exception("[KnowledgeService] readiness 检查失败")
             return {
@@ -158,16 +161,12 @@ def create_app(
         tags=["retrieval"],
     )
     async def search(body: SearchRequest, request: Request) -> dict[str, Any]:
-        result = (
-            await rag_runtime(request)
-            .get_retrieval_service()
-            .search(
-                body.query,
-                top_k=body.top_k,
-                filters=body.filters,
-                use_query_cache=body.use_query_cache,
-                retrieval_mode=body.retrieval_mode,
-            )
+        result = await rag_service(request).search(
+            body.query,
+            top_k=body.top_k,
+            filters=body.filters,
+            use_query_cache=body.use_query_cache,
+            retrieval_mode=body.retrieval_mode,
         )
         return retrieval_result_to_payload(result)
 
@@ -185,15 +184,11 @@ def create_app(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Evaluation retrieval API 未启用",
             )
-        result = (
-            await rag_runtime(request)
-            .get_evaluation_retrieval_service()
-            .search(
-                body.query,
-                top_k=body.top_k,
-                filters=body.filters,
-                retrieval_mode=body.retrieval_mode,
-            )
+        result = await rag_service(request).evaluation_search(
+            body.query,
+            top_k=body.top_k,
+            filters=body.filters,
+            retrieval_mode=body.retrieval_mode,
         )
         return evaluation_result_to_payload(result)
 
@@ -203,7 +198,9 @@ def create_app(
         tags=["operations"],
     )
     async def warmup_status(request: Request) -> dict[str, Any]:
-        return warmup_response_to_payload(rag_runtime(request).operations.get_status())
+        return warmup_response_to_payload(
+            await rag_service(request).get_warmup_status()
+        )
 
     @app.post(
         "/api/v1/runtime/warmup",
@@ -211,10 +208,11 @@ def create_app(
         tags=["operations"],
     )
     async def warmup(body: WarmupRequest, request: Request) -> dict[str, Any]:
-        manager = rag_runtime(request).operations
         if body.force:
-            manager.start(force=True)
-        return warmup_response_to_payload(await manager.ensure_ready(body.wait_seconds))
+            await rag_service(request).start_warmup(force=True)
+        return warmup_response_to_payload(
+            await rag_service(request).ensure_ready(body.wait_seconds)
+        )
 
     @app.get(
         "/api/v1/admin/health",
@@ -222,7 +220,7 @@ def create_app(
         tags=["admin"],
     )
     async def admin_health(request: Request) -> dict[str, Any]:
-        health = await rag_runtime(request).get_admin_service().health()
+        health = await rag_service(request).health()
         return health_status_to_payload(health)
 
     @app.post(
@@ -234,9 +232,7 @@ def create_app(
         body: InvalidateRequest,
         request: Request,
     ) -> dict[str, Any]:
-        await (
-            rag_runtime(request).get_admin_service().invalidate(body.knowledge_base_id)
-        )
+        await rag_service(request).invalidate(body.knowledge_base_id)
         return {"status": "invalidated", "knowledge_base_id": body.knowledge_base_id}
 
     @app.get(
@@ -250,14 +246,10 @@ def create_app(
         offset: int = Query(default=0, ge=0),
         limit: int = Query(default=500, ge=1, le=1000),
     ) -> dict[str, Any]:
-        items = (
-            await rag_runtime(request)
-            .get_admin_service()
-            .read_chunks(
-                source_file=source_file,
-                offset=offset,
-                limit=limit,
-            )
+        items = await rag_service(request).read_chunks(
+            source_file=source_file,
+            offset=offset,
+            limit=limit,
         )
         return stored_chunk_page_to_payload(
             items,
@@ -274,11 +266,7 @@ def create_app(
     async def ingest(body: IngestionRequest, request: Request) -> dict[str, Any]:
         root = request.app.state.knowledge_settings.ingestion_root
         data_path = _resolve_ingestion_path(root, body.relative_path)
-        report = (
-            await ingestion_runtime(request)
-            .get_ingestion_service()
-            .ingest(str(data_path))
-        )
+        report = await ingestion_service(request).ingest(str(data_path))
         return ingestion_report_to_payload(report)
 
     return app

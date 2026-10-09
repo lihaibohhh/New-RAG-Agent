@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 from mcp.server.fastmcp import FastMCP
 
-from knowledge.runtime_ports import RagOperationsPort
+from knowledge.services import RagService
 from mcp_service.observability import ToolCallTrace
 from mcp_service.responses import mcp_err, mcp_ok
 
@@ -50,7 +50,7 @@ def _build_start_warmup_data(result: dict[str, Any]) -> tuple[dict[str, Any], st
 def register_warmup_tools(
     server: FastMCP,
     *,
-    manager: RagOperationsPort,
+    rag_service: RagService,
 ) -> None:
     @server.tool(
         description=(
@@ -64,7 +64,7 @@ def register_warmup_tools(
     async def start_rag_singleton_warmup(force: bool = False) -> dict[str, Any]:
         trace = ToolCallTrace.start("start_rag_singleton_warmup")
         try:
-            result = manager.start(force=force)
+            result = await rag_service.start_warmup(force=force)
         except Exception as exc:
             return mcp_err(
                 f"{type(exc).__name__}: {exc}",
@@ -92,7 +92,7 @@ def register_warmup_tools(
     async def get_rag_singleton_warmup_status() -> dict[str, Any]:
         trace = ToolCallTrace.start("get_rag_singleton_warmup_status")
         try:
-            data = manager.get_status()
+            data = await rag_service.get_warmup_status()
         except Exception as exc:
             return mcp_err(
                 f"{type(exc).__name__}: {exc}",
