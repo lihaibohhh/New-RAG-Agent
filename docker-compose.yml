@@ -137,6 +137,64 @@ services:
       - .env
     restart: unless-stopped
 
+  agent-api:
+    image: src-agent-app:latest
+    pull_policy: never
+
+    command:
+      - python
+      - -m
+      - uvicorn
+      - api.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8010"
+      - --workers
+      - "1"
+
+    ports:
+      - "127.0.0.1:8010:8010"
+
+    depends_on:
+      redis:
+        condition: service_healthy
+      knowledge-service:
+        condition: service_healthy
+
+    env_file:
+      - .env
+
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - PYTHONPATH=/app
+      - RAG_RUNTIME_MODE=remote
+      - KNOWLEDGE_SERVICE_URL=http://knowledge-service:8001
+      - KNOWLEDGE_SERVICE_API_KEY=${KNOWLEDGE_SERVICE_API_KEY:-}
+      - KNOWLEDGE_SERVICE_TIMEOUT=${KNOWLEDGE_SERVICE_TIMEOUT:-150}
+      - CHECKPOINT_BACKEND=${CHECKPOINT_BACKEND:-sqlite}
+      - CHECKPOINT_DB_PATH=/app/data/agent-state/agent_checkpoints.sqlite3
+      - POSTGRES_DB_URL=${POSTGRES_DOCKER_DB_URL:-${POSTGRES_DB_URL:-}}
+      - OUTPUT_DIR=/app/outputs
+
+    volumes:
+      - ./data/agent-state:/app/data/agent-state
+      - ./outputs:/app/outputs
+      - ./logs:/app/logs
+
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/api/v1/health/ready', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+    restart: unless-stopped
+
   # ==========================================
   # 部队 4：一次性评测任务 - 仅通过 Knowledge Service API 读取知识库
   # 使用 `docker compose --profile eval run --rm eval-runner ...` 显式启动。

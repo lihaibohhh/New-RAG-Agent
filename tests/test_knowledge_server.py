@@ -21,9 +21,7 @@ from knowledge.contracts import (
 from knowledge.rag.infrastructure.retrieval.chunk_corpus import (
     MigratingChunkCorpusAdapter,
 )
-from knowledge.foundation.storage.sqlite_chunk_store import (
-    SQLiteChunkStoreAdapter,
-)
+from knowledge.foundation.chunk_store import SQLiteChunkStoreAdapter
 from knowledge.client import (
     RemoteIngestionRuntime,
     RemoteRagRuntime,
