@@ -5,8 +5,8 @@ from __future__ import annotations
 import threading
 from typing import Any, Literal
 
-from knowledge.foundation.models import EmbeddingProviderAdapter
-from knowledge.foundation.storage.sqlite_chunk_store import SQLiteChunkStoreAdapter
+from knowledge.foundation.chunk_store import SQLiteChunkStoreAdapter
+from knowledge.foundation.embedding import EmbeddingProviderAdapter
 from knowledge.runtime.config import SharedResourceConfig
 from knowledge.runtime.device import resolve_runtime_device
 

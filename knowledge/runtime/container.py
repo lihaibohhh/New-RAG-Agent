@@ -2,17 +2,24 @@
 
 from __future__ import annotations
 
-from typing import cast
+from typing import Protocol, cast
 
 from knowledge.ingestion.runtime import LocalIngestionRuntime
 from knowledge.rag.runtime import LocalRagRuntime
 from knowledge.runtime.config import KnowledgeRuntimeConfig
-from knowledge.runtime.internal_ports import CacheInvalidationCoordinatorPort
 from knowledge.runtime.resources import SharedKnowledgeResources
 from knowledge.runtime_ports import (
     IngestionRuntimePort,
     RagRuntimePort,
 )
+
+
+class _CacheInvalidationCoordinator(Protocol):
+    """连接建库提交事件与 RAG 缓存失效，仅供组合根使用。"""
+
+    async def invalidate(self) -> None: ...
+
+    async def notify_index_changed(self) -> None: ...
 
 
 class KnowledgeRuntime:
@@ -51,9 +58,9 @@ class KnowledgeRuntime:
         """返回不暴露查询能力的本地建库视图。"""
         return self._ingestion_runtime
 
-    def _create_index_changed_handler(self) -> CacheInvalidationCoordinatorPort:
+    def _create_index_changed_handler(self) -> _CacheInvalidationCoordinator:
         return cast(
-            CacheInvalidationCoordinatorPort,
+            _CacheInvalidationCoordinator,
             self._rag_runtime.create_cache_invalidator(),
         )
 

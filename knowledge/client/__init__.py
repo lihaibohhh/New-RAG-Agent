@@ -8,8 +8,8 @@ from knowledge.client.access import (
     load_client_config,
 )
 from knowledge.client.config import KnowledgeClientConfig
+from knowledge.client.http import KnowledgeServiceClient
 from knowledge.client.remote import (
-    KnowledgeServiceClient,
     RemoteEvaluationRetrievalService,
     RemoteIngestionRuntime,
     RemoteIngestionService,

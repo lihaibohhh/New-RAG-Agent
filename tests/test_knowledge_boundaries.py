@@ -39,7 +39,7 @@ def test_rag_owns_internal_contracts_ports_and_adapters() -> None:
     assert (package_root / "rag" / "contracts.py").is_file()
     assert (package_root / "rag" / "ports.py").is_file()
     assert (package_root / "rag" / "infrastructure").is_dir()
-    assert (package_root / "rag" / "admin" / "service.py").is_file()
+    assert (package_root / "rag" / "admin.py").is_file()
     assert (
         package_root / "rag" / "infrastructure" / "storage" / "chroma_knowledge_base.py"
     ).is_file()
@@ -157,7 +157,7 @@ def test_offline_chunk_reader_does_not_create_full_runtime(monkeypatch) -> None:
 
 def test_http_transport_codecs_are_shared_by_client_and_server() -> None:
     package_root = Path(__file__).parent.parent / "knowledge"
-    client_source = (package_root / "client" / "remote.py").read_text(encoding="utf-8")
+    client_source = (package_root / "client" / "http.py").read_text(encoding="utf-8")
     server_source = (package_root / "server" / "app.py").read_text(encoding="utf-8")
 
     assert "RetrievedChunk(" not in client_source

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from knowledge.client.remote import KnowledgeServiceClient
+from knowledge.client import KnowledgeServiceClient
 from knowledge.contracts import (
     EvaluationCandidate,
     EvaluationRetrievalResult,
@@ -13,7 +13,6 @@ from knowledge.contracts import (
     RetrievalResult,
     StoredChunk,
 )
-from knowledge.server import models as server_models
 from knowledge.transport.codecs import (
     TransportPayloadError,
     evaluation_result_from_payload,
@@ -29,9 +28,6 @@ from knowledge.transport.codecs import (
     warmup_response_to_payload,
     warmup_status_from_payload,
 )
-from knowledge.transport.schemas import SearchRequest
-
-
 def test_retrieval_result_round_trip_preserves_all_fields() -> None:
     result = RetrievalResult(
         query="资本开支",
@@ -180,10 +176,6 @@ def test_invalid_remote_payload_has_stable_transport_error() -> None:
         retrieval_result_from_payload(
             {"chunks": [{"source_page": "not-an-integer"}]}
         )
-
-
-def test_server_request_models_reexport_transport_schema() -> None:
-    assert server_models.SearchRequest is SearchRequest
 
 
 @pytest.mark.asyncio

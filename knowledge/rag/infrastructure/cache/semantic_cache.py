@@ -3,9 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import logging
-import math
 from collections.abc import Callable
 from contextvars import ContextVar
 from typing import Any, Optional
@@ -13,6 +11,12 @@ from typing import Any, Optional
 import numpy as np
 
 from knowledge.contracts import KnowledgeDocument
+from knowledge.rag.infrastructure.cache.codec import (
+    deserialize_documents,
+    deserialize_vector,
+    serialize_documents,
+    serialize_vector,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -123,94 +127,6 @@ def _decode(v) -> str:
     return v.decode("utf-8") if isinstance(v, bytes) else v
 
 
-def _json_safe(value: Any) -> Any:
-    """把元数据收敛为 JSON 基本类型，不执行任意对象反序列化。"""
-    if value is None or isinstance(value, (str, bool, int)):
-        return value
-    if isinstance(value, float):
-        return value if math.isfinite(value) else str(value)
-    if isinstance(value, np.generic):
-        return _json_safe(value.item())
-    if isinstance(value, dict):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set)):
-        return [_json_safe(item) for item in value]
-    return str(value)
-
-
-def _serialize_documents(documents: list[KnowledgeDocument]) -> bytes:
-    """将内部 RAG 文档编码为受限 JSON 格式。"""
-    items: list[dict[str, Any]] = []
-    for document in documents:
-        page_content = str(document.content or "")
-        metadata = _json_safe(document.metadata.to_dict())
-        document_id = document.document_id
-        item: dict[str, Any] = {
-            "page_content": page_content,
-            "metadata": metadata,
-        }
-        if document_id not in (None, ""):
-            item["id"] = str(document_id)
-        items.append(item)
-
-    payload = {"schema_version": 1, "documents": items}
-    return json.dumps(
-        payload,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
-
-
-def _deserialize_documents(data: bytes | str) -> list[KnowledgeDocument]:
-    """读取受限 JSON，并重建内部 RAG 文档。"""
-    raw = data.decode("utf-8") if isinstance(data, bytes) else data
-    payload = json.loads(raw)
-    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
-        raise ValueError("不支持的语义缓存格式")
-
-    items = payload.get("documents")
-    if not isinstance(items, list):
-        raise ValueError("语义缓存 documents 字段无效")
-
-    documents: list[KnowledgeDocument] = []
-    for item in items:
-        if not isinstance(item, dict):
-            raise ValueError("语义缓存文档条目无效")
-        page_content = item.get("page_content")
-        metadata = item.get("metadata", {})
-        if not isinstance(page_content, str) or not isinstance(metadata, dict):
-            raise ValueError("语义缓存文档字段无效")
-        document_id = item.get("id")
-        documents.append(
-            KnowledgeDocument(
-                content=page_content,
-                metadata=metadata,
-                document_id=(
-                    str(document_id) if document_id not in (None, "") else None
-                ),
-            )
-        )
-    return documents
-
-
-def _serialize_vector(vector: np.ndarray) -> bytes:
-    """以固定的小端 float32 格式保存向量。"""
-    return np.asarray(vector, dtype="<f4").reshape(-1).tobytes(order="C")
-
-
-def _deserialize_vector(data: bytes, *, expected_size: int) -> np.ndarray:
-    """从原始 float32 字节恢复向量，并校验维度。"""
-    if len(data) % np.dtype("<f4").itemsize != 0:
-        raise ValueError("缓存向量字节长度无效")
-    vector = np.frombuffer(data, dtype="<f4")
-    if vector.size != expected_size:
-        raise ValueError(
-            f"缓存向量维度不匹配: expected={expected_size}, actual={vector.size}"
-        )
-    return vector
-
-
 # ── Tier-1: 精确匹配 ──────────────────────────────────────────────────────────
 async def _exact_get(query: str) -> Optional[list[KnowledgeDocument]]:
     try:
@@ -218,7 +134,7 @@ async def _exact_get(query: str) -> Optional[list[KnowledgeDocument]]:
         data = await r.get(_EXACT_PREFIX + _query_hash(query))
         if data:
             logger.info("[SemanticCache] ✅ Tier-1 精确命中: %s...", query[:40])
-            return _deserialize_documents(data)
+            return deserialize_documents(data)
     except Exception as e:
         logger.warning(f"[SemanticCache] ⚠️ Tier-1 读取失败: {e}")
     return None
@@ -229,7 +145,7 @@ async def _exact_set(query: str, docs: list[KnowledgeDocument], ttl: int) -> Non
         r = _get_redis()
         await r.set(
             _EXACT_PREFIX + _query_hash(query),
-            _serialize_documents(docs),
+            serialize_documents(docs),
             ex=ttl,
         )
     except Exception as e:
@@ -267,7 +183,7 @@ async def _semantic_get(
                 # 向量 key 已 TTL 过期，对应 index 条目变为孤儿，跳过即可
                 continue
             try:
-                cached_vec = _deserialize_vector(
+                cached_vec = deserialize_vector(
                     raw_vec,
                     expected_size=query_vec.size,
                 )
@@ -289,7 +205,7 @@ async def _semantic_get(
                     f"[SemanticCache] ✅ Tier-2 语义命中 "
                     f"(sim={best_score:.4f} ≥ {threshold})"
                 )
-                return _deserialize_documents(raw_res)
+                return deserialize_documents(raw_res)
 
     except Exception as e:
         logger.warning(f"[SemanticCache] ⚠️ Tier-2 读取失败: {e}")
@@ -340,8 +256,8 @@ async def _semantic_set(
 
         # 原子写入向量、结果、索引记录（三条 Pipeline，TTL 各自独立）
         pipe = r.pipeline()
-        pipe.set(_SEM_VEC_PREFIX + entry_id, _serialize_vector(query_vec), ex=ttl)
-        pipe.set(_SEM_RES_PREFIX + entry_id, _serialize_documents(docs), ex=ttl)
+        pipe.set(_SEM_VEC_PREFIX + entry_id, serialize_vector(query_vec), ex=ttl)
+        pipe.set(_SEM_RES_PREFIX + entry_id, serialize_documents(docs), ex=ttl)
         pipe.hset(_SEM_INDEX_KEY, entry_id, query[:60])  # 预览文本仅供调试
         await pipe.execute()
 
