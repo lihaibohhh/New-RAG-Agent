@@ -7,7 +7,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage
 
-from react_agent.agent.context_management.contracts import TurnBlock, TurnSegments
+from react_agent.agent.context_management.contracts import TurnSegments
 from react_agent.agent.tool_flow import SYSTEM_SENTINEL_NAMES
 
 
@@ -30,34 +30,32 @@ def filter_runtime_sentinels(messages: Sequence[Any]) -> list[Any]:
     ]
 
 
-def segment_turn_blocks(messages: Sequence[Any]) -> tuple[TurnBlock, ...]:
+def segment_turn_blocks(messages: Sequence[Any]) -> tuple[tuple[Any, ...], ...]:
     """按用户轮次分组；紧邻的多条用户消息属于同一轮。"""
-    blocks: list[TurnBlock] = []
+    blocks: list[tuple[Any, ...]] = []
     current: list[Any] = []
     for message in messages:
         if is_real_human_message(message) and current and not is_real_human_message(
             current[-1]
         ):
-            blocks.append(TurnBlock(messages=tuple(current)))
+            blocks.append(tuple(current))
             current = []
         current.append(message)
     if current:
-        blocks.append(TurnBlock(messages=tuple(current)))
+        blocks.append(tuple(current))
     return tuple(blocks)
 
 
 def segment_current_turn(messages: Sequence[Any]) -> TurnSegments:
-    """最后一个含真实用户输入的 TurnBlock 为当前轮。"""
+    """最后一个含真实用户输入的消息组为当前轮。"""
     blocks = segment_turn_blocks(messages)
     if not blocks or not any(
-        is_real_human_message(message) for message in blocks[-1].messages
+        is_real_human_message(message) for message in blocks[-1]
     ):
         return TurnSegments(completed=tuple(messages))
     return TurnSegments(
-        completed=tuple(
-            message for block in blocks[:-1] for message in block.messages
-        ),
-        current=blocks[-1].messages,
+        completed=tuple(message for block in blocks[:-1] for message in block),
+        current=blocks[-1],
     )
 
 

@@ -1,6 +1,6 @@
 # =============================================================================
 # react_agent/configuration/settings.py
-# 项目唯一配置入口
+# Agent 应用配置入口
 #
 # 职责：
 #   1. 定位项目根目录，加载 .env（不覆盖 Conda / 系统已有的环境变量）
@@ -18,7 +18,7 @@ import os
 import sys
 import yaml
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, SecretStr, model_validator
@@ -109,8 +109,6 @@ class SecretsConfig(BaseModel):
 
     TAVILY_API_KEY: str = Field(default="")
 
-    DOCLING_API_KEY: str = Field(default="")
-
     LOCAL_OPENAI_BASE_URL: str = Field(default="http://127.0.0.1:8000/v1")
     LOCAL_OPENAI_API_KEY: str = Field(default="local-key")
 
@@ -181,60 +179,6 @@ class PostgresConfig(BaseModel):
         if self.POSTGRES_POOL_MIN_SIZE > self.POSTGRES_POOL_MAX_SIZE:
             raise ValueError("POSTGRES_POOL_MIN_SIZE 不能大于 POSTGRES_POOL_MAX_SIZE")
         return self
-
-
-class DoclingConfig(BaseModel):
-    """独立 Docling Serve 的解析与自动路由配置。"""
-
-    DOCLING_ENABLED: bool = Field(default=False)
-    DOCLING_STRICT_MODE: bool = Field(default=False)
-    DOCLING_PARSER_MODE: Literal["auto", "local", "docling"] = "auto"
-    DOCLING_BASE_URL: str = Field(default="http://127.0.0.1:5001")
-    DOCLING_REQUEST_TIMEOUT: float = Field(default=120.0, gt=0)
-    DOCLING_TASK_TIMEOUT: float = Field(default=3600.0, gt=0)
-    DOCLING_POLL_INTERVAL: float = Field(default=2.0, gt=0)
-    DOCLING_MAX_PAGES_PER_TASK: int = Field(default=3, gt=0)
-    DOCLING_SEGMENT_RETRIES: int = Field(default=1, ge=0)
-    DOCLING_AUTO_IMAGE_BYTES_PER_PAGE: int = Field(default=307_200, gt=0)
-    DOCLING_AUTO_MIN_TEXT_CHARS_PER_PAGE: int = Field(default=100, ge=0)
-    DOCLING_AUTO_MIN_IMAGE_AREA_RATIO: float = Field(default=0.15, ge=0, le=1)
-    DOCLING_AUTO_MIN_TABLE_LIKE_PAGES_RATIO: float = Field(default=0.6, ge=0, le=1)
-    DOCLING_AUTO_MIN_MULTI_COLUMN_PAGES_RATIO: float = Field(default=0.4, ge=0, le=1)
-    DOCLING_AUTO_SAMPLE_PAGES: int = Field(default=5, gt=0)
-    DOCLING_MAX_PDF_PAGES: int = Field(default=200, gt=0)
-    DOCLING_LOCAL_MIN_PAGE_COVERAGE: float = Field(default=0.65, ge=0, le=1)
-    DOCLING_LOCAL_MIN_CHARS_PER_PAGE: int = Field(default=80, ge=0)
-    DOCLING_LOCAL_MAX_REPLACEMENT_RATIO: float = Field(default=0.005, ge=0, le=1)
-    DOCLING_LOCAL_MIN_TRACEABLE_RATIO: float = Field(default=0.95, ge=0, le=1)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _load_from_env(cls, values: Any) -> dict[str, Any]:
-        """将环境变量交回 Pydantic 统一转换和校验，避免绕过比例边界。"""
-        payload = dict(values or {})
-        for field_name in cls.model_fields:
-            value = os.getenv(field_name, "").strip()
-            if value:
-                payload[field_name] = value
-        return payload
-
-
-class RagIngestionConfig(BaseModel):
-    """离线建库的资源边界与失败策略。"""
-
-    RAG_INGESTION_WORKERS: int = Field(default=1, ge=1, le=16)
-    RAG_INGESTION_BATCH_SIZE: int = Field(default=1_000, ge=1, le=20_000)
-    RAG_INGESTION_FAIL_FAST: bool = Field(default=True)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _load_from_env(cls, values: Any) -> dict[str, Any]:
-        payload = dict(values or {})
-        for field_name in cls.model_fields:
-            value = os.getenv(field_name, "").strip()
-            if value:
-                payload[field_name] = value
-        return payload
 
 
 # ---------------------------------------------------------------------------
@@ -330,8 +274,6 @@ class Settings(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     yaml: YamlConfig = Field(default_factory=_load_yaml)
     postgres: PostgresConfig = Field(default_factory=PostgresConfig)
-    docling: DoclingConfig = Field(default_factory=DoclingConfig)
-    ingestion: RagIngestionConfig = Field(default_factory=RagIngestionConfig)
     storage: FileStorageConfig = Field(default_factory=FileStorageConfig)
 
     # 便捷属性：让 llm.py 改动最小

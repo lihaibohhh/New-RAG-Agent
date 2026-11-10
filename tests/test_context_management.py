@@ -27,9 +27,10 @@ from react_agent.agent.context_management.projection import (
     project_current_tool_messages,
     project_tool_content,
 )
-from react_agent.agent.context_management.protocol import (
+from react_agent.agent.tool_flow import (
     ToolProtocolError,
-    validate_tool_exchanges,
+    repair_and_validate_tool_exchanges,
+    repair_and_validate_tool_results,
 )
 from react_agent.agent.contracts.state import State
 from react_agent.agent.config import AgentContext
@@ -117,7 +118,7 @@ def test_history_truncation_keeps_parallel_tool_exchange_atomically() -> None:
 
     selected = context.as_list()[1:]
     assert selected == recent_turn + [current]
-    assert len(validate_tool_exchanges(selected)) == 1
+    assert repair_and_validate_tool_exchanges(selected) == selected
     assert context.diagnostics.history_truncated is True
     assert list(state.messages) == old_turn + recent_turn + [current]
 
@@ -144,7 +145,9 @@ def test_history_truncation_never_splits_oversized_current_exchange() -> None:
     )
 
     assert context.as_list()[1:] == messages
-    assert len(validate_tool_exchanges(context.as_list()[1:])) == 1
+    assert repair_and_validate_tool_exchanges(context.as_list()[1:]) == (
+        context.as_list()[1:]
+    )
 
 
 def test_history_truncation_does_not_skip_an_oversized_middle_turn() -> None:
@@ -208,11 +211,29 @@ def test_history_truncation_does_not_skip_an_oversized_middle_turn() -> None:
         ),
     ],
 )
-def test_tool_exchange_validator_rejects_orphans_and_mismatches(
+def test_tool_exchange_boundary_rejects_orphans_and_mismatches(
     messages: list, match: str
 ) -> None:
     with pytest.raises(ToolProtocolError, match=match):
-        validate_tool_exchanges(messages)
+        repair_and_validate_tool_exchanges(messages)
+
+
+def test_tool_result_boundary_repairs_missing_result_before_state_update() -> None:
+    assistant = AIMessage(
+        content="",
+        tool_calls=[
+            {"id": "call-a", "name": "search", "args": {}},
+            {"id": "call-b", "name": "search", "args": {}},
+        ],
+    )
+    existing = ToolMessage(tool_call_id="call-a", content="结果 A")
+
+    repaired = repair_and_validate_tool_results(assistant, [existing])
+
+    assert [message.tool_call_id for message in repaired] == ["call-a", "call-b"]
+    assert json.loads(repaired[1].content)["error"]["code"] == (
+        "TOOL_RESULT_MISSING"
+    )
 
 
 def test_model_context_rejects_orphan_tool_result_before_provider_call() -> None:

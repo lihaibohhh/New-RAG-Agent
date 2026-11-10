@@ -21,6 +21,7 @@ from react_agent.agent.tool_flow.payload import bound_tool_payload
 from react_agent.agent.tool_flow.protocol import (
     extract_tool_call_ids,
     get_tool_call_name,
+    repair_and_validate_tool_results,
 )
 from react_agent.agent.tool_flow.results import (
     count_attempted_rag_calls_in_current_turn,
@@ -43,6 +44,17 @@ def bound_tool_messages(messages: list[Any], max_chars: int) -> list[Any]:
             )
         result.append(message)
     return result
+
+
+def _validated_tool_messages(
+    assistant_message: AIMessage,
+    messages: list[Any],
+    *,
+    max_chars: int,
+) -> list[ToolMessage]:
+    """在结果进入 State 前统一限幅、补齐并校验工具批次。"""
+    bounded = bound_tool_messages(messages, max_chars)
+    return repair_and_validate_tool_results(assistant_message, bounded)
 
 
 async def execute_dynamic_tools(
@@ -69,9 +81,10 @@ async def execute_dynamic_tools(
                 len(invalid_messages),
             )
             return {
-                "messages": bound_tool_messages(
+                "messages": _validated_tool_messages(
+                    last_message,
                     invalid_messages,
-                    agent_config.max_tool_output_chars,
+                    max_chars=agent_config.max_tool_output_chars,
                 )
             }
 
@@ -93,9 +106,10 @@ async def execute_dynamic_tools(
             node = ToolNode(active_tools, handle_tool_errors=True)
             result = await node.ainvoke(state, config)
             all_messages = invalid_messages + result.get("messages", [])
-            result["messages"] = bound_tool_messages(
+            result["messages"] = _validated_tool_messages(
+                last_message,
                 all_messages,
-                agent_config.max_tool_output_chars,
+                max_chars=agent_config.max_tool_output_chars,
             )
             return result
 
@@ -117,12 +131,13 @@ async def execute_dynamic_tools(
             executed_messages = invoke_result.get("messages", [])
 
         update: dict[str, Any] = {
-            "messages": bound_tool_messages(
+            "messages": _validated_tool_messages(
+                last_message,
                 invalid_messages
                 + blocked_messages
                 + budget_messages
                 + executed_messages,
-                agent_config.max_tool_output_chars,
+                max_chars=agent_config.max_tool_output_chars,
             )
         }
         if budget_blocked_calls:
@@ -315,10 +330,14 @@ def _recover_from_execution_error(
         raise exc
 
     logger.error("工具执行异常后补齐 %d 条 ToolMessage", len(missing))
+    assistant_message = state.messages[target_index]
+    if not isinstance(assistant_message, AIMessage):
+        raise exc
     return {
-        "messages": bound_tool_messages(
+        "messages": _validated_tool_messages(
+            assistant_message,
             missing,
-            dependencies.config.max_tool_output_chars,
+            max_chars=dependencies.config.max_tool_output_chars,
         )
     }
 

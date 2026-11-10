@@ -14,10 +14,6 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from react_agent.agent.context_management.budgeting import MessageTokenCounter
 from react_agent.agent.context_management.contracts import ConversationSummary
-from react_agent.agent.context_management.protocol import (
-    ToolProtocolError,
-    validate_tool_exchanges,
-)
 from react_agent.agent.context_management.segmentation import (
     filter_runtime_sentinels,
     segment_current_turn,
@@ -119,7 +115,7 @@ def load_valid_summary(
         return None, 0
     completed = segment_current_turn(messages).completed
     boundaries = {
-        getattr(block.messages[-1], "id", None)
+        getattr(block[-1], "id", None)
         for block in segment_turn_blocks(completed)
     }
     if ids[-1] not in boundaries:
@@ -266,10 +262,10 @@ def plan_compaction(
     chosen: list[Any] = []
     selected_tokens = 0
     for block in available[:-_RECENT_TURNS]:
-        block_tokens = counter.count(list(block.messages))
+        block_tokens = counter.count(list(block))
         if selected_tokens + block_tokens > source_limit:
             break
-        chosen.extend(block.messages)
+        chosen.extend(block)
         selected_tokens += block_tokens
     if not chosen:
         logger.info(
@@ -277,11 +273,6 @@ def plan_compaction(
             "source_limit=%s",
             source_limit,
         )
-        return None
-    try:
-        validate_tool_exchanges(chosen)
-    except ToolProtocolError:
-        logger.warning("history_compaction_skipped | reason=invalid_tool_exchange")
         return None
     new_ids = tuple(str(message.id) for message in chosen if getattr(message, "id", None))
     if len(new_ids) != len(chosen) or len(set(new_ids)) != len(new_ids):

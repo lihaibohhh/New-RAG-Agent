@@ -206,18 +206,6 @@ def test_critical_excerpts_are_sentence_scoped_and_ignore_benign_bu() -> None:
     assert "不仅促进" not in excerpts
 
 
-def test_compaction_skips_unmatched_completed_tool_exchange() -> None:
-    old, recent, current = _messages()
-    broken = old[:3] + [
-        AIMessage(
-            id="m4",
-            content="",
-            tool_calls=[{"id": "missing", "name": "search", "args": {}}],
-        )
-    ] + old[4:]
-    assert plan_compaction(State(messages=broken + recent + current), _config()) is None
-
-
 def test_summary_rejects_stale_original_and_preserves_full_history() -> None:
     old, recent, current = _messages()
     plan = plan_compaction(State(messages=old + recent + current), _config())

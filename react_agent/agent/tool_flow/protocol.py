@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
@@ -11,6 +12,13 @@ from agent_tools.contracts.results import tool_error
 
 
 SYSTEM_SENTINEL_NAMES = frozenset({"system_monitor", "system_terminator"})
+
+
+logger = logging.getLogger(__name__)
+
+
+class ToolProtocolError(ValueError):
+    """工具调用与结果无法形成合法的一一对应关系。"""
 
 
 def extract_tool_call_ids(message: AnyMessage) -> list[str]:
@@ -49,6 +57,122 @@ def get_tool_call_name(tool_call: Any) -> str:
     return str(
         tool_call.get("name") or (tool_call.get("function") or {}).get("name") or ""
     )
+
+
+def _raw_tool_call_ids(message: AIMessage) -> list[str]:
+    calls = list(message.tool_calls or []) + list(message.invalid_tool_calls or [])
+    if not calls:
+        calls = list((message.additional_kwargs or {}).get("tool_calls", []))
+    return [
+        str(
+            (
+                call.get("id")
+                if isinstance(call, dict)
+                else getattr(call, "id", "")
+            )
+            or ""
+        )
+        for call in calls
+    ]
+
+
+def _repair_missing_tool_results(messages: list[Any]) -> list[Any]:
+    """只补齐具有明确调用 ID、但没有对应结果的工具调用。"""
+    source = list(messages)
+    result: list[Any] = []
+    index = 0
+    while index < len(source):
+        message = source[index]
+        result.append(message)
+        required_ids = extract_tool_call_ids(message)
+        if not required_ids:
+            index += 1
+            continue
+
+        answered_ids: list[str] = []
+        next_index = index + 1
+        while next_index < len(source) and isinstance(
+            source[next_index], ToolMessage
+        ):
+            result.append(source[next_index])
+            answered_ids.append(source[next_index].tool_call_id)
+            next_index += 1
+        for tool_call_id in required_ids:
+            if tool_call_id in answered_ids:
+                continue
+            result.append(
+                ToolMessage(
+                    tool_call_id=tool_call_id,
+                    content=json.dumps(
+                        tool_error(
+                            tool_name="unknown",
+                            query="",
+                            code="TOOL_RESULT_MISSING",
+                            message="工具调用未完成，结果未记录。",
+                            meta={"executed": False, "synthetic": True},
+                        ),
+                        ensure_ascii=False,
+                    ),
+                )
+            )
+            logger.info("为悬空 tool_call 补 ToolMessage: %s", tool_call_id)
+        index = next_index
+    return result
+
+
+def _validate_tool_exchanges(messages: list[Any]) -> None:
+    """校验并行调用的每个 ID 恰有一个紧邻的工具结果。"""
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        if isinstance(message, ToolMessage):
+            raise ToolProtocolError(f"孤立的工具结果: {message.tool_call_id}")
+        if isinstance(message, AIMessage):
+            raw_ids = _raw_tool_call_ids(message)
+            if any(not call_id for call_id in raw_ids):
+                raise ToolProtocolError("模型工具调用缺少 ID")
+            if len(raw_ids) != len(set(raw_ids)):
+                raise ToolProtocolError("模型消息中存在重复的工具调用 ID")
+
+        call_ids = extract_tool_call_ids(message)
+        if not call_ids:
+            index += 1
+            continue
+        results: list[ToolMessage] = []
+        next_index = index + 1
+        while next_index < len(messages) and isinstance(
+            messages[next_index], ToolMessage
+        ):
+            results.append(messages[next_index])
+            next_index += 1
+        result_ids = [result.tool_call_id for result in results]
+        if len(result_ids) != len(set(result_ids)):
+            raise ToolProtocolError("同一工具调用存在重复结果")
+        if set(result_ids) != set(call_ids):
+            raise ToolProtocolError(
+                f"工具调用与结果不匹配: calls={call_ids}, results={result_ids}"
+            )
+        index = next_index
+
+
+def repair_and_validate_tool_exchanges(messages: list[Any]) -> list[Any]:
+    """补齐明确缺失的工具结果，并严格校验最终消息序列。"""
+    repaired = _repair_missing_tool_results(messages)
+    _validate_tool_exchanges(repaired)
+    return repaired
+
+
+def repair_and_validate_tool_results(
+    assistant_message: AIMessage,
+    tool_messages: list[Any],
+) -> list[ToolMessage]:
+    """在 ToolMessage 进入 State 前补齐并校验一个完整工具批次。"""
+    repaired = repair_and_validate_tool_exchanges(
+        [assistant_message, *tool_messages]
+    )[1:]
+    if not all(isinstance(message, ToolMessage) for message in repaired):
+        raise ToolProtocolError("工具执行批次包含非 ToolMessage 结果")
+    return list(repaired)
 
 
 def extract_recent_tool_messages(messages: list[AnyMessage]) -> list[ToolMessage]:
@@ -131,9 +255,12 @@ def close_tool_calls_for_budget(
 
 __all__ = [
     "SYSTEM_SENTINEL_NAMES",
+    "ToolProtocolError",
     "close_tool_calls_for_budget",
     "extract_recent_tool_messages",
     "extract_tool_call_ids",
     "find_last_real_human_index",
     "get_tool_call_name",
+    "repair_and_validate_tool_exchanges",
+    "repair_and_validate_tool_results",
 ]
