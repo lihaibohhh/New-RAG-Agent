@@ -29,12 +29,17 @@ def test_agent_settings_ignore_knowledge_runtime_tuning_environment(
     monkeypatch.setenv("RAG_CPU_RERANK_CANDIDATES", "0")
     monkeypatch.setenv("RAG_RERANKER_CONCURRENCY", "not-an-integer")
     monkeypatch.setenv("RAG_RERANKER_BATCH_SIZE", "999")
+    monkeypatch.setenv("DOCLING_REQUEST_TIMEOUT", "not-a-number")
+    monkeypatch.setenv("RAG_INGESTION_WORKERS", "not-an-integer")
 
     configured = Settings()
 
     assert configured.tools.rag.max_retries == 2
     assert configured.tools.rag.client_timeout == 150
     assert not hasattr(configured.tools.rag, "cpu_rerank_candidates")
+    assert not hasattr(configured, "docling")
+    assert not hasattr(configured, "ingestion")
+    assert not hasattr(configured.secrets, "DOCLING_API_KEY")
 
 
 def test_api_settings_own_api_redis_configuration(monkeypatch) -> None:

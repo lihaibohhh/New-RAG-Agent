@@ -24,7 +24,6 @@ from react_agent.agent.context_management.projection import (
     project_completed_tool_messages,
     project_current_tool_messages,
 )
-from react_agent.agent.context_management.protocol import sanitize_dangling_tool_calls
 from react_agent.agent.context_management.segmentation import (
     segment_current_turn,
     segment_turn_blocks,
@@ -49,9 +48,9 @@ def _drop_oldest_completed_turn(messages: list[Any]) -> list[Any] | None:
     if not completed:
         return None
     blocks = segment_turn_blocks(completed)
-    return [
-        message for block in blocks[1:] for message in block.messages
-    ] + list(segments.current)
+    return [message for block in blocks[1:] for message in block] + list(
+        segments.current
+    )
 
 
 def _budget_report(
@@ -198,9 +197,8 @@ def select_context_for_budget(
         )
 
     while True:
-        repaired = sanitize_dangling_tool_calls(selected)
         historical_records = select_historical_evidence(
-            conversation_evidence, repaired
+            conversation_evidence, selected
         )
         if historical_evidence_limit > 0 and historical_records:
             historical_evidence_text = render_historical_evidence_index(
@@ -213,12 +211,12 @@ def select_context_for_budget(
         historical_evidence_omitted_by_budget = max(
             0, len(historical_records) - historical_evidence_limit
         )
-        projected = attach_evidence_index(repaired, evidence_index)
+        projected = attach_evidence_index(selected, evidence_index)
         if budget is None:
             selected = projected
             break
 
-        evidence_tokens = counter.count(projected) - counter.count(repaired)
+        evidence_tokens = counter.count(projected) - counter.count(selected)
         historical_evidence_tokens = (
             counter.count([{"role": "assistant", "content": historical_evidence_text}])
             if historical_evidence_text
@@ -255,7 +253,7 @@ def select_context_for_budget(
                 for tool_chars in (2048, 1024, 512, 256, 0):
                     old_base, projected_count, removed_chars = (
                         project_completed_tool_messages(
-                            repaired, max_chars=tool_chars
+                            selected, max_chars=tool_chars
                         )
                     )
                     if not projected_count:
@@ -305,7 +303,7 @@ def select_context_for_budget(
                 excerpt_chars_removed,
                 records_omitted,
             ) in _projected_candidates(
-                repaired, turn_evidence, turn_evidence_omitted_count
+                selected, turn_evidence, turn_evidence_omitted_count
             ):
                 budget_report = _budget_report(
                     selected,

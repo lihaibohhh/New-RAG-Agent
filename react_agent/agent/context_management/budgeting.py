@@ -92,7 +92,7 @@ def trim_history_to_budget(
     remaining = max_tokens - counter.count(current)
     kept: list[Any] = []
     for block in reversed(segment_turn_blocks(segments.completed)):
-        block_messages = list(block.messages)
+        block_messages = list(block)
         block_tokens = counter.count(block_messages)
         if block_tokens > remaining:
             break

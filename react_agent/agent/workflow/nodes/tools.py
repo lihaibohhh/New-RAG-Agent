@@ -31,6 +31,7 @@ from react_agent.agent.tool_flow import (
     execute_dynamic_tools,
     extract_recent_tool_messages,
     parse_tool_batch,
+    repair_and_validate_tool_results,
 )
 
 
@@ -53,14 +54,18 @@ async def dynamic_tool_node(
             "unexpected_recursion_boundary | node=tools remaining_steps=%s",
             state.remaining_steps,
         )
+        closed = close_tool_calls_for_budget(
+            last_message,
+            termination_reason=(
+                TerminationReason.UNEXPECTED_RECURSION_BOUNDARY.value
+            ),
+            error_code="GRAPH_STEP_BUDGET_EXHAUSTED",
+            error_message="本轮执行步数不足，该工具未执行。",
+        )
         return {
-            "messages": close_tool_calls_for_budget(
+            "messages": repair_and_validate_tool_results(
                 last_message,
-                termination_reason=(
-                    TerminationReason.UNEXPECTED_RECURSION_BOUNDARY.value
-                ),
-                error_code="GRAPH_STEP_BUDGET_EXHAUSTED",
-                error_message="本轮执行步数不足，该工具未执行。",
+                closed,
             ),
             "termination_reason": TerminationReason.UNEXPECTED_RECURSION_BOUNDARY.value,
         }
@@ -167,12 +172,13 @@ async def close_pending_tool_calls(state: State) -> dict[str, Any]:
             "error_code": "RAG_CALL_BUDGET_EXHAUSTED",
             "error_message": "本轮知识库检索次数已达到上限，该调用未执行。",
         }
+    closed = close_tool_calls_for_budget(
+        last_message,
+        termination_reason=state.termination_reason,
+        **kwargs,
+    )
     return {
-        "messages": close_tool_calls_for_budget(
-            last_message,
-            termination_reason=state.termination_reason,
-            **kwargs,
-        )
+        "messages": repair_and_validate_tool_results(last_message, closed)
     }
 
 

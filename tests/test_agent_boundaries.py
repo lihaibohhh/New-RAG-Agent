@@ -25,7 +25,9 @@ from react_agent.agent.tool_flow import (
     bound_tool_payload,
     count_attempted_rag_calls_in_current_turn,
     count_successful_rag_calls_in_current_turn,
+    execute_dynamic_tools,
     extract_tool_call_ids,
+    repair_and_validate_tool_exchanges,
 )
 from react_agent.agent.workflow.graph import build_base_graph
 from react_agent.agent.workflow.nodes import (
@@ -60,6 +62,62 @@ def test_tool_call_ids_cover_valid_invalid_and_provider_payloads() -> None:
 
     assert extract_tool_call_ids(valid) == ["valid-1", "invalid-1"]
     assert extract_tool_call_ids(provider_payload) == ["raw-1"]
+
+
+@pytest.mark.asyncio
+async def test_tool_results_are_repaired_before_state_update(monkeypatch) -> None:
+    class IncompleteToolNode:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        async def ainvoke(self, _state, _config):
+            return {
+                "messages": [
+                    ToolMessage(
+                        tool_call_id="call-a",
+                        name="search",
+                        content=json.dumps(
+                            tool_success(tool_name="search", query="a", data={})
+                        ),
+                    )
+                ]
+            }
+
+    monkeypatch.setattr(
+        "react_agent.agent.tool_flow.execution.ToolNode",
+        IncompleteToolNode,
+    )
+
+    def search(query: str) -> str:
+        return json.dumps(tool_success(tool_name="search", query=query, data={}))
+
+    dependencies = AgentDependencies(
+        config=AgentContext(),
+        model_provider=lambda: None,
+        tools=(StructuredTool.from_function(search, description="测试搜索"),),
+    )
+    assistant = AIMessage(
+        content="",
+        tool_calls=[
+            {"id": "call-a", "name": "search", "args": {"query": "a"}},
+            {"id": "call-b", "name": "search", "args": {"query": "b"}},
+        ],
+    )
+    state = State(messages=[HumanMessage(content="问题"), assistant])
+
+    update = await execute_dynamic_tools(state, {}, dependencies)
+    tool_messages = update["messages"]
+
+    assert [message.tool_call_id for message in tool_messages] == [
+        "call-a",
+        "call-b",
+    ]
+    assert json.loads(tool_messages[1].content)["error"]["code"] == (
+        "TOOL_RESULT_MISSING"
+    )
+    assert repair_and_validate_tool_exchanges(
+        [assistant, *tool_messages]
+    ) == [assistant, *tool_messages]
 
 
 @pytest.mark.asyncio

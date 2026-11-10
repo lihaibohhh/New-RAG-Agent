@@ -15,22 +15,6 @@ class TurnSegments:
 
 
 @dataclass(frozen=True)
-class TurnBlock:
-    """一组连续的用户输入及其后续模型和工具消息。"""
-
-    messages: tuple[Any, ...]
-
-
-@dataclass(frozen=True)
-class ToolExchange:
-    """一次模型工具调用及其按 ID 配对的全部工具结果。"""
-
-    assistant_message: Any
-    tool_messages: tuple[Any, ...]
-    call_ids: tuple[str, ...]
-
-
-@dataclass(frozen=True)
 class ConversationSummary:
     """较早已完成轮次的可追溯压缩结果。"""
 
@@ -169,7 +153,5 @@ __all__ = [
     "ContextDiagnostics",
     "ConversationSummary",
     "ModelContext",
-    "ToolExchange",
-    "TurnBlock",
     "TurnSegments",
 ]

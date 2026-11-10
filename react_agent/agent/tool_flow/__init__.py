@@ -7,11 +7,14 @@ from react_agent.agent.tool_flow.execution import (
 from react_agent.agent.tool_flow.payload import bound_tool_payload
 from react_agent.agent.tool_flow.protocol import (
     SYSTEM_SENTINEL_NAMES,
+    ToolProtocolError,
     close_tool_calls_for_budget,
     extract_recent_tool_messages,
     extract_tool_call_ids,
     find_last_real_human_index,
     get_tool_call_name,
+    repair_and_validate_tool_exchanges,
+    repair_and_validate_tool_results,
 )
 from react_agent.agent.tool_flow.results import (
     ToolBatch,
@@ -24,6 +27,7 @@ from react_agent.agent.tool_flow.results import (
 __all__ = [
     "SYSTEM_SENTINEL_NAMES",
     "ToolBatch",
+    "ToolProtocolError",
     "bound_tool_messages",
     "bound_tool_payload",
     "close_tool_calls_for_budget",
@@ -35,4 +39,6 @@ __all__ = [
     "find_last_real_human_index",
     "get_tool_call_name",
     "parse_tool_batch",
+    "repair_and_validate_tool_exchanges",
+    "repair_and_validate_tool_results",
 ]

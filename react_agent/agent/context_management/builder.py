@@ -23,7 +23,6 @@ from react_agent.agent.context_management.contracts import (
     ModelContext,
 )
 from react_agent.agent.context_management.evidence import attach_evidence_index
-from react_agent.agent.context_management.protocol import validate_tool_exchanges
 from react_agent.agent.context_management.segmentation import (
     collapse_consecutive_humans,
     filter_runtime_sentinels,
@@ -32,6 +31,7 @@ from react_agent.agent.context_management.segmentation import (
     segment_turn_blocks,
 )
 from react_agent.agent.contracts.state import State
+from react_agent.agent.tool_flow import repair_and_validate_tool_exchanges
 
 
 logger = logging.getLogger(__name__)
@@ -139,11 +139,10 @@ def build_model_context(
         exc.compaction_usage = state.turn_compaction_usage
         raise
 
-    selected = selection.messages
+    selected = repair_and_validate_tool_exchanges(selection.messages)
     summary_text = selection.summary_text
     historical_evidence_text = selection.historical_evidence_text
     budget_report = selection.budget_report
-    validate_tool_exchanges(selected)
     model_input = build_model_input(
         system_prompt,
         directive,

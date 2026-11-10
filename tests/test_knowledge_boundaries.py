@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from knowledge.contracts import StoredChunk
+import knowledge.ingestion.service as ingestion_service_module
+from knowledge.contracts import KnowledgeDocument, StoredChunk
 from knowledge.ingestion import IngestionBatchSettings, IngestionPipeline
 from knowledge.runtime import create_knowledge_services
 from knowledge.settings import KnowledgeSettings
@@ -186,6 +187,68 @@ def test_ingestion_config_rejects_invalid_resource_limits() -> None:
             pass
         else:
             raise AssertionError(f"配置应被拒绝: {kwargs}")
+
+
+def test_single_worker_ingestion_does_not_create_process_pool(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    class Writer:
+        def __init__(self) -> None:
+            self.documents: list[KnowledgeDocument] = []
+
+        def write(self, documents, **_kwargs) -> None:
+            self.documents.extend(documents)
+
+    class Manifest:
+        def __init__(self) -> None:
+            self.saved: dict[str, str] = {}
+
+        def save(self, record: dict[str, str]) -> None:
+            self.saved = dict(record)
+
+    def reject_pool(*_args, **_kwargs):
+        raise AssertionError("workers=1 时不应创建进程池")
+
+    def parse_one(args):
+        file_path, fingerprint, _source_root, _parser = args
+        return (
+            file_path,
+            fingerprint,
+            [KnowledgeDocument("content")],
+            None,
+            0.01,
+        )
+
+    monkeypatch.setattr(ingestion_service_module, "Pool", reject_pool)
+    monkeypatch.setattr(ingestion_service_module, "_parse_one", parse_one)
+    writer = Writer()
+    manifest = Manifest()
+    pipeline = IngestionPipeline(
+        writer=writer,
+        manifest=manifest,
+        page_counter=object(),
+        preflight=object(),
+        document_parser=object(),
+        index_changed=object(),
+        config=IngestionBatchSettings(workers=1),
+    )
+    source = tmp_path / "report.txt"
+
+    result = pipeline._run_pipeline(
+        data_path=tmp_path,
+        data_dir=str(tmp_path),
+        all_files=[source],
+        new_files=[(source, "fingerprint")],
+        skipped_files=[],
+        hash_record={},
+    )
+
+    assert result["status"] == "completed"
+    assert result["files_processed"] == 1
+    assert result["chunks_written"] == 1
+    assert len(writer.documents) == 1
+    assert manifest.saved == {str(source): "fingerprint"}
 
 
 @pytest.mark.asyncio

@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 def _parse_one(
     args: tuple[str, str, str, DocumentParserPort],
 ) -> tuple[str, str, list[KnowledgeDocument], str | None, float]:
-    """在独立进程中解析一个文件；保持模块顶层以兼容 Windows spawn。"""
+    """解析一个文件；保持模块顶层以兼容 Windows spawn。"""
     file_path, file_hash, source_root, parser = args
     started = time.perf_counter()
     try:
@@ -251,12 +251,14 @@ class IngestionPipeline:
             )
 
         wall_started = time.perf_counter()
-        pool = Pool(processes=workers)
+        pool = None
+        if workers == 1:
+            parse_results = map(_parse_one, task_args)
+        else:
+            pool = Pool(processes=workers)
+            parse_results = pool.imap_unordered(_parse_one, task_args)
         try:
-            for file_path, file_hash, chunks, error, elapsed in pool.imap_unordered(
-                _parse_one,
-                task_args,
-            ):
+            for file_path, file_hash, chunks, error, elapsed in parse_results:
                 files_done += 1
                 cpu_parse_total += elapsed
                 if error:
@@ -307,12 +309,14 @@ class IngestionPipeline:
                 tail_done = {path: fingerprint for path, fingerprint, _ in buffer}
                 flush_batch(tail_chunks, tail_done)
         except BaseException:
-            pool.terminate()
-            pool.join()
+            if pool is not None:
+                pool.terminate()
+                pool.join()
             raise
         else:
-            pool.close()
-            pool.join()
+            if pool is not None:
+                pool.close()
+                pool.join()
 
         wall_elapsed = time.perf_counter() - wall_started
         parallel_ratio = round(cpu_parse_total / wall_elapsed, 2) if wall_elapsed else 0
