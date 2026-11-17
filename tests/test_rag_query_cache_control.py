@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from knowledge.contracts import KnowledgeDocument
-from knowledge.rag.query import RetrievalService
+from knowledge.rag.application import RetrievalApplicationService
 
 
 class FakeCache:
@@ -88,7 +88,7 @@ async def test_evaluation_can_bypass_query_cache() -> None:
     )
     cache = FakeCache([cached])
     retriever = FakeRetriever(fresh)
-    service = RetrievalService(
+    service = RetrievalApplicationService(
         cache=cache,
         retriever=retriever,
         reranker=FakeReranker(),
@@ -111,7 +111,7 @@ async def test_online_default_still_uses_query_cache() -> None:
     )
     cache = FakeCache([cached])
     retriever = FakeRetriever(cached)
-    service = RetrievalService(
+    service = RetrievalApplicationService(
         cache=cache,
         retriever=retriever,
         reranker=FakeReranker(),
@@ -136,7 +136,7 @@ async def test_single_source_evaluation_never_reuses_hybrid_query_cache() -> Non
     )
     cache = FakeCache([cached])
     retriever = ModeAwareRetriever(bm25)
-    service = RetrievalService(
+    service = RetrievalApplicationService(
         cache=cache,
         retriever=retriever,
         reranker=FakeReranker(),

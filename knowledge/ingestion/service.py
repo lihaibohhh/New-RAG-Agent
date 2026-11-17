@@ -12,10 +12,11 @@ from pathlib import Path
 from typing import Any
 
 from knowledge.contracts import IngestionReport, KnowledgeDocument
+from knowledge.ingestion.contracts import ParseRequest
 from knowledge.settings import IngestionBatchSettings
 from knowledge.ingestion.document_service import (
     SUPPORTED_EXTENSIONS,
-    parse_file_to_documents,
+    parse_result_to_documents,
 )
 from knowledge.ingestion.ports import (
     DocumentParserPort,
@@ -38,10 +39,17 @@ def _parse_one(
     file_path, file_hash, source_root, parser = args
     started = time.perf_counter()
     try:
-        chunks = parse_file_to_documents(
-            parser,
-            file_path,
-            source_root=source_root,
+        result = asyncio.run(
+            parser.parse(
+                ParseRequest(
+                    file_path=file_path,
+                    source_root=source_root,
+                )
+            )
+        )
+        chunks = parse_result_to_documents(
+            result,
+            original_path=file_path,
         )
         return file_path, file_hash, chunks or [], None, time.perf_counter() - started
     except Exception as exc:

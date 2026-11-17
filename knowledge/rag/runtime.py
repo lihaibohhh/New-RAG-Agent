@@ -10,10 +10,10 @@ from typing import Any, Literal
 from knowledge.contracts import (
     EvaluationRetrievalResult,
     RagHealthStatus,
-    RetrievalResult,
     StoredChunk,
 )
 from knowledge.rag.admin import RagAdminService
+from knowledge.rag.application import RetrievalApplicationService
 from knowledge.rag.infrastructure.cache.semantic_cache import (
     RedisSemanticCacheAdapter,
 )
@@ -25,21 +25,27 @@ from knowledge.rag.infrastructure.retrieval.bm25_index import (
 from knowledge.rag.infrastructure.retrieval.bm25_repository import (
     RedisBm25Repository,
 )
+from knowledge.rag.infrastructure.retrieval.chroma_retriever import (
+    ChromaCandidateRetriever,
+)
+from knowledge.rag.infrastructure.retrieval.chunk_corpus import (
+    ChromaCorpusReaderAdapter,
+    MigratingChunkCorpusAdapter,
+)
 from knowledge.rag.infrastructure.retrieval.reranker import (
     RerankerProviderAdapter,
 )
 from knowledge.rag.infrastructure.storage import ChromaKnowledgeBaseAdapter
 from knowledge.settings import RagSettings
 from knowledge.rag.operations import RagWarmupManager
-from knowledge.rag.ports import ChunkStorePort, HybridRetrieverPort
-from knowledge.rag.query import RetrievalService
+from knowledge.rag.ports import ChunkStorePort
 from knowledge.rag.retrieval import HybridRetrievalService
 
 logger = logging.getLogger(__name__)
 
 
-class LocalRagService:
-    """组装并直接提供在线检索、评测、管理和预热能力。"""
+class LocalRagService(RetrievalApplicationService):
+    """可直接检索的应用服务，同时管理评测、运维和资源生命周期。"""
 
     def __init__(
         self,
@@ -51,206 +57,109 @@ class LocalRagService:
         chunk_store_provider: Callable[[], ChunkStorePort],
         knowledge_write_lock: threading.RLock,
     ) -> None:
+        profile = config.tuning.profile(device_provider())
+        logger.info(
+            "[RAG] runtime profile device=%s rerank_candidates=%s "
+            "rerank_top_n=%s reranker_concurrency=%s reranker_batch_size=%s",
+            profile.device,
+            profile.rerank_candidates,
+            profile.rerank_top_n,
+            profile.reranker_concurrency,
+            profile.reranker_batch_size,
+        )
         self._config = config
-        self._chroma_dir = chroma_dir
-        self._device_provider = device_provider
-        self._embedding_provider = embedding_provider
-        self._chunk_store_provider = chunk_store_provider
-        self._knowledge_write_lock = knowledge_write_lock
-        self._retrieval_service: RetrievalService | None = None
-        self._evaluation_retrieval_service = None
-        self._admin_service: RagAdminService | None = None
-        self._cache_invalidator: RagCacheInvalidator | None = None
-        self._hybrid_retriever: HybridRetrieverPort | None = None
-        self._vector_retriever = None
-        self._chunk_corpus = None
-        self._reranker = None
+        self._profile = profile
         self._lock = threading.RLock()
         self._redis_resources = RedisClientManager(
             url=config.redis.url,
             max_connections=config.redis.max_connections,
         )
-        self._operations = RagWarmupManager(self._get_retrieval_service)
-
-    def _get_retrieval_service(self) -> RetrievalService:
-        if self._retrieval_service is not None:
-            return self._retrieval_service
-
-        with self._lock:
-            if self._retrieval_service is None:
-                profile = self._config.tuning.profile(self._device_provider())
-                logger.info(
-                    "[RAG] runtime profile device=%s rerank_candidates=%s "
-                    "rerank_top_n=%s reranker_concurrency=%s "
-                    "reranker_batch_size=%s",
-                    profile.device,
-                    profile.rerank_candidates,
-                    profile.rerank_top_n,
-                    profile.reranker_concurrency,
-                    profile.reranker_batch_size,
-                )
-                cache = self._create_query_cache()
-                bm25_repository = self._create_bm25_repository()
-                retriever = HybridRetrievalService(
-                    vector_retriever=self._get_vector_retriever(),
-                    bm25_retriever=LazyBm25CandidateRetrieverAdapter(
-                        repository=bm25_repository,
-                        corpus_reader=self._get_chunk_corpus(),
-                        top_k=10,
-                    ),
-                    top_k_per_source=10,
-                )
-                reranker = RerankerProviderAdapter(
-                    device=profile.device,
-                    inference_concurrency=profile.reranker_concurrency,
-                    batch_size=profile.reranker_batch_size,
-                    model_name=self._config.reranker.model,
-                    threshold=self._config.reranker.threshold,
-                    debug=self._config.reranker.debug,
-                )
-                self._reranker = reranker
-                self._retrieval_service = RetrievalService(
-                    cache=cache,
-                    retriever=retriever,
-                    reranker=reranker,
-                    max_content_chars=self._config.tuning.max_content_chars,
-                    rerank_candidates=profile.rerank_candidates,
-                    rerank_top_n=profile.rerank_top_n,
-                )
-                self._hybrid_retriever = retriever
-                self._cache_invalidator = RagCacheInvalidator(
-                    bm25_cache=bm25_repository,
-                    query_cache=cache,
-                    retriever_provider=self._current_hybrid_retriever,
-                )
-        return self._retrieval_service
+        query_cache = RedisSemanticCacheAdapter(
+            redis_provider=self._redis_resources.get_async,
+            embedding_provider=embedding_provider,
+            ttl=config.redis.semantic_cache_ttl,
+            threshold=config.redis.semantic_cache_threshold,
+            min_score=config.redis.semantic_cache_min_score,
+        )
+        bm25_repository = RedisBm25Repository(
+            hmac_secret=config.redis.bm25_hmac_secret,
+            ttl=config.redis.bm25_index_ttl,
+            redis_provider=self._redis_resources.get_sync,
+        )
+        self._chunk_corpus = MigratingChunkCorpusAdapter(
+            store=chunk_store_provider(),
+            legacy_source=ChromaCorpusReaderAdapter(chroma_dir=chroma_dir),
+            lock=knowledge_write_lock,
+        )
+        self._vector_retriever = ChromaCandidateRetriever(
+            chroma_dir=chroma_dir,
+            top_k=10,
+            embedding_provider=embedding_provider,
+        )
+        self._hybrid_retriever = HybridRetrievalService(
+            vector_retriever=self._vector_retriever,
+            bm25_retriever=LazyBm25CandidateRetrieverAdapter(
+                repository=bm25_repository,
+                corpus_reader=self._chunk_corpus,
+                top_k=10,
+            ),
+            top_k_per_source=10,
+        )
+        self._reranker = RerankerProviderAdapter(
+            device=profile.device,
+            inference_concurrency=profile.reranker_concurrency,
+            batch_size=profile.reranker_batch_size,
+            model_name=config.reranker.model,
+            threshold=config.reranker.threshold,
+            debug=config.reranker.debug,
+        )
+        super().__init__(
+            cache=query_cache,
+            retriever=self._hybrid_retriever,
+            reranker=self._reranker,
+            max_content_chars=config.tuning.max_content_chars,
+            rerank_candidates=profile.rerank_candidates,
+            rerank_top_n=profile.rerank_top_n,
+        )
+        self._cache_invalidator = RagCacheInvalidator(
+            bm25_cache=bm25_repository,
+            query_cache=query_cache,
+            retriever_provider=lambda: self._hybrid_retriever,
+        )
+        self._operations = RagWarmupManager(lambda: self)
+        self._admin_service = RagAdminService(
+            cache_invalidator_provider=lambda: self._cache_invalidator,
+            status_provider=self._operations.get_status,
+            knowledge_base=ChromaKnowledgeBaseAdapter(chroma_dir=chroma_dir),
+            chunk_reader=self._chunk_corpus,
+        )
+        self._evaluation_retrieval_service = None
 
     def _get_evaluation_retrieval_service(self):
         """返回只供 eval-runner 使用的无缓存分阶段检索用例。"""
         if self._evaluation_retrieval_service is not None:
             return self._evaluation_retrieval_service
 
-        self._get_retrieval_service()
         with self._lock:
             if self._evaluation_retrieval_service is None:
                 from knowledge.rag.evaluation import EvaluationRetrievalService
 
-                if self._hybrid_retriever is None or self._reranker is None:
-                    raise RuntimeError("评测检索依赖尚未完成组装")
-                profile = self._config.tuning.profile(self._device_provider())
                 self._evaluation_retrieval_service = EvaluationRetrievalService(
                     retriever=self._hybrid_retriever,
                     reranker=self._reranker,
                     max_content_chars=self._config.tuning.max_content_chars,
-                    rerank_candidates=profile.rerank_candidates,
-                    production_rerank_top_n=profile.rerank_top_n,
-                    reranker_batch_size=profile.reranker_batch_size,
-                    device=profile.device,
+                    rerank_candidates=self._profile.rerank_candidates,
+                    production_rerank_top_n=self._profile.rerank_top_n,
+                    reranker_batch_size=self._profile.reranker_batch_size,
+                    device=self._profile.device,
                     source_top_k=10,
                     rrf_rank_constant=60,
                 )
         return self._evaluation_retrieval_service
 
-    def _get_admin_service(self) -> RagAdminService:
-        if self._admin_service is not None:
-            return self._admin_service
-        with self._lock:
-            if self._admin_service is None:
-                self._admin_service = self._build_admin_service()
-        return self._admin_service
-
-    def _build_admin_service(self) -> RagAdminService:
-        return RagAdminService(
-            cache_invalidator_provider=self._get_cache_invalidator,
-            status_provider=self._operations.get_status,
-            knowledge_base=ChromaKnowledgeBaseAdapter(chroma_dir=self._chroma_dir),
-            chunk_reader=self._get_chunk_corpus(),
-        )
-
-    def _create_cache_invalidator(self) -> RagCacheInvalidator:
-        """创建可由顶层组合根连接到建库提交事件的 RAG 失效处理器。"""
-        return RagCacheInvalidator(
-            bm25_cache=self._create_bm25_repository(),
-            query_cache=self._create_query_cache(),
-            retriever_provider=self._current_hybrid_retriever,
-        )
-
-    def _create_query_cache(self) -> RedisSemanticCacheAdapter:
-        return RedisSemanticCacheAdapter(
-            redis_provider=self._redis_resources.get_async,
-            embedding_provider=self._embedding_provider,
-            ttl=self._config.redis.semantic_cache_ttl,
-            threshold=self._config.redis.semantic_cache_threshold,
-            min_score=self._config.redis.semantic_cache_min_score,
-        )
-
-    def _create_bm25_repository(self) -> RedisBm25Repository:
-        return RedisBm25Repository(
-            hmac_secret=self._config.redis.bm25_hmac_secret,
-            ttl=self._config.redis.bm25_index_ttl,
-            redis_provider=self._redis_resources.get_sync,
-        )
-
-    def _get_vector_retriever(self):
-        if self._vector_retriever is not None:
-            return self._vector_retriever
-        with self._lock:
-            if self._vector_retriever is None:
-                from knowledge.rag.infrastructure.retrieval.chroma_retriever import (
-                    ChromaCandidateRetriever,
-                )
-
-                self._vector_retriever = ChromaCandidateRetriever(
-                    chroma_dir=self._chroma_dir,
-                    top_k=10,
-                    embedding_provider=self._embedding_provider,
-                )
-        return self._vector_retriever
-
-    def _get_chunk_corpus(self):
-        if self._chunk_corpus is not None:
-            return self._chunk_corpus
-        with self._lock:
-            if self._chunk_corpus is None:
-                from knowledge.rag.infrastructure.retrieval.chunk_corpus import (
-                    ChromaCorpusReaderAdapter,
-                    MigratingChunkCorpusAdapter,
-                )
-
-                self._chunk_corpus = MigratingChunkCorpusAdapter(
-                    store=self._chunk_store_provider(),
-                    legacy_source=ChromaCorpusReaderAdapter(
-                        chroma_dir=self._chroma_dir,
-                    ),
-                    lock=self._knowledge_write_lock,
-                )
-        return self._chunk_corpus
-
-    def _get_cache_invalidator(self) -> RagCacheInvalidator:
-        self._get_retrieval_service()
-        if self._cache_invalidator is None:
-            raise RuntimeError("RAG 缓存失效协调器尚未完成组装")
+    def create_index_changed_handler(self) -> RagCacheInvalidator:
+        """向建库模块公开唯一的索引变更处理器。"""
         return self._cache_invalidator
-
-    def _current_hybrid_retriever(self) -> HybridRetrieverPort | None:
-        return self._hybrid_retriever
-
-    async def search(
-        self,
-        query: str,
-        *,
-        top_k: int = 3,
-        filters: dict[str, Any] | None = None,
-        use_query_cache: bool = True,
-        retrieval_mode: str = "hybrid",
-    ) -> RetrievalResult:
-        return await self._get_retrieval_service().search(
-            query,
-            top_k=top_k,
-            filters=filters,
-            use_query_cache=use_query_cache,
-            retrieval_mode=retrieval_mode,
-        )
 
     async def evaluation_search(
         self,
@@ -283,10 +192,10 @@ class LocalRagService:
         return await self._operations.ensure_ready(wait_seconds)
 
     async def health(self) -> RagHealthStatus:
-        return await self._get_admin_service().health()
+        return await self._admin_service.health()
 
     async def invalidate(self, knowledge_base_id: str = "default") -> None:
-        await self._get_admin_service().invalidate(knowledge_base_id)
+        await self._admin_service.invalidate(knowledge_base_id)
 
     async def read_chunks(
         self,
@@ -295,7 +204,7 @@ class LocalRagService:
         offset: int = 0,
         limit: int | None = None,
     ) -> tuple[StoredChunk, ...]:
-        return await self._get_admin_service().read_chunks(
+        return await self._admin_service.read_chunks(
             source_file=source_file,
             offset=offset,
             limit=limit,
@@ -308,7 +217,7 @@ class LocalRagService:
         offset: int = 0,
         limit: int | None = None,
     ) -> tuple[StoredChunk, ...]:
-        return self._get_admin_service().read_chunks_sync(
+        return self._admin_service.read_chunks_sync(
             source_file=source_file,
             offset=offset,
             limit=limit,
@@ -330,14 +239,7 @@ class LocalRagService:
                 await close()
             except Exception:
                 logger.exception("[RAG] 关闭资源失败 resource=%s", name)
-        self._retrieval_service = None
         self._evaluation_retrieval_service = None
-        self._admin_service = None
-        self._cache_invalidator = None
-        self._hybrid_retriever = None
-        self._vector_retriever = None
-        self._chunk_corpus = None
-        self._reranker = None
 
 
 __all__ = ["LocalRagService"]

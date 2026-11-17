@@ -1,7 +1,6 @@
 """所有知识库文档解析的唯一应用层入口。"""
 from __future__ import annotations
 
-import asyncio
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -12,8 +11,6 @@ from knowledge.contracts import (
     SourceReference,
 )
 from knowledge.ingestion.contracts import (
-    OcrPolicy,
-    ParserHint,
     ParseRequest,
     ParseResult,
 )
@@ -118,33 +115,6 @@ def parse_result_to_documents(
     return documents
 
 
-def parse_file_to_documents(
-    parser: DocumentParserPort,
-    file_path: str,
-    *,
-    source_root: str | None = None,
-    parser_hint: ParserHint = "auto",
-    ocr_policy: OcrPolicy = "auto",
-) -> list[KnowledgeDocument]:
-    """使用显式注入的解析服务同步解析文件，供多进程 worker 调用。"""
-    request = ParseRequest(
-        file_path=file_path,
-        source_root=source_root,
-        parser_hint=parser_hint,
-        ocr_policy=ocr_policy,
-    )
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        pass
-    else:
-        raise RuntimeError(
-            "事件循环已运行，请直接 await DocumentParsingService.parse(...)。"
-        )
-    result = asyncio.run(parser.parse(request))
-    return parse_result_to_documents(result, original_path=file_path)
-
-
 __all__ = [
     "BASIC_EXTENSIONS",
     "DocumentParsingService",
@@ -152,6 +122,5 @@ __all__ = [
     "SUPPORTED_EXTENSIONS",
     "TABLE_EXTENSIONS",
     "UnsupportedDocumentError",
-    "parse_file_to_documents",
     "parse_result_to_documents",
 ]

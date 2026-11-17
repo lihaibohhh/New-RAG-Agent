@@ -236,6 +236,7 @@ async def _stream_v1_generator(
 
     架构：
     - _fill_task：asyncio.Task，驱动 agent.stream_events() 并将 SSE 帧放入 Queue
+    - producer_done：独立完成信号，避免向已满 Queue 写入哨兵阻塞取消流程
     - 主循环：用 asyncio.wait_for(q.get(), timeout=0.1) 拉帧，兼顾 is_disconnected 轮询
     - 超时：手动 deadline（Python 3.10 兼容），超时发 error+done 并 cancel task
     - 断连：每帧后检查 is_disconnected()，检测到就 cancel task 并静默 return（不发 done）
@@ -262,9 +263,10 @@ async def _stream_v1_generator(
         "unpriced_model_count": 0,
         "models": {},
     }
-    q: asyncio.Queue[str | None] = asyncio.Queue(
+    q: asyncio.Queue[str] = asyncio.Queue(
         maxsize=100
     )  # 背压：防止生产者跑太快撑爆内存
+    producer_done = asyncio.Event()
 
     # ── 生产者 Task ────────────────────────────────────────────────────────────
     async def _fill_task() -> None:
@@ -337,12 +339,17 @@ async def _stream_v1_generator(
                 )
             )
         finally:
-            await q.put(None)  # 哨兵，通知消费者流结束
+            # 完成状态不占用 Queue 容量；取消时也不会等待消费者腾出槽位。
+            producer_done.set()
 
     task = asyncio.create_task(_fill_task())
     # ── 消费者主循环 ────────────────────────────────────────────────────────────
     try:
         while True:
+            # 生产者结束后先排空已入队帧；两者同时成立才结束消费。
+            if producer_done.is_set() and q.empty():
+                break
+
             now = time.perf_counter()
 
             # 全局超时检查
@@ -386,9 +393,6 @@ async def _stream_v1_generator(
                     )
                     return  # 断连：直接退出，不发 done
                 continue
-
-            if frame is None:
-                break  # 哨兵：生产者正常结束
 
             yield frame
 

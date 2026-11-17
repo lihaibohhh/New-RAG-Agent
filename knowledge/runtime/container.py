@@ -47,7 +47,7 @@ class KnowledgeServices:
         )
 
     def _create_index_changed_handler(self) -> _CacheInvalidationCoordinator:
-        return self._local_rag._create_cache_invalidator()
+        return self._local_rag.create_index_changed_handler()
 
     async def close(self) -> None:
         """按模块后、共享资源后的顺序关闭完整对象图。"""

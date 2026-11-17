@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from typing import Any
@@ -233,6 +234,42 @@ async def test_stream_records_all_tokens_and_emits_done(monkeypatch: pytest.Monk
     assert done["currency"] == "CNY"
     assert done["unpriced_model_count"] == 1
     assert recorded == [("bucket", 18)]
+
+
+@pytest.mark.asyncio
+async def test_stream_disconnect_while_queue_is_full_does_not_deadlock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def record(_bucket_key: str, _tokens: int) -> None:
+        return None
+
+    monkeypatch.setattr(chat, "record_token_usage", record)
+    produced = 0
+
+    class Request:
+        async def is_disconnected(self) -> bool:
+            return True
+
+    class Agent:
+        async def stream_events(self, messages: list[Any], thread_id: str):
+            nonlocal produced
+            for index in range(250):
+                produced += 1
+                yield {
+                    "event": "on_tool_start",
+                    "name": "test_tool",
+                    "data": {"input": {"index": index}},
+                }
+
+    stream = chat._stream_v1_generator(
+        Request(), Agent(), "问题", "user:test:session", "session", "bucket"
+    )
+    first_frame = await stream.__anext__()
+    assert first_frame.startswith("event: tool_call\n")
+    assert produced > 100
+
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(stream.__anext__(), timeout=1.0)
 
 
 @pytest.mark.asyncio
