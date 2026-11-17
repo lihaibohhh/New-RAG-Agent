@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from knowledge.client import KnowledgeServiceClient
+from knowledge.client import HttpRagService
 from knowledge.contracts import (
     EvaluationCandidate,
     EvaluationRetrievalResult,
@@ -180,7 +180,7 @@ def test_invalid_remote_payload_has_stable_transport_error() -> None:
 
 @pytest.mark.asyncio
 async def test_client_request_schema_errors_remain_knowledge_validation_errors() -> None:
-    client = KnowledgeServiceClient(base_url="http://knowledge.test")
+    client = HttpRagService(base_url="http://knowledge.test")
     try:
         with pytest.raises(KnowledgeValidationError, match="SearchRequest"):
             await client.search("", top_k=0)

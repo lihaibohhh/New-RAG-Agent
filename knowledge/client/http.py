@@ -49,8 +49,8 @@ def _validated_request(
         ) from exc
 
 
-class KnowledgeServiceClient:
-    """Knowledge Service 的异步协议客户端，同时满足查询服务接口。"""
+class _KnowledgeHttpTransport:
+    """RAG与建库客户端共享的HTTP传输实现。"""
 
     def __init__(
         self,
@@ -135,6 +135,13 @@ class KnowledgeServiceClient:
             raise RuntimeError("Knowledge Service 返回了非对象 JSON")
         return payload
 
+    async def close(self) -> None:
+        await self._client.aclose()
+
+
+class HttpRagService(_KnowledgeHttpTransport):
+    """直接实现RAG公共契约的Knowledge HTTP客户端。"""
+
     async def search(
         self,
         query: str,
@@ -157,10 +164,7 @@ class KnowledgeServiceClient:
             "/api/v1/retrieval/search",
             json=request.model_dump(mode="json"),
         )
-        return retrieval_result_from_payload(
-            payload,
-            fallback_query=request.query,
-        )
+        return retrieval_result_from_payload(payload, fallback_query=request.query)
 
     async def evaluation_search(
         self,
@@ -171,7 +175,6 @@ class KnowledgeServiceClient:
         retrieval_mode: str = "hybrid",
         use_query_cache: bool = False,
     ) -> EvaluationRetrievalResult:
-        """调用 Knowledge Service 专用评测管道。"""
         if use_query_cache:
             raise KnowledgeValidationError("评测检索管道不允许使用语义查询缓存")
         request = _validated_request(
@@ -192,7 +195,7 @@ class KnowledgeServiceClient:
             fallback_retrieval_mode=request.retrieval_mode,
         )
 
-    async def request_warmup(
+    async def _request_warmup(
         self,
         *,
         wait_seconds: int | float = 20,
@@ -212,18 +215,26 @@ class KnowledgeServiceClient:
         )
 
     async def warmup(self) -> WarmupStatus:
-        """满足 RetrievalService 预热契约，供评测等现有调用方复用。"""
-        payload = await self.request_warmup(wait_seconds=120)
-        return warmup_status_from_payload(payload)
+        return warmup_status_from_payload(await self._request_warmup(wait_seconds=120))
 
-    async def warmup_status(self) -> dict[str, Any]:
+    async def start_warmup(self, force: bool = False) -> dict[str, Any]:
+        return await self._request_warmup(wait_seconds=0, force=force)
+
+    async def get_warmup_status(self) -> dict[str, Any]:
         return warmup_response_to_payload(
             await self._request("GET", "/api/v1/runtime/warmup")
         )
 
+    async def ensure_ready(
+        self,
+        wait_seconds: int | float = 20,
+    ) -> dict[str, Any]:
+        return await self._request_warmup(wait_seconds=wait_seconds)
+
     async def health(self) -> RagHealthStatus:
-        payload = await self._request("GET", "/api/v1/admin/health")
-        return health_status_from_payload(payload)
+        return health_status_from_payload(
+            await self._request("GET", "/api/v1/admin/health")
+        )
 
     async def invalidate(self, knowledge_base_id: str = "default") -> None:
         request = _validated_request(
@@ -236,37 +247,7 @@ class KnowledgeServiceClient:
             json=request.model_dump(mode="json"),
         )
 
-    async def ingest(self, relative_path: str) -> IngestionReport:
-        request = _validated_request(
-            IngestionRequest,
-            relative_path=relative_path,
-        )
-        payload = await self._request(
-            "POST",
-            "/api/v1/ingestions",
-            json=request.model_dump(mode="json"),
-        )
-        return ingestion_report_from_payload(
-            payload,
-            fallback_data_dir=request.relative_path,
-        )
-
-    def ingest_sync(self, relative_path: str) -> IngestionReport:
-        request = _validated_request(
-            IngestionRequest,
-            relative_path=relative_path,
-        )
-        payload = self._request_sync(
-            "POST",
-            "/api/v1/ingestions",
-            json=request.model_dump(mode="json"),
-        )
-        return ingestion_report_from_payload(
-            payload,
-            fallback_data_dir=request.relative_path,
-        )
-
-    async def list_chunks_page(
+    async def _list_chunks_page(
         self,
         *,
         source_file: str | None,
@@ -277,14 +258,10 @@ class KnowledgeServiceClient:
         if source_file:
             params["source_file"] = source_file
         return stored_chunk_page_from_payload(
-            await self._request(
-                "GET",
-                "/api/v1/admin/chunks",
-                params=params,
-            )
+            await self._request("GET", "/api/v1/admin/chunks", params=params)
         )
 
-    def list_chunks_page_sync(
+    def _list_chunks_page_sync(
         self,
         *,
         source_file: str | None,
@@ -295,62 +272,8 @@ class KnowledgeServiceClient:
         if source_file:
             params["source_file"] = source_file
         return stored_chunk_page_from_payload(
-            self._request_sync(
-                "GET",
-                "/api/v1/admin/chunks",
-                params=params,
-            )
+            self._request_sync("GET", "/api/v1/admin/chunks", params=params)
         )
-
-    async def close(self) -> None:
-        await self._client.aclose()
-
-
-class HttpRagService:
-    """RAG 服务的 HTTP 实现；调用方无需感知 Remote Runtime。"""
-
-    def __init__(
-        self,
-        *,
-        base_url: str,
-        api_key: str = "",
-        timeout: float = 150.0,
-        transport: httpx.AsyncBaseTransport | None = None,
-    ) -> None:
-        self._client = KnowledgeServiceClient(
-            base_url=base_url,
-            api_key=api_key,
-            timeout=timeout,
-            transport=transport,
-        )
-
-    async def search(self, query: str, **kwargs: Any) -> RetrievalResult:
-        return await self._client.search(query, **kwargs)
-
-    async def evaluation_search(
-        self,
-        query: str,
-        **kwargs: Any,
-    ) -> EvaluationRetrievalResult:
-        return await self._client.evaluation_search(query, **kwargs)
-
-    async def start_warmup(self, force: bool = False) -> dict[str, Any]:
-        return await self._client.request_warmup(wait_seconds=0, force=force)
-
-    async def get_warmup_status(self) -> dict[str, Any]:
-        return await self._client.warmup_status()
-
-    async def ensure_ready(
-        self,
-        wait_seconds: int | float = 20,
-    ) -> dict[str, Any]:
-        return await self._client.request_warmup(wait_seconds=wait_seconds)
-
-    async def health(self) -> RagHealthStatus:
-        return await self._client.health()
-
-    async def invalidate(self, knowledge_base_id: str = "default") -> None:
-        await self._client.invalidate(knowledge_base_id)
 
     async def read_chunks(
         self,
@@ -363,7 +286,7 @@ class HttpRagService:
         current = max(0, offset)
         chunks: list[StoredChunk] = []
         while True:
-            page = await self._client.list_chunks_page(
+            page = await self._list_chunks_page(
                 source_file=source_file,
                 offset=current,
                 limit=page_size,
@@ -387,7 +310,7 @@ class HttpRagService:
         current = max(0, offset)
         chunks: list[StoredChunk] = []
         while True:
-            page = self._client.list_chunks_page_sync(
+            page = self._list_chunks_page_sync(
                 source_file=source_file,
                 offset=current,
                 limit=page_size,
@@ -400,36 +323,32 @@ class HttpRagService:
                 return tuple(chunks)
             current += len(items)
 
-    async def close(self) -> None:
-        await self._client.close()
+class HttpIngestionService(_KnowledgeHttpTransport):
+    """直接实现建库公共契约的Knowledge HTTP客户端。"""
 
-
-class HttpIngestionService:
-    """建库服务的 HTTP 实现。"""
-
-    def __init__(
-        self,
-        *,
-        base_url: str,
-        api_key: str = "",
-        timeout: float = 150.0,
-        transport: httpx.AsyncBaseTransport | None = None,
-    ) -> None:
-        self._client = KnowledgeServiceClient(
-            base_url=base_url,
-            api_key=api_key,
-            timeout=timeout,
-            transport=transport,
+    async def ingest(self, relative_path: str) -> IngestionReport:
+        request = _validated_request(IngestionRequest, relative_path=relative_path)
+        payload = await self._request(
+            "POST",
+            "/api/v1/ingestions",
+            json=request.model_dump(mode="json"),
+        )
+        return ingestion_report_from_payload(
+            payload,
+            fallback_data_dir=request.relative_path,
         )
 
-    async def ingest(self, path: str, /) -> IngestionReport:
-        return await self._client.ingest(path)
+    def ingest_sync(self, relative_path: str) -> IngestionReport:
+        request = _validated_request(IngestionRequest, relative_path=relative_path)
+        payload = self._request_sync(
+            "POST",
+            "/api/v1/ingestions",
+            json=request.model_dump(mode="json"),
+        )
+        return ingestion_report_from_payload(
+            payload,
+            fallback_data_dir=request.relative_path,
+        )
 
-    def ingest_sync(self, path: str, /) -> IngestionReport:
-        return self._client.ingest_sync(path)
 
-    async def close(self) -> None:
-        await self._client.close()
-
-
-__all__ = ["HttpIngestionService", "HttpRagService", "KnowledgeServiceClient"]
+__all__ = ["HttpIngestionService", "HttpRagService"]

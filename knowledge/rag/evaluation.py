@@ -12,7 +12,7 @@ from knowledge.contracts import (
 )
 from knowledge.rag.contracts import RetrievalRequest
 from knowledge.rag.ports import EvaluationHybridRetrieverPort, RerankerPort
-from knowledge.rag.query.result_builder import build_chunks
+from knowledge.rag.application import build_chunks
 
 
 class EvaluationRetrievalService:

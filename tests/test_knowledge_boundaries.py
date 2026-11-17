@@ -45,6 +45,9 @@ def test_rag_owns_internal_contracts_ports_and_adapters() -> None:
     assert (package_root / "rag" / "contracts.py").is_file()
     assert (package_root / "rag" / "ports.py").is_file()
     assert (package_root / "rag" / "infrastructure").is_dir()
+    assert (package_root / "rag" / "application.py").is_file()
+    assert not (package_root / "rag" / "query" / "service.py").exists()
+    assert not (package_root / "rag" / "query" / "result_builder.py").exists()
     assert (package_root / "rag" / "admin.py").is_file()
     assert (
         package_root / "rag" / "infrastructure" / "storage" / "chroma_knowledge_base.py"
@@ -97,7 +100,9 @@ def test_top_runtime_only_connects_module_runtimes_and_shared_resources() -> Non
     assert "KnowledgeRuntimeConfig" not in rag_runtime_source
     assert "KnowledgeRuntimeConfig" not in ingestion_runtime_source
     assert "class LocalRagService" in rag_runtime_source
-    assert "class LocalIngestionService" in ingestion_runtime_source
+    assert "class LocalIngestionService(IngestionPipeline)" in ingestion_runtime_source
+    assert "_get_ingestion_pipeline" not in ingestion_runtime_source
+    assert "_ingestion_service" not in ingestion_runtime_source
     assert "class SharedKnowledgeResources" in resources_source
     assert "def get_retrieval_service" not in container_source
     assert "def get_evaluation_retrieval_service" not in container_source
@@ -173,6 +178,35 @@ def test_http_transport_codecs_are_shared_by_client_and_server() -> None:
     assert "asdict(" not in server_source
     assert "_retrieval_payload" not in server_source
     assert "_evaluation_retrieval_payload" not in server_source
+
+
+def test_rag_search_chain_has_no_forwarding_service_layers() -> None:
+    package_root = Path(__file__).parent.parent / "knowledge"
+    client_source = (package_root / "client" / "http.py").read_text(encoding="utf-8")
+    runtime_source = (package_root / "rag" / "runtime.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "class HttpRagService(_KnowledgeHttpTransport)" in client_source
+    assert "self._client = KnowledgeServiceClient" not in client_source
+    assert "class LocalRagService(RetrievalApplicationService)" in runtime_source
+    assert "self._retrieval_service" not in runtime_source
+    assert "_get_retrieval_service(" not in runtime_source
+
+
+def test_ingestion_chain_has_no_forwarding_runtime_or_worker_bridge() -> None:
+    package_root = Path(__file__).parent.parent / "knowledge" / "ingestion"
+    runtime_source = (package_root / "runtime.py").read_text(encoding="utf-8")
+    service_source = (package_root / "service.py").read_text(encoding="utf-8")
+    document_source = (package_root / "document_service.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "class LocalIngestionService(IngestionPipeline)" in runtime_source
+    assert "_get_ingestion_pipeline" not in runtime_source
+    assert "_ingestion_service" not in runtime_source
+    assert "parse_file_to_documents" not in service_source
+    assert "parse_file_to_documents" not in document_source
 
 
 def test_ingestion_config_rejects_invalid_resource_limits() -> None:

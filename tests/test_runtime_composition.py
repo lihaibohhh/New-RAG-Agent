@@ -31,6 +31,7 @@ from knowledge.contracts import (
     RetrievalResult,
     WarmupStatus,
 )
+from knowledge.ingestion.service import IngestionPipeline
 from knowledge.rag.operations import RagWarmupManager
 from knowledge.runtime import create_knowledge_services
 from knowledge.services import IngestionService, RagService
@@ -239,13 +240,13 @@ async def test_warmup_state_is_instance_scoped() -> None:
 
 
 @pytest.mark.asyncio
-async def test_admin_health_composition_does_not_build_query_pipeline() -> None:
+async def test_admin_composition_does_not_load_query_models() -> None:
     runtime = create_test_knowledge_runtime()
     rag_service = runtime.rag
 
-    rag_service._get_admin_service()
-
-    assert rag_service._retrieval_service is None
+    assert rag_service._admin_service is not None
+    assert rag_service._vector_retriever._vectorstore is None
+    assert rag_service._reranker._model is None
     assert runtime._resources._embedding_provider is None
     await runtime.close()
 
@@ -270,13 +271,14 @@ async def test_local_composition_exposes_two_direct_services() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ingestion_composition_does_not_build_rag_query_pipeline() -> None:
+async def test_ingestion_composition_does_not_load_rag_query_models() -> None:
     runtime = create_test_knowledge_runtime()
 
-    runtime.ingestion._get_ingestion_pipeline()
-
-    assert runtime.rag._retrieval_service is None
-    assert runtime.rag._hybrid_retriever is None
+    assert isinstance(runtime.ingestion, IngestionPipeline)
+    assert not hasattr(runtime.ingestion, "_get_ingestion_pipeline")
+    assert runtime.rag._hybrid_retriever is not None
+    assert runtime.rag._vector_retriever._vectorstore is None
+    assert runtime.rag._reranker._model is None
     assert runtime._resources._embedding_provider is None
     await runtime.close()
 
