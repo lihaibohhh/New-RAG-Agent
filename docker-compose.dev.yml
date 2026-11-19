@@ -104,6 +104,53 @@ services:
         bind:
           create_host_path: false
 
+  agent-api:
+    command:
+      - python
+      - -m
+      - uvicorn
+      - api.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8010"
+      - --reload
+      - --reload-dir
+      - /app/api
+      - --reload-dir
+      - /app/react_agent
+      - --reload-dir
+      - /app/agent_tools
+
+    volumes:
+      - type: bind
+        source: ./api
+        target: /app/api
+        read_only: true
+        bind:
+          create_host_path: false
+
+      - type: bind
+        source: ./react_agent
+        target: /app/react_agent
+        read_only: true
+        bind:
+          create_host_path: false
+
+      - type: bind
+        source: ./agent_tools
+        target: /app/agent_tools
+        read_only: true
+        bind:
+          create_host_path: false
+
+      - type: bind
+        source: ./knowledge
+        target: /app/knowledge
+        read_only: true
+        bind:
+          create_host_path: false
+
   eval-runner:
     # 一次性评测容器也读取宿主机最新源码；Python 改动无需重建镜像。
     volumes:

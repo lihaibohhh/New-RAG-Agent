@@ -178,6 +178,30 @@ SSE 流式端点为 `POST /api/v1/chat/stream`，事件类型包括：
 token | tool_call | tool_result | usage | done | error
 ```
 
+项目同时在 `api/client.py` 提供轻量异步客户端，调用方无需自行解析 HTTP 和 SSE：
+
+```python
+import asyncio
+import os
+
+from api.client import ResearchAgentClient
+
+
+async def main() -> None:
+    async with ResearchAgentClient(
+        base_url="http://127.0.0.1:8010",
+        api_key=os.environ["API_API_KEY"],
+    ) as client:
+        async for text in client.stream_text(
+            "研究半导体行业供需变化，并给出来源",
+            session_id="demo-session",
+        ):
+            print(text, end="", flush=True)
+
+
+asyncio.run(main())
+```
+
 健康检查与指标：
 
 ```bash

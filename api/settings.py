@@ -18,7 +18,7 @@ class APISettings(BaseSettings):
     cors_allow_origins: list[str] = Field(default=["*"])
     api_key: Optional[str] = Field(default=None)
     rate_limit_rpm: int = Field(default=60, gt=0)
-    stream_timeout_s: int = Field(default=120, gt=0)
+    stream_timeout_s: int = Field(default=600, gt=0)
     invoke_timeout_s: int = Field(default=60, gt=0)
     daily_token_budget: int = Field(
         default=1_000_000,
