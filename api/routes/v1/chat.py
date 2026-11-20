@@ -34,7 +34,7 @@ from react_agent.agent.context_management import (
     ContextBudgetExceeded,
     latest_turn_ai_messages,
 )
-from react_agent.agent.policies import TerminationReason
+from react_agent.agent.tool_flow import extract_tool_call_ids
 from react_agent.metering.model_usage import meter_model_call
 from react_agent.metering.pricing import estimate_configured_model_cost
 
@@ -117,9 +117,12 @@ def _map_event(ev: dict, state: dict, agent: AgentService, start: float) -> str 
     data = ev.get("data", {})
 
     if name == "on_chat_model_stream":
-        if "context_compaction" in (ev.get("tags") or ()) or (
-            ev.get("metadata") or {}
-        ).get("langgraph_node") == "compact_history":
+        metadata = ev.get("metadata") or {}
+        if (
+            "context_compaction" in (ev.get("tags") or ())
+            or metadata.get("langgraph_node") == "compact_history"
+            or metadata.get("model_context_kind") == "finalizer"
+        ):
             return None
         chunk = data.get("chunk")
         if chunk and hasattr(chunk, "content") and chunk.content:
@@ -201,23 +204,23 @@ def _map_event(ev: dict, state: dict, agent: AgentService, start: float) -> str 
             },
         )
 
-    elif name == "on_chain_end" and ev.get("name") in {
-        "call_model",
-        "postprocess_tools",
-    }:
+    elif name == "on_chain_end" and ev.get("parent_ids") == []:
         output = data.get("output")
-        if isinstance(output, Mapping) and output.get("termination_reason") == (
-            TerminationReason.UNEXPECTED_RECURSION_BOUNDARY.value
-        ):
-            messages = output.get("messages") or []
-            if messages and isinstance(messages[-1], AIMessage):
-                content = messages[-1].content
-                if isinstance(content, str) and content:
-                    if state["ttft_ms"] is None:
-                        state["ttft_ms"] = round(
-                            (time.perf_counter() - start) * 1000
-                        )
-                    return _sse("token", {"delta": content})
+        if isinstance(output, Mapping):
+            messages = latest_turn_ai_messages(output.get("messages") or [])
+            for message in reversed(messages):
+                if not isinstance(message, AIMessage):
+                    continue
+                content = message.content
+                if (
+                    isinstance(content, str)
+                    and content.strip()
+                    and not extract_tool_call_ids(message)
+                ):
+                    state["ttft_ms"] = round(
+                        (time.perf_counter() - start) * 1000
+                    )
+                    return _sse("answer_commit", {"content": content})
 
     return None
 
@@ -479,6 +482,7 @@ Token 级 Server-Sent Events 推送。
 | event | 说明 |
 |---|---|
 | `token` | `{delta}` 单个 token 增量文本 |
+| `answer_commit` | `{content}` 已通过校验并写入最终 State 的完整回答；客户端应覆盖当前回答 |
 | `tool_call` | `{name, args}` Agent 决定调用工具 |
 | `tool_result` | `{name, ok, meta}` 工具执行完毕 |
 | `usage` | `{prompt_tokens, completion_tokens, cost, currency, cost_status}` 本次模型调用用量；未知价格时 cost 为 null |

@@ -20,13 +20,18 @@ from react_agent.agent.contracts.dependencies import (
 )
 from react_agent.agent.contracts.state import InputState, State
 from react_agent.agent.service import AgentService
-from react_agent.agent.prompts import SYSTEM_PROMPT
+from react_agent.agent.model_execution import invoke_finalizer_model
+from react_agent.agent.prompts import (
+    FINALIZATION_PROTOCOL_FALLBACK,
+    SYSTEM_PROMPT,
+)
 from react_agent.agent.tool_flow import (
     bound_tool_payload,
     count_attempted_rag_calls_in_current_turn,
     count_successful_rag_calls_in_current_turn,
     execute_dynamic_tools,
     extract_tool_call_ids,
+    final_answer_protocol_violation,
     repair_and_validate_tool_exchanges,
 )
 from react_agent.agent.workflow.graph import build_base_graph
@@ -39,6 +44,7 @@ from react_agent.agent.workflow.nodes import (
 from react_agent.agent.workflow.routing import route_after_postprocess
 from agent_tools.contracts.results import tool_error, tool_success
 from agent_tools.contracts.retry import with_retry
+from react_agent.metering.model_usage import extract_model_usage
 
 
 RETRIEVAL_TOOL_NAMES = frozenset({"query_internal_knowledge"})
@@ -62,6 +68,141 @@ def test_tool_call_ids_cover_valid_invalid_and_provider_payloads() -> None:
 
     assert extract_tool_call_ids(valid) == ["valid-1", "invalid-1"]
     assert extract_tool_call_ids(provider_payload) == ["raw-1"]
+
+
+def _metered_message(content: str, *, prompt: int, completion: int) -> AIMessage:
+    return AIMessage(
+        content=content,
+        response_metadata={
+            "model_name": "test-model",
+            "token_usage": {
+                "prompt_tokens": prompt,
+                "prompt_cache_hit_tokens": 0,
+                "prompt_cache_miss_tokens": prompt,
+                "completion_tokens": completion,
+                "total_tokens": prompt + completion,
+            },
+        },
+    )
+
+
+def test_final_answer_protocol_validator_rejects_tools_dsml_and_empty() -> None:
+    structured = AIMessage(
+        content="",
+        tool_calls=[{"id": "call-1", "name": "search", "args": {}}],
+    )
+    leaked = AIMessage(
+        content='<｜DSML｜ calls><｜DSML｜ invoke name="search"></｜DSML｜ invoke>'
+    )
+
+    assert final_answer_protocol_violation(structured) == "structured_tool_call"
+    assert final_answer_protocol_violation(leaked) == "unstructured_tool_protocol"
+    assert final_answer_protocol_violation(AIMessage(content="  ")) == "empty_content"
+    assert final_answer_protocol_violation(AIMessage(content="合法答案")) is None
+
+
+@pytest.mark.asyncio
+async def test_finalizer_discards_invalid_candidate_and_persists_valid_retry() -> None:
+    leaked = _metered_message(
+        '<｜DSML｜ calls><｜DSML｜ invoke name="search"></｜DSML｜ invoke>',
+        prompt=10,
+        completion=2,
+    )
+    accepted = _metered_message("纠正后的合法答案", prompt=12, completion=3)
+
+    class Model:
+        def __init__(self) -> None:
+            self.responses = [leaked, accepted]
+            self.inputs: list[list[object]] = []
+            self.configs: list[dict[str, object]] = []
+
+        async def ainvoke(self, messages, config=None):
+            self.inputs.append(messages)
+            self.configs.append(config)
+            return self.responses.pop(0)
+
+    model = Model()
+    dependencies = AgentDependencies(
+        config=AgentContext(),
+        model_provider=lambda: model,
+        tools=(),
+    )
+    state = State(messages=[HumanMessage(content="问题")])
+    original_messages = list(state.messages)
+
+    result = await invoke_finalizer_model(
+        state,
+        dependencies,
+        {"metadata": {"request_scope": "test"}},
+        directive="生成最终回答",
+    )
+
+    assert result.retried is True
+    assert result.retry_exhausted is False
+    assert result.response.content == "纠正后的合法答案"
+    assert result.usage_update["total_tokens"] == 27
+    assert result.usage_update["llm_call_count"] == 2
+    assert extract_model_usage(result.response)["total_tokens"] == 27
+    assert len(model.inputs) == 2
+    assert "最终回答纠正指令" not in str(model.inputs[0])
+    assert "最终回答纠正指令" in str(model.inputs[1])
+    assert "DSML" not in str(model.inputs[1])
+    assert model.configs[0]["metadata"] == {
+        "request_scope": "test",
+        "model_context_kind": "finalizer",
+        "finalizer_attempt": 1,
+    }
+    assert model.configs[1]["metadata"] == {
+        "request_scope": "test",
+        "model_context_kind": "finalizer",
+        "finalizer_attempt": 2,
+    }
+    assert list(state.messages) == original_messages
+
+
+@pytest.mark.asyncio
+async def test_finalizer_uses_metered_fallback_after_second_violation() -> None:
+    first = _metered_message("<DSML calls invoke>", prompt=7, completion=2)
+    second = AIMessage(
+        content="",
+        tool_calls=[{"id": "call-2", "name": "search", "args": {}}],
+        response_metadata={
+            "model_name": "test-model",
+            "token_usage": {
+                "prompt_tokens": 8,
+                "completion_tokens": 1,
+                "total_tokens": 9,
+            },
+        },
+    )
+
+    class Model:
+        def __init__(self) -> None:
+            self.responses = [first, second]
+
+        async def ainvoke(self, _messages, config=None):
+            return self.responses.pop(0)
+
+    model = Model()
+    dependencies = AgentDependencies(
+        config=AgentContext(),
+        model_provider=lambda: model,
+        tools=(),
+    )
+
+    result = await invoke_finalizer_model(
+        State(messages=[HumanMessage(content="问题")]),
+        dependencies,
+        None,
+        directive="生成最终回答",
+    )
+
+    assert result.retry_exhausted is True
+    assert result.response.content == FINALIZATION_PROTOCOL_FALLBACK
+    assert result.response.tool_calls == []
+    assert result.usage_update["total_tokens"] == 18
+    assert result.usage_update["llm_call_count"] == 2
+    assert extract_model_usage(result.response)["total_tokens"] == 18
 
 
 @pytest.mark.asyncio
@@ -121,7 +262,7 @@ async def test_tool_results_are_repaired_before_state_update(monkeypatch) -> Non
 
 
 @pytest.mark.asyncio
-async def test_last_step_tool_call_returns_a_mergeable_fallback() -> None:
+async def test_last_step_tool_call_retries_once_then_uses_protocol_fallback() -> None:
     class LastStepToolCallingModel:
         def bind_tools(self, _tools):
             return self
@@ -167,10 +308,12 @@ async def test_last_step_tool_call_returns_a_mergeable_fallback() -> None:
         config={"recursion_limit": 2},
     )
 
-    assert "未继续执行新的工具调用" in result["messages"][-1].content
-    assert result["messages"][-1].usage_metadata["total_tokens"] == 7
+    assert result["messages"][-1].content == FINALIZATION_PROTOCOL_FALLBACK
+    assert extract_model_usage(result["messages"][-1])["total_tokens"] == 14
     assert len(result["debug_log"]) == 1
-    assert result["debug_log"][0].startswith("[call_model] is_last_step=True;")
+    assert result["debug_log"][0].startswith(
+        "[call_model] finalizer_protocol_retry;"
+    )
     events = [
         event
         async for event in graph.astream_events(
@@ -192,15 +335,15 @@ async def test_last_step_tool_call_returns_a_mergeable_fallback() -> None:
     ]
     assert len(node_ends) == 1
     assert node_ends[0]["data"]["output"]["termination_reason"] == (
-        "UNEXPECTED_RECURSION_BOUNDARY"
+        "FINALIZER_PROTOCOL_RETRY_EXHAUSTED"
     )
     assert len(root_ends) == 1
     root_output = root_ends[0]["data"]["output"]
     assert root_output["termination_reason"] == (
-        "UNEXPECTED_RECURSION_BOUNDARY"
+        "FINALIZER_PROTOCOL_RETRY_EXHAUSTED"
     )
-    assert "未继续执行新的工具调用" in root_output["messages"][-1].content
-    assert root_output["total_tokens"] == 7
+    assert root_output["messages"][-1].content == FINALIZATION_PROTOCOL_FALLBACK
+    assert root_output["total_tokens"] == 14
 
 
 @pytest.mark.asyncio
@@ -645,8 +788,13 @@ async def test_business_budget_closes_tool_calls_before_finalizing(
     assert messages[-1].content == "根据现有信息生成的最终回答。"
     assert result["termination_reason"] == "MODEL_ROUND_BUDGET_EXHAUSTED"
     assert model.finalizer_messages is not None
+    assert not any(
+        isinstance(message, ToolMessage)
+        for message in model.finalizer_messages
+    )
     assert any(
-        isinstance(message, ToolMessage) and message.tool_call_id == "budget-call-1"
+        isinstance(message, HumanMessage)
+        and '"error_code":"TOOL_BUDGET_EXHAUSTED"' in str(message.content)
         for message in model.finalizer_messages
     )
 

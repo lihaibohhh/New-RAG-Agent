@@ -295,7 +295,7 @@ def test_historical_sources_remain_visible_after_rag_turn_is_trimmed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_finalizer_receives_evidence_as_transient_tool_data() -> None:
+async def test_finalizer_receives_evidence_without_tool_protocol_history() -> None:
     class RecordingModel:
         def __init__(self) -> None:
             self.messages = None
@@ -340,10 +340,19 @@ async def test_finalizer_receives_evidence_as_transient_tool_data() -> None:
     await finalize_model(state, SimpleNamespace(context=dependencies))
 
     assert model.messages is not None
-    tool_input = next(item for item in model.messages if isinstance(item, ToolMessage))
-    assert "本轮 RAG 证据索引" in tool_input.content
-    assert '"chunk_id":"a"' in tool_input.content
-    assert "本轮 RAG 证据索引" not in message.content
+    assert not any(isinstance(item, ToolMessage) for item in model.messages)
+    assert not any(
+        isinstance(item, AIMessage) and item.tool_calls for item in model.messages
+    )
+    finalizer_input = next(
+        item
+        for item in model.messages
+        if isinstance(item, HumanMessage) and "【本轮工具证据" in item.content
+    )
+    assert '"kind":"knowledge_retrieval"' in finalizer_input.content
+    assert '"chunk_id":"a"' in finalizer_input.content
+    assert "事实 A" in finalizer_input.content
+    assert "本轮工具证据" not in message.content
 
 
 @pytest.mark.asyncio

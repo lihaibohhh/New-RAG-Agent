@@ -23,7 +23,11 @@ from api.dependencies import get_conversation_service
 from api.errors import AppError
 from api.models import MessageItem, SessionHistoryResponse
 from api.security import get_rate_limit_key, require_api_key
-from react_agent.conversations import ConversationDeleteStatus, ConversationService
+from react_agent.conversations import (
+    ConversationDeleteStatus,
+    ConversationService,
+    project_display_conversation_messages,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -52,9 +56,10 @@ async def get_session_history(
     if messages is None:
         raise AppError(status=404, title="Not Found", detail=f"会话 {session_id} 不存在。")
 
-    total = len(messages)
+    display_messages = project_display_conversation_messages(messages)
+    total = len(display_messages)
     offset = (page - 1) * page_size
-    page_msgs = messages[offset: offset + page_size]
+    page_msgs = display_messages[offset : offset + page_size]
 
     return SessionHistoryResponse(
         session_id=session_id,

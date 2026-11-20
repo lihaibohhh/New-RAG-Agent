@@ -1,9 +1,7 @@
 """Conversation persistence adapters."""
 
-from react_agent.conversations.infrastructure.checkpointer_factory import CheckpointerFactory
-from react_agent.conversations.infrastructure.langgraph_repository import (
-    LangGraphConversationRepository,
+from react_agent.conversations.infrastructure.checkpointer_factory import (
+    CheckpointerFactory,
 )
 
-__all__ = ["CheckpointerFactory", "LangGraphConversationRepository"]
-
+__all__ = ["CheckpointerFactory"]

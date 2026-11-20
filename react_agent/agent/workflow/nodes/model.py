@@ -17,6 +17,7 @@ from react_agent.agent.contracts.dependencies import (
 from react_agent.agent.contracts.state import State
 from react_agent.agent.model_execution import (
     invoke_chat_model,
+    invoke_finalizer_model,
     tool_names_from_response,
 )
 from react_agent.agent.policies import (
@@ -51,17 +52,25 @@ async def call_model(
             "graph_step_budget_final_answer | remaining_steps=%s",
             state.remaining_steps,
         )
-    response, usage_update = await invoke_chat_model(
-        state,
-        dependencies,
-        config,
-        allow_tools=tools_allowed,
-        directive=(
-            state.pending_directive
-            if tools_allowed
-            else render_finalization_directive(boundary_reason)
-        ),
-    )
+    finalizer_result = None
+    if tools_allowed:
+        response, usage_update = await invoke_chat_model(
+            state,
+            dependencies,
+            config,
+            allow_tools=True,
+            directive=state.pending_directive,
+            context_kind="agent",
+        )
+    else:
+        finalizer_result = await invoke_finalizer_model(
+            state,
+            dependencies,
+            config,
+            directive=render_finalization_directive(boundary_reason),
+        )
+        response = finalizer_result.response
+        usage_update = finalizer_result.usage_update
     next_model_round = state.turn_model_rounds + 1
     if is_output_truncated(response):
         logger.warning(
@@ -118,10 +127,22 @@ async def call_model(
         "step_counter": state.step_counter + 1,
         "turn_model_rounds": next_model_round,
         "termination_reason": (
-            termination_reason if tools_allowed else boundary_reason
+            termination_reason
+            if tools_allowed
+            else (
+                TerminationReason.FINALIZER_PROTOCOL_RETRY_EXHAUSTED.value
+                if finalizer_result and finalizer_result.retry_exhausted
+                else boundary_reason
+            )
         ),
         "pending_directive": None,
     }
+    if finalizer_result and finalizer_result.retried:
+        update["debug_log"] = [
+            "[call_model] finalizer_protocol_retry; "
+            f"violations={list(finalizer_result.violations)}; "
+            f"fallback={finalizer_result.retry_exhausted}"
+        ]
     update.update(usage_update)
     return update
 
@@ -171,37 +192,33 @@ async def finalize_model(
     """调用不绑定工具的最终总结模型。"""
     if state.remaining_steps < 1:
         raise GraphRecursionError("finalize_model 已无可完成的图步骤")
-    response, usage_update = await invoke_chat_model(
+    finalizer_result = await invoke_finalizer_model(
         state,
         runtime.context,
         config,
-        allow_tools=False,
         directive=render_finalization_directive(state.termination_reason),
     )
+    response = finalizer_result.response
+    usage_update = finalizer_result.usage_update
     if is_output_truncated(response):
         logger.warning("model_output_truncated | node=finalize_model")
         response = _truncated_response(response)
-    if extract_tool_call_ids(response):
-        logger.error(
-            "finalizer_returned_tool_calls | reason=%s tools=%s",
-            state.termination_reason,
-            tool_names_from_response(response),
-        )
-        response = AIMessage(
-            id=response.id,
-            content=(
-                response.content
-                or "现有信息不足以形成可靠结论，且本轮工具预算已经结束。"
-            ),
-            response_metadata=response.response_metadata,
-            usage_metadata=response.usage_metadata,
-        )
 
     update: dict[str, Any] = {
         "messages": [response],
         "step_counter": state.step_counter + 1,
         "pending_directive": None,
     }
+    if finalizer_result.retry_exhausted:
+        update["termination_reason"] = (
+            TerminationReason.FINALIZER_PROTOCOL_RETRY_EXHAUSTED.value
+        )
+    if finalizer_result.retried:
+        update["debug_log"] = [
+            "[finalize_model] finalizer_protocol_retry; "
+            f"violations={list(finalizer_result.violations)}; "
+            f"fallback={finalizer_result.retry_exhausted}"
+        ]
     update.update(usage_update)
     return update
 

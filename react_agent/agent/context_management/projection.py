@@ -1,20 +1,41 @@
-"""仅对本次模型可见的工具结果执行确定性预算投影。"""
+"""对本次模型可见的历史与工具结果执行确定性投影。"""
 
 from __future__ import annotations
 
 import json
 from typing import Any
 
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 
 from agent_tools.contracts.retrieval import (
     is_retrieval_payload,
     project_retrieval_payload,
 )
-from react_agent.agent.context_management.segmentation import segment_current_turn
+from react_agent.agent.context_management.segmentation import (
+    is_real_human_message,
+    segment_current_turn,
+)
+from react_agent.agent.tool_flow import extract_tool_call_ids
 
 
 _MIN_ENVELOPE_CHARS = 256
+
+
+def project_completed_history(messages: list[Any]) -> list[Any]:
+    """将已完成历史投影为用户原文与普通最终回答。"""
+    projected: list[Any] = []
+    for message in messages:
+        if is_real_human_message(message):
+            if str(message.content or "").strip():
+                projected.append(message)
+            continue
+        if not isinstance(message, AIMessage):
+            continue
+        content = str(message.content or "").strip()
+        if not content or extract_tool_call_ids(message):
+            continue
+        projected.append(message)
+    return projected
 
 
 def _dump(value: Any) -> str:
@@ -126,6 +147,7 @@ def project_completed_tool_messages(
 
 
 __all__ = [
+    "project_completed_history",
     "project_completed_tool_messages",
     "project_current_tool_messages",
     "project_tool_content",

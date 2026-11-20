@@ -2,17 +2,29 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, replace
 import logging
-from typing import Any
+from typing import Any, Literal
 
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
 
-from react_agent.agent.context_management import ContextBudget, build_model_context
+from react_agent.agent.context_management import (
+    ContextBudget,
+    build_finalization_context,
+    build_model_context,
+)
 from react_agent.agent.contracts.dependencies import AgentDependencies
 from react_agent.agent.contracts.state import State
-from react_agent.agent.prompts import render_tool_catalog
-from react_agent.agent.tool_flow import get_tool_call_name
+from react_agent.agent.prompts import (
+    FINALIZATION_PROTOCOL_FALLBACK,
+    render_finalization_retry_directive,
+    render_tool_catalog,
+)
+from react_agent.agent.tool_flow import (
+    final_answer_protocol_violation,
+    get_tool_call_name,
+)
 from react_agent.metering.model_usage import (
     extract_model_usage,
     meter_model_call,
@@ -23,6 +35,17 @@ from react_agent.skills import SkillSelection
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class FinalizerInvocation:
+    """一次最终回答生成及其唯一纠正重试结果。"""
+
+    response: AIMessage
+    usage_update: dict[str, Any]
+    retried: bool = False
+    retry_exhausted: bool = False
+    violations: tuple[str, ...] = ()
 
 
 def _build_system_prompt(
@@ -65,6 +88,8 @@ async def invoke_chat_model(
     *,
     allow_tools: bool,
     directive: str | None,
+    context_kind: Literal["agent", "finalizer"] = "agent",
+    finalizer_attempt: int | None = None,
 ) -> tuple[AIMessage, dict[str, Any]]:
     """执行一次模型调用，并返回响应和累计用量 State update。"""
     agent_config = dependencies.config
@@ -74,19 +99,29 @@ async def invoke_chat_model(
         dependencies,
         tools_enabled=tools_enabled,
     )
-    model_context = build_model_context(
-        state,
-        agent_config,
-        system_prompt=system_prompt,
-        directive=directive,
-        budget=ContextBudget(
-            max_input_tokens=agent_config.max_input_tokens,
-            reserved_completion_tokens=dependencies.reserved_completion_tokens,
-            safety_margin_tokens=agent_config.context_safety_margin_tokens,
-            context_window_tokens=dependencies.model_context_window_tokens,
-        ),
-        bound_tools=active_tools if tools_enabled else (),
+    context_budget = ContextBudget(
+        max_input_tokens=agent_config.max_input_tokens,
+        reserved_completion_tokens=dependencies.reserved_completion_tokens,
+        safety_margin_tokens=agent_config.context_safety_margin_tokens,
+        context_window_tokens=dependencies.model_context_window_tokens,
     )
+    if context_kind == "finalizer":
+        model_context = build_finalization_context(
+            state,
+            agent_config,
+            system_prompt=system_prompt,
+            directive=directive,
+            budget=context_budget,
+        )
+    else:
+        model_context = build_model_context(
+            state,
+            agent_config,
+            system_prompt=system_prompt,
+            directive=directive,
+            budget=context_budget,
+            bound_tools=active_tools if tools_enabled else (),
+        )
     base_model = dependencies.resolve_model()
     model = base_model.bind_tools(active_tools) if tools_enabled else base_model
     roles = [
@@ -100,10 +135,17 @@ async def invoke_chat_model(
     )
     logger.debug("模型输入预算: %s", model_context.budget_report)
 
+    call_config = dict(config or {})
+    metadata = dict(call_config.get("metadata") or {})
+    metadata["model_context_kind"] = context_kind
+    if finalizer_attempt is not None:
+        metadata["finalizer_attempt"] = finalizer_attempt
+    call_config["metadata"] = metadata
+
     try:
         response: AIMessage = await model.ainvoke(
             model_context.as_list(),
-            config=config,
+            config=call_config,
         )
     except Exception as exc:
         response_body = getattr(getattr(exc, "response", None), "text", None)
@@ -116,7 +158,7 @@ async def invoke_chat_model(
     logger.info(
         "model_call_completed | kind=%s model=%s output_limit_tokens=%s "
         "prompt_tokens=%s output_tokens=%s reasoning_tokens=%s finish_reason=%s",
-        "agent" if tools_enabled else "finalizer",
+        context_kind,
         dependencies.model_ref,
         dependencies.reserved_completion_tokens,
         usage["prompt_tokens"],
@@ -126,6 +168,108 @@ async def invoke_chat_model(
     )
 
     return response, model_usage_update(state, dependencies, response)
+
+
+def _aggregate_response_usage(
+    response: AIMessage,
+    *responses: AIMessage,
+) -> AIMessage:
+    """把被丢弃候选的用量附到最终可持久化消息，供非流式计费读取。"""
+    usages = [extract_model_usage(message) for message in (*responses, response)]
+    combined = {
+        key: sum(usage[key] for usage in usages)
+        for key in (
+            "cache_hit_tokens",
+            "cache_miss_tokens",
+            "completion_tokens",
+            "reasoning_tokens",
+            "prompt_tokens",
+            "total_tokens",
+        )
+    }
+    response_metadata = dict(response.response_metadata or {})
+    response_metadata["token_usage"] = {
+        "prompt_tokens": combined["prompt_tokens"],
+        "prompt_cache_hit_tokens": combined["cache_hit_tokens"],
+        "prompt_cache_miss_tokens": combined["cache_miss_tokens"],
+        "completion_tokens": combined["completion_tokens"],
+        "total_tokens": combined["total_tokens"],
+        "completion_tokens_details": {
+            "reasoning_tokens": combined["reasoning_tokens"],
+        },
+    }
+    response_metadata["aggregated_model_calls"] = len(usages)
+    return response.model_copy(update={"response_metadata": response_metadata})
+
+
+async def invoke_finalizer_model(
+    state: State,
+    dependencies: AgentDependencies,
+    config: RunnableConfig | None,
+    *,
+    directive: str,
+) -> FinalizerInvocation:
+    """生成最终回答；协议违规时使用瞬态纠正指令重试一次。"""
+    first, first_usage = await invoke_chat_model(
+        state,
+        dependencies,
+        config,
+        allow_tools=False,
+        directive=directive,
+        context_kind="finalizer",
+        finalizer_attempt=1,
+    )
+    first_violation = final_answer_protocol_violation(first)
+    if first_violation is None:
+        return FinalizerInvocation(response=first, usage_update=first_usage)
+
+    logger.warning(
+        "finalizer_protocol_violation | attempt=1 reason=%s",
+        first_violation,
+    )
+    retry_state = replace(state, **first_usage)
+    correction = render_finalization_retry_directive(first_violation)
+    retry, retry_usage = await invoke_chat_model(
+        retry_state,
+        dependencies,
+        config,
+        allow_tools=False,
+        directive=f"{directive}\n\n{correction}",
+        context_kind="finalizer",
+        finalizer_attempt=2,
+    )
+    retry_violation = final_answer_protocol_violation(retry)
+    aggregated = _aggregate_response_usage(retry, first)
+    if retry_violation is None:
+        return FinalizerInvocation(
+            response=aggregated,
+            usage_update=retry_usage,
+            retried=True,
+            violations=(first_violation,),
+        )
+
+    logger.error(
+        "finalizer_protocol_violation | attempt=2 reason=%s fallback=true",
+        retry_violation,
+    )
+    fallback_metadata = dict(aggregated.response_metadata or {})
+    fallback_metadata.update(
+        finish_reason="protocol_fallback",
+        finalizer_protocol_fallback=True,
+    )
+    fallback = AIMessage(
+        id=retry.id,
+        content=FINALIZATION_PROTOCOL_FALLBACK,
+        response_metadata=fallback_metadata,
+        usage_metadata=aggregated.usage_metadata,
+    )
+    return FinalizerInvocation(
+        response=fallback,
+        usage_update=retry_usage,
+        retried=True,
+        retry_exhausted=True,
+        violations=(first_violation, retry_violation),
+    )
 
 
 def model_usage_update(
@@ -166,4 +310,10 @@ def tool_names_from_response(response: AIMessage) -> list[str]:
     return [get_tool_call_name(call) or "unknown" for call in calls]
 
 
-__all__ = ["invoke_chat_model", "model_usage_update", "tool_names_from_response"]
+__all__ = [
+    "FinalizerInvocation",
+    "invoke_chat_model",
+    "invoke_finalizer_model",
+    "model_usage_update",
+    "tool_names_from_response",
+]

@@ -10,8 +10,10 @@ from react_agent.conversations.contracts import (
     ConversationPersistenceInitializationError,
     ConversationRepositoryError,
 )
-from react_agent.conversations.ports import ConversationRepositoryPort
-from react_agent.conversations.projection import project_display_messages
+from react_agent.conversations.projection import (
+    project_display_conversation_messages,
+    project_display_messages,
+)
 from react_agent.conversations.service import ConversationService
 
 __all__ = [
@@ -20,8 +22,8 @@ __all__ = [
     "ConversationPersistenceConfig",
     "ConversationPersistenceInitializationError",
     "ConversationRepositoryError",
-    "ConversationRepositoryPort",
     "ConversationService",
     "load_conversation_persistence_config",
+    "project_display_conversation_messages",
     "project_display_messages",
 ]
