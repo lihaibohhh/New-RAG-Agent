@@ -36,7 +36,7 @@ Agent 负责研究编排、工具选择、上下文和会话；Knowledge Service
 | `react_agent/agent/model_execution.py` | 模型绑定、调用、响应和用量更新 |
 | `react_agent/agent/tool_flow/` | 工具调用解析、执行、结果归一化和预算统计 |
 | `react_agent/skills/` | 专业工作流的选择、缓存加载和瞬态提示注入 |
-| `react_agent/conversations/` | 历史读取、删除和 Checkpointer 适配 |
+| `react_agent/conversations/` | 由 `ConversationService` 直接通过共享 Checkpointer 读取和删除会话 |
 | `react_agent/runtime/container.py` | 模型、工具、会话和共享资源的应用组合根 |
 | `agent_tools/` | 独立工具适配器、工具配置与共享结果协议，不反向依赖 Agent |
 
@@ -46,6 +46,8 @@ Agent 不根据具体工具名制定策略。组合根将工具名称映射为�
 
 `AgentService` 不负责历史管理；`ConversationService` 不负责对话执行。FastAPI 的
 Chat 和 Sessions 路由分别注入对应服务，但通过组合根共享同一个 Checkpointer。
+会话管理链路保持为 `API/Streamlit → ConversationService → Checkpointer`，不再为
+单一 Checkpointer 实现增设 Repository Port 和转发层。
 
 外部调用必须提供明确的 `thread_id`。API 层再叠加用户命名空间，避免不同用户共享
 默认线程或越权读取会话。

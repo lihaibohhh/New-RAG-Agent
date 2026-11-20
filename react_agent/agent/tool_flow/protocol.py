@@ -21,6 +21,32 @@ class ToolProtocolError(ValueError):
     """工具调用与结果无法形成合法的一一对应关系。"""
 
 
+def contains_unstructured_tool_protocol(value: Any) -> bool:
+    """识别泄漏到普通正文中的 DSML 工具协议。"""
+    compact = "".join(str(value or "").lower().split()).replace("｜", "|")
+    return "dsml" in compact and any(
+        marker in compact for marker in ("invoke", "parameter", "calls")
+    )
+
+
+def final_answer_protocol_violation(message: Any) -> str | None:
+    """返回最终回答违反无工具协议的原因；合法时返回 ``None``。"""
+    if not isinstance(message, AIMessage):
+        return "non_ai_message"
+    if (
+        list(getattr(message, "tool_calls", None) or [])
+        or list(getattr(message, "invalid_tool_calls", None) or [])
+        or list((getattr(message, "additional_kwargs", None) or {}).get("tool_calls", []))
+    ):
+        return "structured_tool_call"
+    content = message.content
+    if not isinstance(content, str) or not content.strip():
+        return "empty_content"
+    if contains_unstructured_tool_protocol(content):
+        return "unstructured_tool_protocol"
+    return None
+
+
 def extract_tool_call_ids(message: AnyMessage) -> list[str]:
     """返回模型消息中全部工具调用 ID，去重并保留原顺序。"""
     if not isinstance(message, AIMessage):
@@ -259,6 +285,7 @@ __all__ = [
     "close_tool_calls_for_budget",
     "extract_recent_tool_messages",
     "extract_tool_call_ids",
+    "final_answer_protocol_violation",
     "find_last_real_human_index",
     "get_tool_call_name",
     "repair_and_validate_tool_exchanges",

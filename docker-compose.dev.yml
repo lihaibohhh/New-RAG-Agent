@@ -181,3 +181,38 @@ services:
         read_only: true
         bind:
           create_host_path: false
+
+  agent-web:
+    build:
+      target: build
+
+    command:
+      - pnpm
+      - dev
+      - --port
+      - "80"
+
+    environment:
+      VITE_API_PROXY_TARGET: http://agent-api:8010
+      CHOKIDAR_USEPOLLING: "true"
+
+    volumes:
+      - type: bind
+        source: ./frontend/src
+        target: /app/src
+        bind:
+          create_host_path: false
+
+      - type: bind
+        source: ./frontend/vite.config.ts
+        target: /app/vite.config.ts
+        read_only: true
+        bind:
+          create_host_path: false
+
+      - type: bind
+        source: ./frontend/index.html
+        target: /app/index.html
+        read_only: true
+        bind:
+          create_host_path: false

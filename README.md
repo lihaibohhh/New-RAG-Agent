@@ -131,15 +131,16 @@ REDIS_URL=redis://127.0.0.1:6379/0
 
 ```powershell
 docker compose config
-docker compose build knowledge-service agent-app
-docker compose up -d redis knowledge-service agent-app
+docker compose build knowledge-service agent-app agent-web
+docker compose up -d redis knowledge-service agent-api agent-web
 docker compose ps
 ```
 
 服务地址：
 
+- React 演示前端：`http://localhost:3000`
 - Streamlit：`http://localhost:8501`
-- FastAPI Swagger：`http://localhost:8000/docs`
+- FastAPI Swagger：`http://localhost:8010/docs`
 - Knowledge Service 就绪检查：`http://localhost:8001/api/v1/health/ready`
 
 首次部署、离线模型缓存和 Docling 建库流程见
@@ -175,8 +176,10 @@ curl -X POST http://localhost:8000/api/v1/chat/invoke \
 SSE 流式端点为 `POST /api/v1/chat/stream`，事件类型包括：
 
 ```text
-token | tool_call | tool_result | usage | done | error
+token | answer_commit | tool_call | tool_result | usage | done | error
 ```
+
+`token` 用于实时展示普通 Agent 输出；`answer_commit` 携带经过最终校验的完整回答，客户端应以覆盖方式应用，避免被丢弃的 finalizer 候选进入界面。
 
 项目同时在 `api/client.py` 提供轻量异步客户端，调用方无需自行解析 HTTP 和 SSE：
 
@@ -226,6 +229,7 @@ RAG 数据集生成、确定性检索评测和 RAGAS 流程见
 ```text
 src/
 ├── api/                    # FastAPI、鉴权、限流、指标和版本化路由
+├── frontend/               # React + TypeScript + Vite 演示前端与 Nginx 容器
 ├── knowledge/
 │   ├── services.py         # RagService / IngestionService 公共接口
 │   ├── settings.py         # Knowledge 统一配置模型与环境投影

@@ -62,15 +62,89 @@ def _state() -> dict[str, Any]:
     }
 
 
-def test_unexpected_boundary_node_result_reaches_stream_client() -> None:
+def test_root_graph_result_commits_complete_answer() -> None:
+    state = _state()
+    start = time.perf_counter()
     frame = chat._map_event(
         {
             "event": "on_chain_end",
-            "name": "call_model",
+            "name": "LangGraph",
+            "parent_ids": [],
             "data": {
                 "output": {
-                    "termination_reason": "UNEXPECTED_RECURSION_BOUNDARY",
-                    "messages": [AIMessage(content="执行边界提示")],
+                    "messages": [
+                        HumanMessage(content="问题"),
+                        AIMessage(content="校验通过的最终回答"),
+                    ],
+                }
+            },
+        },
+        state,
+        None,
+        start,
+    )
+    assert frame is not None
+    assert frame.startswith("event: answer_commit\n")
+    assert json.loads(frame.split("data: ", 1)[1])["content"] == (
+        "校验通过的最终回答"
+    )
+    assert state["ttft_ms"] is not None
+
+
+def test_finalizer_candidate_tokens_are_hidden_until_commit() -> None:
+    state = _state()
+    frame = chat._map_event(
+        {
+            "event": "on_chat_model_stream",
+            "metadata": {
+                "model_context_kind": "finalizer",
+                "finalizer_attempt": 1,
+            },
+            "data": {"chunk": AIMessage(content="非法候选")},
+        },
+        state,
+        None,
+        time.perf_counter(),
+    )
+    assert frame is None
+    assert state["ttft_ms"] is None
+
+
+def test_agent_tokens_still_stream_before_final_commit() -> None:
+    state = _state()
+    frame = chat._map_event(
+        {
+            "event": "on_chat_model_stream",
+            "metadata": {"model_context_kind": "agent"},
+            "data": {"chunk": AIMessage(content="正在检索")},
+        },
+        state,
+        None,
+        time.perf_counter(),
+    )
+    assert frame is not None and frame.startswith("event: token\n")
+    assert json.loads(frame.split("data: ", 1)[1])["delta"] == "正在检索"
+
+
+def test_root_graph_does_not_commit_previous_turn_answer() -> None:
+    frame = chat._map_event(
+        {
+            "event": "on_chain_end",
+            "name": "LangGraph",
+            "parent_ids": [],
+            "data": {
+                "output": {
+                    "messages": [
+                        HumanMessage(content="旧问题"),
+                        AIMessage(content="旧回答"),
+                        HumanMessage(content="新问题"),
+                        AIMessage(
+                            content="",
+                            tool_calls=[
+                                {"id": "call-1", "name": "search", "args": {}},
+                            ],
+                        ),
+                    ],
                 }
             },
         },
@@ -78,9 +152,7 @@ def test_unexpected_boundary_node_result_reaches_stream_client() -> None:
         None,
         time.perf_counter(),
     )
-    assert frame is not None
-    assert frame.startswith("event: token\n")
-    assert json.loads(frame.split("data: ", 1)[1])["delta"] == "执行边界提示"
+    assert frame is None
 
 
 def _compaction_usage() -> dict[str, Any]:
@@ -189,6 +261,32 @@ def test_stream_hides_compaction_tokens_but_counts_its_usage(
     assert state["total_tokens"] == 6
 
 
+def test_finalizer_usage_is_counted_while_candidate_tokens_are_hidden(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(chat, "estimate_configured_model_cost", _estimate)
+
+    class Agent:
+        model_ref = "test/known-model"
+
+    state = _state()
+    usage = chat._map_event(
+        {
+            "event": "on_chat_model_end",
+            "metadata": {
+                "model_context_kind": "finalizer",
+                "finalizer_attempt": 1,
+            },
+            "data": {"output": _message("known-model", 8, 2)},
+        },
+        state,
+        Agent(),
+        time.perf_counter(),
+    )
+    assert usage is not None and usage.startswith("event: usage")
+    assert state["total_tokens"] == 10
+
+
 @pytest.mark.asyncio
 async def test_stream_records_all_tokens_and_emits_done(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(chat, "estimate_configured_model_cost", _estimate)
@@ -209,12 +307,33 @@ async def test_stream_records_all_tokens_and_emits_done(monkeypatch: pytest.Monk
         async def stream_events(self, messages: list[Any], thread_id: str):
             assert thread_id == "user:test:session"
             yield {
+                "event": "on_chat_model_stream",
+                "metadata": {
+                    "model_context_kind": "finalizer",
+                    "finalizer_attempt": 1,
+                },
+                "data": {"chunk": AIMessage(content="非法候选")},
+            }
+            yield {
                 "event": "on_chat_model_end",
                 "data": {"output": _message("known-model", 8, 2)},
             }
             yield {
                 "event": "on_chat_model_end",
                 "data": {"output": _message("unknown-model", 5, 3)},
+            }
+            yield {
+                "event": "on_chain_end",
+                "name": "LangGraph",
+                "parent_ids": [],
+                "data": {
+                    "output": {
+                        "messages": [
+                            HumanMessage(content="问题"),
+                            AIMessage(content="校验通过的最终回答"),
+                        ],
+                    }
+                },
             }
 
     frames = [
@@ -226,8 +345,11 @@ async def test_stream_records_all_tokens_and_emits_done(monkeypatch: pytest.Monk
     assert [frame.split("\n", 1)[0] for frame in frames] == [
         "event: usage",
         "event: usage",
+        "event: answer_commit",
         "event: done",
     ]
+    assert "非法候选" not in "".join(frames)
+    assert "校验通过的最终回答" in frames[-2]
     done = json.loads(frames[-1].split("data: ", 1)[1])
     assert done["total_tokens"] == 18
     assert done["total_cost"] == pytest.approx(0.10)

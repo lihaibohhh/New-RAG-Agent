@@ -196,7 +196,20 @@ services:
     restart: unless-stopped
 
   # ==========================================
-  # 部队 4：一次性评测任务 - 仅通过 Knowledge Service API 读取知识库
+  # 部队 4：展示前端 - React 静态站点 + Nginx API 反向代理
+  # ==========================================
+  agent-web:
+    build:
+      context: ./frontend
+    ports:
+      - "127.0.0.1:3000:80"
+    depends_on:
+      agent-api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ==========================================
+  # 部队 5：一次性评测任务 - 仅通过 Knowledge Service API 读取知识库
   # 使用 `docker compose --profile eval run --rm eval-runner ...` 显式启动。
   # ==========================================
   eval-runner:
@@ -228,7 +241,7 @@ services:
     restart: "no"
 
   # ==========================================
-  # 部队 5：离线建库服务 - Docling 文档解析
+  # 部队 6：离线建库服务 - Docling 文档解析
   # 仅在显式启用 ingestion profile 时启动，不参与日常在线查询。
   # ==========================================
   docling:

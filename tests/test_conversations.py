@@ -21,11 +21,11 @@ from react_agent.conversations.contracts import (
 from react_agent.conversations.infrastructure.checkpointer_factory import (
     CheckpointerFactory,
 )
-from react_agent.conversations.infrastructure.langgraph_repository import (
-    LangGraphConversationRepository,
-)
 from react_agent.conversations.service import ConversationService
-from react_agent.conversations.projection import project_display_messages
+from react_agent.conversations.projection import (
+    project_display_conversation_messages,
+    project_display_messages,
+)
 
 
 @pytest.mark.parametrize("backend", ["bad", "mysql", "postgresql-extra"])
@@ -91,7 +91,9 @@ class FakeSaver:
 
     async def aget_tuple(self, config: dict) -> SimpleNamespace:
         assert config["configurable"]["thread_id"] == "user:bucket:session"
-        return SimpleNamespace(checkpoint={"channel_values": {"messages": self.messages}})
+        return SimpleNamespace(
+            checkpoint={"channel_values": {"messages": self.messages}}
+        )
 
     async def adelete_thread(self, thread_id: str) -> None:
         if not self.supports_delete:
@@ -100,7 +102,7 @@ class FakeSaver:
 
 
 @pytest.mark.asyncio
-async def test_repository_returns_typed_message_views() -> None:
+async def test_service_returns_typed_message_views() -> None:
     saver = FakeSaver(
         [
             HumanMessage(content="问题", id="human-1"),
@@ -108,7 +110,7 @@ async def test_repository_returns_typed_message_views() -> None:
             {"type": "tool", "content": {"ok": True}, "id": "tool-1"},
         ]
     )
-    service = ConversationService(LangGraphConversationRepository(saver))
+    service = ConversationService(saver)
 
     messages = await service.get_history(" user:bucket:session ")
 
@@ -138,9 +140,14 @@ def test_display_projection_excludes_tools_and_tool_call_plans() -> None:
         {"role": "assistant", "content": "最终回答"},
     ]
 
+    assert project_display_conversation_messages(messages) == [
+        ConversationMessage(type="human", content="问题", id="h1"),
+        ConversationMessage(type="ai", content="最终回答", id="a2"),
+    ]
+
 
 @pytest.mark.asyncio
-async def test_repository_marks_assistant_tool_calls_for_display_filtering() -> None:
+async def test_service_marks_assistant_tool_calls_for_display_filtering() -> None:
     saver = FakeSaver(
         [
             AIMessage(
@@ -157,36 +164,45 @@ async def test_repository_marks_assistant_tool_calls_for_display_filtering() -> 
         ]
     )
 
-    messages = await LangGraphConversationRepository(saver).get_messages(
-        "user:bucket:session"
-    )
+    messages = await ConversationService(saver).get_history("user:bucket:session")
 
     assert messages is not None
     assert messages[0].has_tool_calls is True
 
 
 @pytest.mark.asyncio
-async def test_repository_deletes_only_through_public_checkpoint_api() -> None:
+async def test_service_deletes_only_through_public_checkpoint_api() -> None:
     saver = FakeSaver([])
-    repository = LangGraphConversationRepository(saver)
-    assert await repository.delete("user:bucket:session") is ConversationDeleteStatus.DELETED
+    service = ConversationService(saver)
+    assert (
+        await service.delete("user:bucket:session") is ConversationDeleteStatus.DELETED
+    )
     assert saver.deleted == ["user:bucket:session"]
 
     unsupported = FakeSaver([], supports_delete=False)
-    repository = LangGraphConversationRepository(unsupported)
-    assert await repository.delete("user:bucket:session") is ConversationDeleteStatus.UNSUPPORTED
+    service = ConversationService(unsupported)
+    assert (
+        await service.delete("user:bucket:session")
+        is ConversationDeleteStatus.UNSUPPORTED
+    )
     assert unsupported.storage == {
         ("user:bucket:session", "namespace"): "must-not-touch"
     }
 
 
 @pytest.mark.asyncio
-async def test_session_route_paginates_message_views(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_session_route_paginates_message_views(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(sessions, "get_rate_limit_key", lambda _key, _request: "bucket")
     saver = FakeSaver(
-        [HumanMessage(content="第一条"), AIMessage(content="第二条"), AIMessage(content="第三条")]
+        [
+            HumanMessage(content="第一条"),
+            AIMessage(content="第二条"),
+            AIMessage(content="第三条"),
+        ]
     )
-    service = ConversationService(LangGraphConversationRepository(saver))
+    service = ConversationService(saver)
 
     response = await sessions.get_session_history(
         "session",
@@ -202,4 +218,48 @@ async def test_session_route_paginates_message_views(monkeypatch: pytest.MonkeyP
     assert [(message.type, message.content) for message in response.messages] == [
         ("human", "第一条"),
         ("ai", "第二条"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_session_route_projects_display_messages_before_pagination(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sessions, "get_rate_limit_key", lambda _key, _request: "bucket")
+    saver = FakeSaver(
+        [
+            {"type": "human", "content": "问题", "id": "h1"},
+            {
+                "type": "ai",
+                "content": "准备检索",
+                "id": "a1",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "name": "query_internal_knowledge",
+                        "args": {"query": "测试"},
+                    }
+                ],
+            },
+            {"type": "tool", "content": "巨大工具结果", "id": "t1"},
+            {"type": "ai", "content": "最终回答", "id": "a2"},
+        ]
+    )
+
+    response = await sessions.get_session_history(
+        "session",
+        None,
+        page=1,
+        page_size=2,
+        conversations=ConversationService(saver),
+        api_key="fake-key",
+    )
+
+    assert response.total == 2
+    assert response.has_more is False
+    assert [
+        (message.type, message.content, message.id) for message in response.messages
+    ] == [
+        ("human", "问题", "h1"),
+        ("ai", "最终回答", "a2"),
     ]

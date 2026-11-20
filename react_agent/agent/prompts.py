@@ -121,9 +121,34 @@ def render_finalization_directive(reason: str | None) -> str:
     )
 
 
+def render_finalization_retry_directive(violation: str) -> str:
+    """为一次最终回答协议失败生成不落盘的纠正指令。"""
+    descriptions = {
+        "structured_tool_call": "候选回答仍包含结构化工具调用",
+        "unstructured_tool_protocol": "候选回答泄漏了内部工具协议",
+        "empty_content": "候选回答没有可展示正文",
+        "non_ai_message": "候选回答类型不符合要求",
+    }
+    detail = descriptions.get(violation, "候选回答不符合最终输出协议")
+    return (
+        f"【最终回答纠正指令】上一次{detail}，该候选内容已被系统丢弃。"
+        "这是唯一一次纠正重试：只能输出面向用户的自然语言或 Markdown 最终答案；"
+        "不得生成或描述任何工具调用、函数调用、内部协议或控制标记；"
+        "不得继续请求工具。请直接依据当前可见证据作答，信息不足时明确说明。"
+    )
+
+
+FINALIZATION_PROTOCOL_FALLBACK = (
+    "本轮工具执行已经结束，但模型未能生成符合要求的最终回答。"
+    "为避免展示内部协议内容，本次未采用模型生成结果；请缩小问题范围后重试。"
+)
+
+
 __all__ = [
+    "FINALIZATION_PROTOCOL_FALLBACK",
     "SYSTEM_PROMPT",
     "render_finalization_directive",
+    "render_finalization_retry_directive",
     "render_tool_catalog",
     "render_tool_recovery_directive",
 ]

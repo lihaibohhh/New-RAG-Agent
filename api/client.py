@@ -111,7 +111,7 @@ class ResearchAgentClient:
         message: str,
         session_id: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
-        """Yield decoded token, tool, usage, error, and done events."""
+        """Yield decoded token, answer commit, tool, usage, error, and done events."""
         async with self._http.stream(
             "POST",
             "/api/v1/chat/stream",

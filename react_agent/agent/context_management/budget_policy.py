@@ -8,6 +8,7 @@ from typing import Any
 from react_agent.agent.context_management.budgeting import (
     MessageTokenCounter,
     estimate_tool_schema_tokens,
+    trim_history_to_budget,
 )
 from react_agent.agent.context_management.contracts import (
     BudgetReport,
@@ -25,6 +26,7 @@ from react_agent.agent.context_management.projection import (
     project_current_tool_messages,
 )
 from react_agent.agent.context_management.segmentation import (
+    collapse_consecutive_humans,
     segment_current_turn,
     segment_turn_blocks,
 )
@@ -32,13 +34,16 @@ from react_agent.agent.context_management.segmentation import (
 
 @dataclass(frozen=True)
 class ContextSelection:
-    """预算策略选出的模型可见消息及随之变化的输入片段。"""
+    """上下文策略选出的模型可见消息与诊断摘要。"""
 
     messages: list[Any]
     summary_text: str | None
     historical_evidence_text: str
     historical_evidence_omitted_by_budget: int
     budget_report: BudgetReport | None
+    completed_message_count: int
+    current_turn_message_count: int
+    history_truncated: bool
 
 
 def _drop_oldest_completed_turn(messages: list[Any]) -> list[Any] | None:
@@ -161,22 +166,45 @@ def _projected_candidates(
         )
 
 
-def select_context_for_budget(
-    selected: list[Any],
+def select_context_messages(
+    messages: list[Any],
     *,
+    config: Any,
     counter: MessageTokenCounter,
     budget: ContextBudget | None,
     system_prompt: str,
     directive: str | None,
     bound_tools: tuple[Any, ...],
     summary_text: str | None,
-    original_completed_count: int,
     turn_evidence: list[dict[str, Any]],
     turn_evidence_omitted_count: int,
     conversation_evidence: list[dict[str, Any]],
     conversation_evidence_omitted_count: int,
 ) -> ContextSelection:
-    """按固定的降级顺序选择上下文，保持当前轮的工具交换完整。"""
+    """统一应用历史上限与总输入预算，保持当前轮工具交换完整。"""
+    original_segments = segment_current_turn(messages)
+    original_completed_count = len(original_segments.completed)
+    selected = list(messages)
+    history_truncated = False
+    if config.enable_history_truncation and config.max_history_tokens > 0:
+        source_tokens = counter.count(selected)
+        trimmed = trim_history_to_budget(
+            selected,
+            max_tokens=config.max_history_tokens,
+            token_counter=counter,
+        )
+        if not trimmed:
+            trimmed = list(original_segments.current or selected[-1:])
+        selected = collapse_consecutive_humans(trimmed)
+        selected_completed = segment_current_turn(selected).completed
+        history_truncated = bool(
+            source_tokens > config.max_history_tokens
+            and len(segment_turn_blocks(original_segments.completed))
+            > len(segment_turn_blocks(selected_completed))
+        )
+    else:
+        selected = collapse_consecutive_humans(selected)
+
     had_summary = summary_text is not None
     evidence_index = render_evidence_index(
         turn_evidence, omitted_count=turn_evidence_omitted_count
@@ -356,4 +384,8 @@ def select_context_for_budget(
         historical_evidence_text=historical_evidence_text,
         historical_evidence_omitted_by_budget=historical_evidence_omitted_by_budget,
         budget_report=budget_report,
+        completed_message_count=len(original_segments.completed),
+        current_turn_message_count=len(original_segments.current),
+        history_truncated=history_truncated
+        or bool(budget_report and budget_report.dropped_completed_message_count),
     )

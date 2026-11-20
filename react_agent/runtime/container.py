@@ -18,9 +18,6 @@ from react_agent.conversations.contracts import ConversationPersistenceConfig
 from react_agent.conversations.infrastructure.checkpointer_factory import (
     CheckpointerFactory,
 )
-from react_agent.conversations.infrastructure.langgraph_repository import (
-    LangGraphConversationRepository,
-)
 from react_agent.conversations.service import ConversationService
 from react_agent.configuration.settings import settings
 from knowledge.client import create_configured_rag_service
@@ -76,9 +73,7 @@ async def create_application_services(
     graph = compile_agent_graph(checkpointer)
     return ApplicationServices(
         agent=AgentService(dependencies, graph),
-        conversations=ConversationService(
-            LangGraphConversationRepository(checkpointer)
-        ),
+        conversations=ConversationService(checkpointer),
         conversation_persistence=conversation_config,
         effective_checkpoint_backend=checkpointer_factory.effective_backend(
             checkpointer
