@@ -1,4 +1,4 @@
-"""RAG 私有的 Redis 语义缓存适配器。"""
+"""Redis 两级语义缓存。"""
 from __future__ import annotations
 
 import asyncio
@@ -11,7 +11,7 @@ from typing import Any, Optional
 import numpy as np
 
 from knowledge.contracts import KnowledgeDocument
-from knowledge.rag.infrastructure.cache.codec import (
+from knowledge.rag.infrastructure.cache_codec import (
     deserialize_documents,
     deserialize_vector,
     serialize_documents,

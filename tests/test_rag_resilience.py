@@ -3,13 +3,11 @@ from __future__ import annotations
 import pytest
 
 from knowledge.contracts import KnowledgeDocument
-from knowledge.rag.infrastructure.retrieval.bm25_index import (
+from knowledge.rag.infrastructure.bm25 import (
     LazyBm25CandidateRetrieverAdapter,
-)
-from knowledge.rag.infrastructure.retrieval.bm25_repository import (
     RedisBm25Repository,
 )
-from knowledge.rag.retrieval import HybridRetrievalService
+from knowledge.rag.application import RetrievalApplicationService
 
 
 class FakeRepository:
@@ -63,21 +61,39 @@ class FakeCorpus:
         return []
 
 
+class FakeCache:
+    async def get(self, _query: str):
+        return None
+
+    async def set(self, _query: str, _documents, *, top_score: float) -> None:
+        return None
+
+
+class FakeReranker:
+    async def rerank(self, _query, documents, *, top_n):
+        return documents[:top_n], 0.0
+
+    async def warmup(self) -> None:
+        return None
+
+
 @pytest.mark.asyncio
 async def test_hybrid_retrieval_degrades_to_bm25_when_hnsw_fails() -> None:
     document = KnowledgeDocument(
         content="BM25 仍可返回的证据",
         metadata={"source_file": "report.pdf", "chunk_id": "chunk-1"},
     )
-    adapter = HybridRetrievalService(
+    service = RetrievalApplicationService(
+        cache=FakeCache(),
         vector_retriever=FailingVector(),
         bm25_retriever=FakeBm25(document),
+        reranker=FakeReranker(),
     )
 
-    result = await adapter.retrieve("测试", mode="hybrid")
-    await adapter.close()
+    result = await service.search("测试")
 
-    assert result == [document]
+    assert result.chunks[0].content == document.content
+    assert result.chunks[0].chunk_id == "chunk-1"
 
 
 @pytest.mark.asyncio

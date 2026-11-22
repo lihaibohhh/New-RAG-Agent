@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from knowledge.contracts import KnowledgeDocument
-from knowledge.rag.infrastructure.cache.codec import (
+from knowledge.rag.infrastructure.cache_codec import (
     deserialize_documents,
     deserialize_vector,
     serialize_documents,

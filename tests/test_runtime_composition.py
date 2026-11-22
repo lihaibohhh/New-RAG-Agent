@@ -32,7 +32,7 @@ from knowledge.contracts import (
     WarmupStatus,
 )
 from knowledge.ingestion.service import IngestionPipeline
-from knowledge.rag.operations import RagWarmupManager
+from knowledge.rag.runtime import RagWarmupManager
 from knowledge.runtime import create_knowledge_services
 from knowledge.services import IngestionService, RagService
 from knowledge.settings import KnowledgeSettings
@@ -276,7 +276,8 @@ async def test_ingestion_composition_does_not_load_rag_query_models() -> None:
 
     assert isinstance(runtime.ingestion, IngestionPipeline)
     assert not hasattr(runtime.ingestion, "_get_ingestion_pipeline")
-    assert runtime.rag._hybrid_retriever is not None
+    assert runtime.rag._bm25_retriever is not None
+    assert runtime.rag._vector_retriever is not None
     assert runtime.rag._vector_retriever._vectorstore is None
     assert runtime.rag._reranker._model is None
     assert runtime._resources._embedding_provider is None

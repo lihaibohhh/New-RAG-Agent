@@ -3,9 +3,7 @@ from __future__ import annotations
 import pytest
 
 from knowledge.contracts import KnowledgeDocument
-from knowledge.rag.contracts import CandidateRetrievalTrace
-from knowledge.rag.evaluation import EvaluationRetrievalService
-from knowledge.rag.retrieval import HybridRetrievalService
+from knowledge.rag.application import RetrievalApplicationService
 
 
 def _document(chunk_id: str, content: str | None = None) -> KnowledgeDocument:
@@ -52,17 +50,36 @@ class _Bm25:
         return None
 
 
+class _NullCache:
+    async def get(self, _query: str):
+        return None
+
+    async def set(self, _query: str, _documents, *, top_score: float) -> None:
+        return None
+
+
+class _PassReranker:
+    async def rerank(self, _query, documents, *, top_n):
+        return documents[:top_n], 0.0
+
+    async def warmup(self) -> None:
+        return None
+
+
 @pytest.mark.asyncio
 async def test_hybrid_trace_preserves_each_candidate_stage() -> None:
     shared = _document("shared")
-    adapter = HybridRetrievalService(
+    service = RetrievalApplicationService(
+        cache=_NullCache(),
         vector_retriever=_Vector([shared, _document("vector-only")]),
         bm25_retriever=_Bm25([_document("bm25-only"), shared]),
+        reranker=_PassReranker(),
     )
 
-    trace = await adapter.retrieve_with_trace("问题")
-    online_result = await adapter.retrieve("问题")
-    await adapter.close()
+    trace = await service._retrieve_with_trace(
+        "问题", filters=None, mode="hybrid"
+    )
+    online_result = await service.search("问题", top_k=3)
 
     assert [item.metadata.chunk_id for item in trace.bm25_candidates] == [
         "bm25-only",
@@ -73,24 +90,11 @@ async def test_hybrid_trace_preserves_each_candidate_stage() -> None:
         "vector-only",
     ]
     assert trace.fusion_candidates[0].metadata.chunk_id == "shared"
-    assert list(trace.filtered_candidates) == online_result
+    assert [item.metadata.chunk_id for item in trace.filtered_candidates] == [
+        item.chunk_id for item in online_result.chunks
+    ]
     assert trace.degraded_sources == ()
     assert {"bm25", "vector", "fusion", "filter", "total"} <= trace.timings.keys()
-
-
-class _TraceRetriever:
-    def __init__(self, documents: list[KnowledgeDocument]) -> None:
-        self.documents = documents
-
-    async def retrieve_with_trace(self, _query: str, **_kwargs):
-        return CandidateRetrievalTrace(
-            retrieval_mode="hybrid",
-            bm25_candidates=(self.documents[0],),
-            vector_candidates=(self.documents[1],),
-            fusion_candidates=tuple(self.documents),
-            filtered_candidates=tuple(self.documents),
-            timings={"bm25": 0.01, "vector": 0.02, "fusion": 0.001},
-        )
 
 
 class _ReverseReranker:
@@ -109,17 +113,19 @@ class _ReverseReranker:
 async def test_evaluation_pipeline_is_cache_free_and_returns_lightweight_trace() -> None:
     documents = [_document("bm25"), _document("vector")]
     reranker = _ReverseReranker()
-    service = EvaluationRetrievalService(
-        retriever=_TraceRetriever(documents),
+    service = RetrievalApplicationService(
+        cache=_NullCache(),
+        bm25_retriever=_Bm25([documents[0]]),
+        vector_retriever=_Vector([documents[1]]),
         reranker=reranker,
         max_content_chars=800,
         rerank_candidates=12,
-        production_rerank_top_n=5,
+        rerank_top_n=5,
         reranker_batch_size=2,
         device="cpu",
     )
 
-    result = await service.search("问题", top_k=1)
+    result = await service.evaluation_search("问题", top_k=1)
 
     assert result.chunks[0].chunk_id == "vector"
     assert result.stages["bm25"][0].chunk_id == "bm25"
@@ -134,4 +140,4 @@ async def test_evaluation_pipeline_is_cache_free_and_returns_lightweight_trace()
     assert reranker.top_n == 2
 
     with pytest.raises(ValueError, match="不允许使用语义查询缓存"):
-        await service.search("问题", use_query_cache=True)
+        await service.evaluation_search("问题", use_query_cache=True)

@@ -4,7 +4,7 @@ import asyncio
 import threading
 
 from knowledge.contracts import KnowledgeDocument
-from knowledge.rag.infrastructure.retrieval.reranker import (
+from knowledge.rag.infrastructure.reranker import (
     RerankerProviderAdapter,
     _score_with_gate,
 )
