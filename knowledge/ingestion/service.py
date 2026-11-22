@@ -14,17 +14,17 @@ from typing import Any
 from knowledge.contracts import IngestionReport, KnowledgeDocument
 from knowledge.ingestion.contracts import ParseRequest
 from knowledge.settings import IngestionBatchSettings
-from knowledge.ingestion.document_service import (
+from knowledge.ingestion.parsing import (
+    DocumentParsingService,
     SUPPORTED_EXTENSIONS,
     parse_result_to_documents,
 )
-from knowledge.ingestion.ports import (
-    DocumentParserPort,
-    IngestionManifestPort,
-    IngestionPreflightPort,
-    KnowledgeIndexChangedPort,
-    PdfPageCounterPort,
-    VectorIndexWriterPort,
+from knowledge.ingestion.infrastructure.parsing.docling_pdf import (
+    DoclingPreflightAdapter,
+)
+from knowledge.ingestion.infrastructure.storage import (
+    CompositeVectorIndexWriter,
+    JsonIngestionManifestAdapter,
 )
 from knowledge.ingestion.observability import summarize_last_run
 
@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 
 def _parse_one(
-    args: tuple[str, str, str, DocumentParserPort],
+    args: tuple[str, str, str, DocumentParsingService],
 ) -> tuple[str, str, list[KnowledgeDocument], str | None, float]:
     """解析一个文件；保持模块顶层以兼容 Windows spawn。"""
     file_path, file_hash, source_root, parser = args
@@ -70,23 +70,29 @@ def _file_hash(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _count_pdf_pages(path: Path) -> int:
+    """轻量读取 PDF 页数，不触发正文解析。"""
+    import fitz
+
+    with fitz.open(path) as document:
+        return document.page_count
+
+
 class IngestionPipeline:
     """编排扫描、增量判定、解析、批处理、写库和缓存失效。"""
 
     def __init__(
         self,
         *,
-        writer: VectorIndexWriterPort,
-        manifest: IngestionManifestPort,
-        page_counter: PdfPageCounterPort,
-        preflight: IngestionPreflightPort,
-        document_parser: DocumentParserPort,
-        index_changed: KnowledgeIndexChangedPort,
+        writer: CompositeVectorIndexWriter,
+        manifest: JsonIngestionManifestAdapter,
+        preflight: DoclingPreflightAdapter,
+        document_parser: DocumentParsingService,
+        index_changed: Any,
         config: IngestionBatchSettings | None = None,
     ) -> None:
         self._writer = writer
         self._manifest = manifest
-        self._page_counter = page_counter
         self._preflight = preflight
         self._document_parser = document_parser
         self._index_changed = index_changed
@@ -159,7 +165,7 @@ class IngestionPipeline:
         for path in all_files:
             if path.suffix.lower() == ".pdf":
                 try:
-                    page_count = self._page_counter.count(str(path))
+                    page_count = _count_pdf_pages(path)
                 except Exception:
                     logger.warning(
                         "[INGESTION] PDF 页数检查失败，继续解析 path=%s",

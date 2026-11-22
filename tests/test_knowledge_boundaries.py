@@ -17,17 +17,23 @@ def test_legacy_agent_rag_package_is_removed() -> None:
     assert not (package_root / "react_agent" / "rag").exists()
 
 
-def test_knowledge_root_contains_only_public_source_contracts() -> None:
+def test_knowledge_root_contains_flat_service_boundaries() -> None:
     package_root = Path(__file__).parent.parent / "knowledge"
     root_modules = {path.name for path in package_root.glob("*.py")}
 
     assert root_modules == {
         "__init__.py",
         "contracts.py",
+        "client.py",
+        "runtime.py",
+        "server.py",
         "services.py",
         "settings.py",
+        "transport.py",
     }
-    assert (package_root / "ingestion" / "source.py").is_file()
+    assert (package_root / "ingestion" / "parsing.py").is_file()
+    for removed_package in ("client", "runtime", "server", "transport"):
+        assert not (package_root / removed_package).exists()
 
 
 def test_rag_owns_internal_contracts_and_adapters() -> None:
@@ -75,11 +81,12 @@ def test_rag_owns_internal_contracts_and_adapters() -> None:
     assert not (
         package_root / "foundation" / "storage" / "chroma_knowledge_base.py"
     ).exists()
-    assert not (package_root / "runtime" / "offline.py").exists()
+    assert not (package_root / "runtime").exists()
 
 
-def test_ingestion_owns_internal_contracts_ports_and_adapters() -> None:
+def test_ingestion_owns_internal_contracts_and_adapters() -> None:
     package_root = Path(__file__).parent.parent / "knowledge"
+    ingestion_root = package_root / "ingestion"
     public_contracts = (package_root / "contracts.py").read_text(encoding="utf-8")
 
     assert "class ParseRequest" not in public_contracts
@@ -90,41 +97,52 @@ def test_ingestion_owns_internal_contracts_ports_and_adapters() -> None:
     assert "class RagDocument" not in public_contracts
     assert not (package_root / "ports.py").exists()
     assert not list((package_root / "infrastructure").rglob("*.py"))
-    assert (package_root / "ingestion" / "contracts.py").is_file()
-    assert (package_root / "ingestion" / "ports.py").is_file()
-    assert (package_root / "ingestion" / "infrastructure").is_dir()
+    assert (ingestion_root / "contracts.py").is_file()
+    assert not (ingestion_root / "ports.py").exists()
+    assert (ingestion_root / "infrastructure").is_dir()
+
+    parsing_root = ingestion_root / "infrastructure" / "parsing"
+    parsing_modules = {
+        path.name for path in parsing_root.glob("*.py") if path.name != "__init__.py"
+    }
+    assert parsing_modules == {
+        "docling_pdf.py",
+        "local_pdf.py",
+        "other_documents.py",
+    }
+    assert (ingestion_root / "pdf_routing.py").is_file()
+    assert (ingestion_root / "infrastructure" / "storage.py").is_file()
+    assert not (ingestion_root / "infrastructure" / "storage").exists()
+    assert not (ingestion_root / "document_service.py").exists()
+    assert not (ingestion_root / "source.py").exists()
+    assert not (ingestion_root / "parser_router.py").exists()
 
 
 def test_top_runtime_only_connects_module_runtimes_and_shared_resources() -> None:
     package_root = Path(__file__).parent.parent / "knowledge"
-    container_source = (package_root / "runtime" / "container.py").read_text(
-        encoding="utf-8"
-    )
+    runtime_source = (package_root / "runtime.py").read_text(encoding="utf-8")
     rag_runtime_source = (package_root / "rag" / "runtime.py").read_text(
         encoding="utf-8"
     )
     ingestion_runtime_source = (package_root / "ingestion" / "runtime.py").read_text(
         encoding="utf-8"
     )
-    resources_source = (package_root / "runtime" / "resources.py").read_text(
-        encoding="utf-8"
-    )
-    server_source = (package_root / "server" / "app.py").read_text(encoding="utf-8")
+    server_source = (package_root / "server.py").read_text(encoding="utf-8")
 
-    assert "DoclingServiceAdapter" not in container_source
-    assert "RedisSemanticCacheAdapter" not in container_source
+    assert "DoclingServiceAdapter" not in runtime_source
+    assert "RedisSemanticCacheAdapter" not in runtime_source
     assert "KnowledgeRuntimeConfig" not in rag_runtime_source
     assert "KnowledgeRuntimeConfig" not in ingestion_runtime_source
     assert "class LocalRagService" in rag_runtime_source
     assert "class LocalIngestionService(IngestionPipeline)" in ingestion_runtime_source
     assert "_get_ingestion_pipeline" not in ingestion_runtime_source
     assert "_ingestion_service" not in ingestion_runtime_source
-    assert "class SharedKnowledgeResources" in resources_source
-    assert "def get_retrieval_service" not in container_source
-    assert "def get_evaluation_retrieval_service" not in container_source
-    assert "def get_admin_service" not in container_source
-    assert "def get_ingestion_service" not in container_source
-    assert "def operations" not in container_source
+    assert "class SharedKnowledgeResources" in runtime_source
+    assert "def get_retrieval_service" not in runtime_source
+    assert "def get_evaluation_retrieval_service" not in runtime_source
+    assert "def get_admin_service" not in runtime_source
+    assert "def get_ingestion_service" not in runtime_source
+    assert "def operations" not in runtime_source
     assert 'getattr(runtime, "rag_runtime", runtime)' not in server_source
     assert 'getattr(runtime, "ingestion_runtime", runtime)' not in server_source
 
@@ -185,8 +203,8 @@ def test_offline_chunk_reader_does_not_create_full_runtime(monkeypatch) -> None:
 
 def test_http_transport_codecs_are_shared_by_client_and_server() -> None:
     package_root = Path(__file__).parent.parent / "knowledge"
-    client_source = (package_root / "client" / "http.py").read_text(encoding="utf-8")
-    server_source = (package_root / "server" / "app.py").read_text(encoding="utf-8")
+    client_source = (package_root / "client.py").read_text(encoding="utf-8")
+    server_source = (package_root / "server.py").read_text(encoding="utf-8")
 
     assert "RetrievedChunk(" not in client_source
     assert "EvaluationCandidate(" not in client_source
@@ -198,7 +216,7 @@ def test_http_transport_codecs_are_shared_by_client_and_server() -> None:
 
 def test_rag_search_chain_has_no_forwarding_service_layers() -> None:
     package_root = Path(__file__).parent.parent / "knowledge"
-    client_source = (package_root / "client" / "http.py").read_text(encoding="utf-8")
+    client_source = (package_root / "client.py").read_text(encoding="utf-8")
     runtime_source = (package_root / "rag" / "runtime.py").read_text(
         encoding="utf-8"
     )
@@ -214,15 +232,13 @@ def test_ingestion_chain_has_no_forwarding_runtime_or_worker_bridge() -> None:
     package_root = Path(__file__).parent.parent / "knowledge" / "ingestion"
     runtime_source = (package_root / "runtime.py").read_text(encoding="utf-8")
     service_source = (package_root / "service.py").read_text(encoding="utf-8")
-    document_source = (package_root / "document_service.py").read_text(
-        encoding="utf-8"
-    )
+    parsing_source = (package_root / "parsing.py").read_text(encoding="utf-8")
 
     assert "class LocalIngestionService(IngestionPipeline)" in runtime_source
     assert "_get_ingestion_pipeline" not in runtime_source
     assert "_ingestion_service" not in runtime_source
     assert "parse_file_to_documents" not in service_source
-    assert "parse_file_to_documents" not in document_source
+    assert "parse_file_to_documents" not in parsing_source
 
 
 def test_ingestion_config_rejects_invalid_resource_limits() -> None:
@@ -277,7 +293,6 @@ def test_single_worker_ingestion_does_not_create_process_pool(
     pipeline = IngestionPipeline(
         writer=writer,
         manifest=manifest,
-        page_counter=object(),
         preflight=object(),
         document_parser=object(),
         index_changed=object(),
@@ -302,17 +317,16 @@ def test_single_worker_ingestion_does_not_create_process_pool(
 
 
 @pytest.mark.asyncio
-async def test_ingestion_service_uses_injected_pdf_limit(tmp_path: Path) -> None:
+async def test_ingestion_service_uses_configured_pdf_limit(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
     class Manifest:
         def load(self) -> dict[str, str]:
             return {}
 
         def save(self, _record: dict[str, str]) -> None:
             raise AssertionError("被排除的文件不应更新清单")
-
-    class PageCounter:
-        def count(self, _file_path: str) -> int:
-            return 2
 
     class UnusedDependency:
         def __getattr__(self, name: str):
@@ -323,10 +337,10 @@ async def test_ingestion_service_uses_injected_pdf_limit(tmp_path: Path) -> None
             raise AssertionError("没有写入 chunk 时不应失效缓存")
 
     (tmp_path / "oversized.pdf").write_bytes(b"")
+    monkeypatch.setattr(ingestion_service_module, "_count_pdf_pages", lambda _path: 2)
     service = IngestionPipeline(
         writer=UnusedDependency(),
         manifest=Manifest(),
-        page_counter=PageCounter(),
         preflight=UnusedDependency(),
         document_parser=UnusedDependency(),
         index_changed=CacheInvalidator(),
@@ -354,7 +368,6 @@ async def test_ingestion_publishes_index_change_after_committed_write() -> None:
     service = IngestionPipeline(
         writer=object(),
         manifest=object(),
-        page_counter=object(),
         preflight=object(),
         document_parser=object(),
         index_changed=observer,

@@ -6,21 +6,21 @@ import hmac
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path, PureWindowsPath
-from typing import Any, Callable, Protocol
+from typing import Any, Callable
 
+from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 
-from knowledge.transport.schemas import (
+from knowledge.contracts import KnowledgeValidationError
+from knowledge.runtime import KnowledgeServices, create_knowledge_services
+from knowledge.services import IngestionService, RagService
+from knowledge.settings import KnowledgeServiceSettings, KnowledgeSettings
+from knowledge.transport import (
     EvaluationSearchRequest,
     IngestionRequest,
     InvalidateRequest,
     SearchRequest,
     WarmupRequest,
-)
-from knowledge.services import IngestionService, RagService
-from knowledge.settings import KnowledgeServiceSettings, KnowledgeSettings
-from knowledge.contracts import KnowledgeValidationError
-from knowledge.transport.codecs import (
     evaluation_result_to_payload,
     health_status_to_payload,
     ingestion_report_to_payload,
@@ -28,20 +28,20 @@ from knowledge.transport.codecs import (
     stored_chunk_page_to_payload,
     warmup_response_to_payload,
 )
-from knowledge.server.runtime import create_knowledge_services_from_env
 
 
 logger = logging.getLogger(__name__)
 
 
-class KnowledgeServicesPort(Protocol):
-    rag: RagService
-    ingestion: IngestionService
-
-    async def close(self) -> None: ...
+RuntimeFactory = Callable[[], Any]
 
 
-RuntimeFactory = Callable[[], KnowledgeServicesPort]
+def create_knowledge_settings() -> KnowledgeSettings:
+    return KnowledgeSettings.from_env()
+
+
+def create_knowledge_services_from_env() -> KnowledgeServices:
+    return create_knowledge_services(create_knowledge_settings())
 
 
 def _resolve_ingestion_path(root: Path, relative_path: str) -> Path:
@@ -272,4 +272,13 @@ def create_app(
     return app
 
 
-__all__ = ["create_app"]
+load_dotenv()
+app = create_app()
+
+
+__all__ = [
+    "app",
+    "create_app",
+    "create_knowledge_services_from_env",
+    "create_knowledge_settings",
+]

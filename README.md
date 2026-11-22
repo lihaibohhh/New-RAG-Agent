@@ -233,12 +233,12 @@ src/
 ├── knowledge/
 │   ├── services.py         # RagService / IngestionService 公共接口
 │   ├── settings.py         # Knowledge 统一配置模型与环境投影
+│   ├── runtime.py          # Knowledge 组合根与共享资源
+│   ├── client.py           # 远程 RagService / IngestionService 实现
+│   ├── transport.py        # 中立 HTTP Schema 与 Codec
+│   ├── server.py           # Knowledge Service ASGI 入口
 │   ├── rag/                # 在线检索、缓存、精排和评测
-│   ├── ingestion/          # 文档解析和增量建库
-│   ├── runtime/            # Knowledge 组合根与共享资源
-│   ├── client/             # 远程 RagService / IngestionService 实现
-│   ├── transport/          # 中立 HTTP Schema 与 Codec
-│   └── server/             # Knowledge Service ASGI 入口
+│   └── ingestion/          # 文档解析和增量建库
 ├── react_agent/
 │   ├── agent/              # Agent 状态、工作流、策略和上下文管理
 │   ├── skills/             # 内置研究工作流

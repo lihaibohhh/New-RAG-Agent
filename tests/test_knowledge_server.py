@@ -6,7 +6,7 @@ import httpx
 import pytest
 from asgi_lifespan import LifespanManager
 
-from knowledge.server.app import create_app
+from knowledge.server import create_app
 from knowledge.settings import KnowledgeServiceSettings, KnowledgeSettings
 from knowledge.contracts import (
     EvaluationCandidate,

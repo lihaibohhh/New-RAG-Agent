@@ -105,7 +105,7 @@ FORBIDDEN_DEPENDENCIES: dict[str, tuple[str, ...]] = {
 }
 
 RUNTIME_MODULE_ALLOWLIST: dict[str, dict[str, tuple[str, ...]]] = {
-    "knowledge.runtime.container": {
+    "knowledge.runtime": {
         "knowledge.rag": ("knowledge.rag.runtime",),
         "knowledge.ingestion": ("knowledge.ingestion.runtime",),
     },

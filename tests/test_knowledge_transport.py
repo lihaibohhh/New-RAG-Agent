@@ -13,7 +13,7 @@ from knowledge.contracts import (
     RetrievalResult,
     StoredChunk,
 )
-from knowledge.transport.codecs import (
+from knowledge.transport import (
     TransportPayloadError,
     evaluation_result_from_payload,
     evaluation_result_to_payload,

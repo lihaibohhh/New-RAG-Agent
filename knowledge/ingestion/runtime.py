@@ -6,38 +6,22 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
-from knowledge.ingestion.document_service import DocumentParsingService
+from knowledge.ingestion.parsing import DocumentParsingService
 from knowledge.settings import IngestionSettings
-from knowledge.ingestion.infrastructure.parsing.basic_document_parser import (
-    BasicDocumentParserAdapter,
-)
-from knowledge.ingestion.infrastructure.parsing.docling_parser import (
+from knowledge.ingestion.infrastructure.parsing.docling_pdf import (
+    DoclingPreflightAdapter,
     DoclingServiceAdapter,
 )
-from knowledge.ingestion.infrastructure.parsing.ingestion_support import (
-    DoclingPreflightAdapter,
-    PdfPageCounterAdapter,
+from knowledge.ingestion.infrastructure.parsing.local_pdf import LocalPdfParserAdapter
+from knowledge.ingestion.infrastructure.parsing.other_documents import (
+    OtherDocumentParserAdapter,
 )
-from knowledge.ingestion.infrastructure.parsing.local_pdf_parser import (
-    LocalPdfParserAdapter,
-)
-from knowledge.ingestion.infrastructure.parsing.structured_table_parser import (
-    StructuredTableParserAdapter,
-)
-from knowledge.ingestion.infrastructure.storage.chroma_vector_writer import (
+from knowledge.ingestion.infrastructure.storage import (
     ChromaVectorWriterAdapter,
-)
-from knowledge.ingestion.infrastructure.storage.composite_writer import (
     CompositeVectorIndexWriter,
-)
-from knowledge.ingestion.infrastructure.storage.file_manifest import (
     JsonIngestionManifestAdapter,
 )
-from knowledge.ingestion.parser_router import PdfParserRouter
-from knowledge.ingestion.ports import (
-    KnowledgeIndexChangedPort,
-    VectorIndexWriterPort,
-)
+from knowledge.ingestion.pdf_routing import PdfParserRouter
 from knowledge.ingestion.service import IngestionPipeline
 
 
@@ -50,9 +34,9 @@ class LocalIngestionService(IngestionPipeline):
         *,
         chroma_dir: str,
         embedding_provider: Callable[[], Any],
-        chunk_store_provider: Callable[[], VectorIndexWriterPort],
+        chunk_store_provider: Callable[[], Any],
         knowledge_write_lock: threading.RLock,
-        index_changed_provider: Callable[[], KnowledgeIndexChangedPort],
+        index_changed_provider: Callable[[], Any],
     ) -> None:
         docling_config = config.docling
         preflight_client = DoclingServiceAdapter(
@@ -72,7 +56,6 @@ class LocalIngestionService(IngestionPipeline):
                 lock=knowledge_write_lock,
             ),
             manifest=JsonIngestionManifestAdapter(config.hash_record_path),
-            page_counter=PdfPageCounterAdapter(),
             preflight=DoclingPreflightAdapter(
                 client=preflight_client,
                 enabled=docling_config.enabled,
@@ -114,8 +97,7 @@ class LocalIngestionService(IngestionPipeline):
         )
         return DocumentParsingService(
             pdf_parser=pdf_parser,
-            basic_parser=BasicDocumentParserAdapter(),
-            table_parser=StructuredTableParserAdapter(),
+            other_parser=OtherDocumentParserAdapter(),
         )
 
     async def close(self) -> None:

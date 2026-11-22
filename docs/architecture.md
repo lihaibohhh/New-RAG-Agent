@@ -88,7 +88,7 @@ Skill 只在当前用户轮中选择和注入，不扩大 Runtime 已注册的�
 
 ## Knowledge 模块边界
 
-`knowledge/` 根层只保存跨模块公共契约、两个业务服务接口和统一配置：
+`knowledge/` 根层保存跨模块公共契约、统一配置及压平后的服务边界：
 
 | 模块 | 边界 |
 |---|---|
@@ -97,10 +97,10 @@ Skill 只在当前用户轮中选择和注入，不扩大 Runtime 已注册的�
 | `knowledge/rag/` | 在线查询、混合召回、精排、缓存、评测和预热 |
 | `knowledge/ingestion/` | 文档解析、OCR 路由、增量建库和索引写入 |
 | `knowledge/foundation/` | 双方确实共享且不依赖内部类型的基础设施 |
-| `knowledge/runtime/` | 顶层资源生命周期与跨模块事件连接 |
-| `knowledge/transport/` | HTTP Schema 与领域对象 Codec |
-| `knowledge/client/` | 实现同一业务接口的 HTTP RAG/Ingestion 服务 |
-| `knowledge/server/` | ASGI 薄适配层与环境组合入口 |
+| `knowledge/runtime.py` | 顶层资源生命周期与跨模块事件连接 |
+| `knowledge/transport.py` | HTTP Schema 与领域对象 Codec |
+| `knowledge/client.py` | 实现同一业务接口的 HTTP RAG/Ingestion 服务 |
+| `knowledge/server.py` | ASGI 边界、环境组装与启动入口 |
 
 依赖约束：
 
