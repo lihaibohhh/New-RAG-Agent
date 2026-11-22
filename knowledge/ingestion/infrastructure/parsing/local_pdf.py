@@ -1,29 +1,28 @@
-# knowledge/ingestion/infrastructure/parsing/pdf_parser.py
-# 职责：金融研报级 PDF 解析
+"""本地 PDF 解析路径。
+
+集中容纳金融研报版面解析算法、统一解析契约适配和页数检查，避免一条本地
+PDF 路径被拆成多个只有单一调用方的小模块。
+"""
+
+# 金融研报级 PDF 解析：
 #   - PyMuPDF  → 带坐标文字块提取、多栏重排、页眉页脚过滤
 #   - pdfplumber → 结构化表格提取（转 Markdown，整块保留）
 #   - 降级兜底  → 两库均缺失时自动回落到 PyPDFLoader
-#
-# 对外接口（供 LocalPdfParserAdapter 调用）：
-#   load_pdf_with_layout(file_path, chunk_size, chunk_overlap)
-#       -> List[Document]   已完成分块，含 metadata
-#
-# 依赖安装：
-#   pip install pymupdf pdfplumber
-#
-# 作者备注：
-#   表格 Document 不再二次分块（chunk_id 含 ::table_ 前缀），
-#   本模块输出已预分块，适配器与统一解析服务不得再次 split。
 
 from __future__ import annotations
 
+import asyncio
 import re
+import time
 import warnings
 from pathlib import Path
-from typing import List, Tuple
+from typing import Any, List, Tuple
 
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+from knowledge.ingestion.contracts import ParseRequest, ParseResult, ParsedChunk
+from knowledge.ingestion.parsing import source_identity
 
 # ──────────────────────────────────────────────
 # 内部常量
@@ -251,7 +250,7 @@ def load_pdf_with_layout(
     # ── 降级：两者均缺 ──────────────────────────────────────────
     if not has_fitz:
         warnings.warn(
-            f"⚠️  [pdf_parser] PyMuPDF 未安装，'{filename}' 回落到 PyPDFLoader。\n"
+            f"⚠️  [local_pdf] PyMuPDF 未安装，'{filename}' 回落到 PyPDFLoader。\n"
             "    多栏/表格解析将失效，建议：pip install pymupdf pdfplumber",
             RuntimeWarning,
             stacklevel=2,
@@ -261,7 +260,7 @@ def load_pdf_with_layout(
 
     if not has_pdfplumber:
         warnings.warn(
-            f"⚠️  [pdf_parser] pdfplumber 未安装，'{filename}' 将跳过表格提取。\n"
+            f"⚠️  [local_pdf] pdfplumber 未安装，'{filename}' 将跳过表格提取。\n"
             "    建议：pip install pdfplumber",
             RuntimeWarning,
             stacklevel=2,
@@ -287,7 +286,7 @@ def load_pdf_with_layout(
             plumber_ctx = pdfplumber.open(file_path)
         except Exception as e:
             warnings.warn(
-                f"⚠️  [pdf_parser] pdfplumber 打开 '{filename}' 失败，跳过表格提取：{e}",
+                f"⚠️  [local_pdf] pdfplumber 打开 '{filename}' 失败，跳过表格提取：{e}",
                 RuntimeWarning,
                 stacklevel=2,
             )
@@ -309,7 +308,7 @@ def load_pdf_with_layout(
 
                     if abs(plumber_h - page_h) > _COORD_TOLERANCE:
                         warnings.warn(
-                            f"⚠️  [pdf_parser] '{filename}' 第 {human_page_num} 页坐标系不一致 "
+                            f"⚠️  [local_pdf] '{filename}' 第 {human_page_num} 页坐标系不一致 "
                             f"(fitz={page_h:.1f}, plumber={plumber_h:.1f})，跳过表格区域剔除。",
                             RuntimeWarning, stacklevel=2,
                         )
@@ -335,7 +334,7 @@ def load_pdf_with_layout(
                 except Exception as e:
                     # 当前页表格提取失败，降级：清空 bbox，PyMuPDF 正文提取不受影响
                     warnings.warn(
-                        f"⚠️  [pdf_parser] '{filename}' 第 {human_page_num} 页表格提取失败，"
+                        f"⚠️  [local_pdf] '{filename}' 第 {human_page_num} 页表格提取失败，"
                         f"跳过本页表格（正文仍正常处理）：{e}",
                         RuntimeWarning,
                         stacklevel=2,
@@ -381,11 +380,73 @@ def load_pdf_with_layout(
 
     if not all_docs:
         warnings.warn(
-            f"⚠️  [pdf_parser] '{filename}' 解析后无任何内容，请检查文件是否为图片型 PDF。",
+            f"⚠️  [local_pdf] '{filename}' 解析后无任何内容，请检查文件是否为图片型 PDF。",
             RuntimeWarning,
             stacklevel=2,
         )
 
     return all_docs
+
+
+class LocalPdfParserAdapter:
+    """执行本地 PDF 解析并返回建库内部的统一契约。"""
+
+    async def parse(self, request: ParseRequest) -> ParseResult:
+        normalized = request.normalized()
+        return await asyncio.to_thread(self._parse_sync, normalized)
+
+    @staticmethod
+    def _parse_sync(request: ParseRequest) -> ParseResult:
+        started = time.perf_counter()
+        with warnings.catch_warnings(record=True) as captured:
+            warnings.simplefilter("always")
+            documents = load_pdf_with_layout(
+                request.file_path,
+                source_root=request.source_root,
+            )
+
+        source_file, industry = source_identity(
+            request.file_path,
+            request.source_root,
+        )
+        chunks: list[ParsedChunk] = []
+        for index, document in enumerate(documents or []):
+            content = str(document.page_content or "").strip()
+            if not content:
+                continue
+            metadata: dict[str, Any] = dict(document.metadata or {})
+            page_value = metadata.get("page")
+            try:
+                page = int(page_value) if page_value is not None else None
+            except (TypeError, ValueError):
+                page = None
+            chunks.append(
+                ParsedChunk(
+                    content=content,
+                    source_file=source_file,
+                    source_page=page,
+                    source_pages=(page,) if page is not None else (),
+                    chunk_id=str(
+                        metadata.get("chunk_id")
+                        or f"{source_file}::local_{index:06d}"
+                    ),
+                    doc_type=str(metadata.get("doc_type") or "text"),
+                    parser_name="local",
+                    metadata={
+                        **metadata,
+                        **({"industry": industry} if industry else {}),
+                    },
+                )
+            )
+
+        return ParseResult(
+            source_file=source_file,
+            parser_name="local",
+            chunks=tuple(chunks),
+            processing_time=time.perf_counter() - started,
+            warnings=tuple(str(item.message) for item in captured),
+        )
+
+__all__ = ["LocalPdfParserAdapter"]
 
 

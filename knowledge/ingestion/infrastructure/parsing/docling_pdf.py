@@ -1,4 +1,4 @@
-"""Docling Serve 异步解析接口适配器。"""
+"""Docling 复杂版式 PDF 解析路径及其服务预检。"""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 
 from knowledge.ingestion.contracts import ParseRequest, ParseResult, ParsedChunk
-from knowledge.ingestion.source import source_identity
+from knowledge.ingestion.parsing import source_identity
 
 
 _MARKDOWN_TABLE_RE = re.compile(r"(?m)^\s*\|.*\|\s*$")
@@ -475,3 +475,31 @@ class DoclingServiceAdapter:
             ),
             ocr_policy=request.ocr_policy,
         )
+
+
+class DoclingPreflightAdapter:
+    """在严格建库模式下确认 Docling 服务可用。"""
+
+    def __init__(
+        self,
+        *,
+        client: DoclingServiceAdapter,
+        enabled: bool,
+        strict_mode: bool,
+    ) -> None:
+        self._client = client
+        self._enabled = enabled
+        self._strict_mode = strict_mode
+
+    def ensure_ready(self) -> None:
+        if not self._enabled or not self._strict_mode:
+            return
+        try:
+            asyncio.run(self._client.ensure_ready())
+        except Exception as exc:
+            raise RuntimeError(
+                "Docling 严格建库预检失败；请确认 ingestion profile 已启动且健康"
+            ) from exc
+
+
+__all__ = ["DoclingPreflightAdapter", "DoclingServiceAdapter"]

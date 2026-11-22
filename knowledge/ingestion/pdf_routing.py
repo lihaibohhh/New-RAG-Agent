@@ -1,4 +1,4 @@
-"""知识库本地解析器与 Docling 服务之间的选择和降级。"""
+"""PDF 复杂度检测、解析路由、质量复检与降级策略。"""
 from __future__ import annotations
 
 import asyncio
@@ -9,7 +9,12 @@ from pathlib import Path
 from typing import Callable, Literal
 
 from knowledge.ingestion.contracts import OcrPolicy, ParseRequest, ParseResult
-from knowledge.ingestion.ports import DocumentParserPort
+from knowledge.ingestion.infrastructure.parsing.docling_pdf import (
+    DoclingServiceAdapter,
+)
+from knowledge.ingestion.infrastructure.parsing.local_pdf import (
+    LocalPdfParserAdapter,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -203,8 +208,8 @@ class PdfParserRouter:
     def __init__(
         self,
         *,
-        local_parser: DocumentParserPort,
-        docling_parser: DocumentParserPort,
+        local_parser: LocalPdfParserAdapter,
+        docling_parser: DoclingServiceAdapter,
         docling_enabled: bool,
         strict_mode: bool = False,
         mode: str = "auto",

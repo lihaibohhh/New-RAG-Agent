@@ -14,7 +14,7 @@ from knowledge.client import (
     create_rag_service,
     load_client_settings,
 )
-from knowledge.server.runtime import create_knowledge_settings
+from knowledge.server import create_knowledge_settings
 
 
 def test_knowledge_namespace_has_no_legacy_top_level_packages() -> None:

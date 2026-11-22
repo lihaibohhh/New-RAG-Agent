@@ -2,7 +2,7 @@
 tools:
   rag:
     max_retries: 2
-    # Agent 调用 Knowledge Service 的客户端预算；服务端调优由 knowledge/server/runtime.py 管理。
+    # Agent 调用 Knowledge Service 的客户端预算；服务端调优由 knowledge/server.py 管理。
     client_timeout: 150
 
   excel:

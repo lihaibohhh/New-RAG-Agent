@@ -1,6 +1,7 @@
 """Knowledge Service 的底层 HTTP 协议客户端。"""
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, TypeVar
 
 import httpx
@@ -15,8 +16,15 @@ from knowledge.contracts import (
     StoredChunk,
     WarmupStatus,
 )
-from knowledge.transport.codecs import (
+from knowledge.services import IngestionService, RagService
+from knowledge.settings import KnowledgeClientSettings, load_client_settings
+from knowledge.transport import (
     DecodedChunkPage,
+    EvaluationSearchRequest,
+    IngestionRequest,
+    InvalidateRequest,
+    SearchRequest,
+    WarmupRequest,
     evaluation_result_from_payload,
     health_status_from_payload,
     ingestion_report_from_payload,
@@ -24,13 +32,6 @@ from knowledge.transport.codecs import (
     stored_chunk_page_from_payload,
     warmup_response_to_payload,
     warmup_status_from_payload,
-)
-from knowledge.transport.schemas import (
-    EvaluationSearchRequest,
-    IngestionRequest,
-    InvalidateRequest,
-    SearchRequest,
-    WarmupRequest,
 )
 
 
@@ -351,4 +352,43 @@ class HttpIngestionService(_KnowledgeHttpTransport):
         )
 
 
-__all__ = ["HttpIngestionService", "HttpRagService"]
+def create_rag_service(config: KnowledgeClientSettings) -> HttpRagService:
+    return HttpRagService(
+        base_url=config.base_url,
+        api_key=config.api_key,
+        timeout=config.timeout,
+    )
+
+
+def create_ingestion_service(
+    config: KnowledgeClientSettings,
+) -> HttpIngestionService:
+    return HttpIngestionService(
+        base_url=config.base_url,
+        api_key=config.api_key,
+        timeout=config.timeout,
+    )
+
+
+def create_configured_rag_service(
+    environ: Mapping[str, str] | None = None,
+) -> RagService:
+    return create_rag_service(load_client_settings(environ))
+
+
+def create_configured_ingestion_service(
+    environ: Mapping[str, str] | None = None,
+) -> IngestionService:
+    return create_ingestion_service(load_client_settings(environ))
+
+
+__all__ = [
+    "HttpIngestionService",
+    "HttpRagService",
+    "KnowledgeClientSettings",
+    "create_configured_ingestion_service",
+    "create_configured_rag_service",
+    "create_ingestion_service",
+    "create_rag_service",
+    "load_client_settings",
+]

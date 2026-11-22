@@ -1,20 +1,12 @@
-"""所有知识库文档解析的唯一应用层入口。"""
+"""文档解析分派、来源标识和入库文档转换。"""
 from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from knowledge.contracts import (
-    ChunkMetadata,
-    KnowledgeDocument,
-    SourceReference,
-)
-from knowledge.ingestion.contracts import (
-    ParseRequest,
-    ParseResult,
-)
-from knowledge.ingestion.ports import DocumentParserPort
+from knowledge.contracts import ChunkMetadata, KnowledgeDocument, SourceReference
+from knowledge.ingestion.contracts import ParseRequest, ParseResult
 
 
 PDF_EXTENSIONS = {".pdf"}
@@ -28,18 +20,11 @@ class UnsupportedDocumentError(ValueError):
 
 
 class DocumentParsingService:
-    """按文件类型委托独立解析器，不实现任何具体解析算法。"""
+    """按文件类型分派到 PDF 或其他文档解析器。"""
 
-    def __init__(
-        self,
-        *,
-        pdf_parser: DocumentParserPort,
-        basic_parser: DocumentParserPort,
-        table_parser: DocumentParserPort,
-    ) -> None:
+    def __init__(self, *, pdf_parser: Any, other_parser: Any) -> None:
         self._pdf_parser = pdf_parser
-        self._basic_parser = basic_parser
-        self._table_parser = table_parser
+        self._other_parser = other_parser
 
     async def parse(self, request: ParseRequest) -> ParseResult:
         normalized = request.normalized()
@@ -54,18 +39,31 @@ class DocumentParsingService:
             parser_hint="local",
             ocr_policy="disabled",
         )
-        if extension in BASIC_EXTENSIONS:
-            return await self._basic_parser.parse(local_request)
-        if extension in TABLE_EXTENSIONS:
-            return await self._table_parser.parse(local_request)
+        if extension in BASIC_EXTENSIONS or extension in TABLE_EXTENSIONS:
+            return await self._other_parser.parse(local_request)
         supported = "、".join(sorted(SUPPORTED_EXTENSIONS))
         raise UnsupportedDocumentError(
             f"暂不支持的文件类型：{extension or '<无后缀>'}；支持：{supported}"
         )
 
 
+def source_identity(file_path: str, source_root: str | None) -> tuple[str, str | None]:
+    """返回稳定的相对来源名和可选行业目录。"""
+    path = Path(file_path).resolve()
+    relative = Path(path.name)
+    if source_root:
+        try:
+            relative = path.relative_to(Path(source_root).resolve())
+        except ValueError:
+            pass
+
+    source_file = relative.as_posix()
+    industry = relative.parts[0] if len(relative.parts) > 1 else None
+    return source_file, industry
+
+
 def _scalar_metadata(metadata: dict[str, Any]) -> dict[str, bool | int | float | str]:
-    """过滤为 Chroma 可接受的标量，解析器私有结构不得泄漏到存储层。"""
+    """过滤为 Chroma 可接受的标量。"""
     return {
         str(key): value
         for key, value in metadata.items()
@@ -78,12 +76,10 @@ def parse_result_to_documents(
     *,
     original_path: str,
 ) -> list[KnowledgeDocument]:
-    """把解析结果转换为与具体存储和检索实现无关的公共知识文档。"""
+    """把解析结果转换为可入库的公共知识文档。"""
     documents: list[KnowledgeDocument] = []
     for chunk in result.chunks:
-        parser_metadata = ChunkMetadata.from_mapping(
-            _scalar_metadata(chunk.metadata)
-        )
+        parser_metadata = ChunkMetadata.from_mapping(_scalar_metadata(chunk.metadata))
         extra = dict(parser_metadata.extra)
         extra["parser"] = chunk.parser_name
         if chunk.headings:
@@ -116,11 +112,9 @@ def parse_result_to_documents(
 
 
 __all__ = [
-    "BASIC_EXTENSIONS",
     "DocumentParsingService",
-    "PDF_EXTENSIONS",
     "SUPPORTED_EXTENSIONS",
-    "TABLE_EXTENSIONS",
     "UnsupportedDocumentError",
     "parse_result_to_documents",
+    "source_identity",
 ]
