@@ -3,13 +3,9 @@ from __future__ import annotations
 import fakeredis
 
 from knowledge.contracts import KnowledgeDocument
-from knowledge.rag.infrastructure.retrieval.bm25_repository import (
-    RedisBm25Repository,
-)
-from knowledge.rag.infrastructure.retrieval.bm25_retriever import (
+from knowledge.rag.infrastructure.bm25 import (
     Bm25CandidateRetriever,
-)
-from knowledge.rag.infrastructure.retrieval.bm25_tokenizer import (
+    RedisBm25Repository,
     bm25_tokenizer_fingerprint,
     normalize_bm25_text,
     tokenize_bm25,

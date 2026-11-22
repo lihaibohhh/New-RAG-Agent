@@ -1,4 +1,4 @@
-"""为 RAG 召回提供规范 Chunk 语料视图。"""
+"""为 BM25 和管理接口提供规范 Chunk 语料视图。"""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ import logging
 import threading
 
 from knowledge.contracts import KnowledgeDocument, StoredChunk
-from knowledge.rag.infrastructure.storage.chroma import validate_chroma_directory
-from knowledge.rag.ports import ChunkStorePort, DocumentCorpusPort
+from knowledge.rag.infrastructure.chroma import validate_chroma_directory
+from knowledge.rag.contracts import ChunkStorePort, DocumentCorpusPort
 
 
 logger = logging.getLogger(__name__)

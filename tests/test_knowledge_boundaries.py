@@ -30,28 +30,44 @@ def test_knowledge_root_contains_only_public_source_contracts() -> None:
     assert (package_root / "ingestion" / "source.py").is_file()
 
 
-def test_rag_owns_internal_contracts_ports_and_adapters() -> None:
+def test_rag_owns_internal_contracts_and_adapters() -> None:
     package_root = Path(__file__).parent.parent / "knowledge"
     public_contracts = (package_root / "contracts.py").read_text(encoding="utf-8")
-    rag_ports = (package_root / "rag" / "ports.py").read_text(encoding="utf-8")
+    rag_contracts = (package_root / "rag" / "contracts.py").read_text(
+        encoding="utf-8"
+    )
 
     assert "class RetrievalRequest" not in public_contracts
     assert "class CandidateRetrievalTrace" not in public_contracts
-    assert "class SemanticCachePort" in rag_ports
-    assert "class HybridRetrieverPort" in rag_ports
-    assert "class RerankerPort" in rag_ports
-    assert "class ChunkReaderPort" in rag_ports
-    assert "class KnowledgeBaseInspectorPort" in rag_ports
+    assert "class SemanticCachePort" in rag_contracts
+    assert "class HybridRetrieverPort" not in rag_contracts
+    assert "class RerankerPort" in rag_contracts
+    assert "class ChunkReaderPort" in rag_contracts
+    assert "class KnowledgeBaseInspectorPort" not in rag_contracts
     assert (package_root / "rag" / "contracts.py").is_file()
-    assert (package_root / "rag" / "ports.py").is_file()
+    assert not (package_root / "rag" / "ports.py").exists()
     assert (package_root / "rag" / "infrastructure").is_dir()
     assert (package_root / "rag" / "application.py").is_file()
     assert not (package_root / "rag" / "query" / "service.py").exists()
     assert not (package_root / "rag" / "query" / "result_builder.py").exists()
-    assert (package_root / "rag" / "admin.py").is_file()
-    assert (
-        package_root / "rag" / "infrastructure" / "storage" / "chroma_knowledge_base.py"
-    ).is_file()
+    assert not (package_root / "rag" / "admin.py").exists()
+    assert not (package_root / "rag" / "evaluation.py").exists()
+    assert not (package_root / "rag" / "offline.py").exists()
+    assert not (package_root / "rag" / "operations.py").exists()
+    infrastructure = package_root / "rag" / "infrastructure"
+    assert {path.name for path in infrastructure.glob("*.py")} >= {
+        "bm25.py",
+        "cache_codec.py",
+        "chroma.py",
+        "corpus.py",
+        "reranker.py",
+        "semantic_cache.py",
+        "vector.py",
+    }
+    assert not list((package_root / "rag" / "retrieval").glob("*.py"))
+    assert not list((infrastructure / "cache").glob("*.py"))
+    assert not list((infrastructure / "retrieval").glob("*.py"))
+    assert not list((infrastructure / "storage").glob("*.py"))
     assert not list((package_root / "admin").rglob("*.py"))
     assert not (package_root / "foundation" / "ports.py").exists()
     assert not (package_root / "foundation" / "redis.py").exists()
@@ -128,7 +144,7 @@ def test_module_runtime_configs_expose_only_owned_settings() -> None:
 
 
 def test_offline_chunk_reader_does_not_create_full_runtime(monkeypatch) -> None:
-    from knowledge.rag import offline
+    from knowledge.rag import runtime as rag_runtime
 
     observed: dict[str, object] = {}
 
@@ -140,9 +156,9 @@ def test_offline_chunk_reader_does_not_create_full_runtime(monkeypatch) -> None:
             observed.update(kwargs)
             return [StoredChunk("chunk-1", "content")]
 
-    monkeypatch.setattr(offline, "ChromaKnowledgeBaseAdapter", Reader)
+    monkeypatch.setattr(rag_runtime, "ChromaKnowledgeBaseAdapter", Reader)
 
-    chunks = offline.read_chunks_sync(
+    chunks = rag_runtime.read_chunks_sync(
         chroma_dir="test-chroma",
         source_file="report.pdf",
         offset=2,
@@ -156,14 +172,14 @@ def test_offline_chunk_reader_does_not_create_full_runtime(monkeypatch) -> None:
         "offset": 2,
         "limit": 3,
     }
-    offline_source = (Path(offline.__file__)).read_text(encoding="utf-8")
-    assert "KnowledgeRuntime" not in offline_source
-    assert "knowledge.runtime" not in offline_source
-    assert "EmbeddingProviderAdapter" not in offline_source
+    runtime_source = (Path(rag_runtime.__file__)).read_text(encoding="utf-8")
+    assert "KnowledgeRuntime" not in runtime_source
+    assert "knowledge.runtime" not in runtime_source
+    assert "EmbeddingProviderAdapter" not in runtime_source
     dataset_source = (
         Path(__file__).parent.parent / "eval" / "dataset" / "sources.py"
     ).read_text(encoding="utf-8")
-    assert "knowledge.rag.offline" in dataset_source
+    assert "knowledge.rag.runtime" in dataset_source
     assert "knowledge.runtime" not in dataset_source
 
 

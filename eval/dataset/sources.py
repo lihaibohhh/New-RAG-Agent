@@ -22,7 +22,7 @@ def load_all_chunks(db_path: Path) -> list[Document]:
         stored_chunks = asyncio.run(read_remote_chunks())
         source_label = os.environ["KNOWLEDGE_SERVICE_URL"]
     else:
-        from knowledge.rag.offline import read_chunks_sync
+        from knowledge.rag.runtime import read_chunks_sync
 
         stored_chunks = read_chunks_sync(
             chroma_dir=str(db_path),

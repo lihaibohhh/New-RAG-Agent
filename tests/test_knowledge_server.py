@@ -18,7 +18,7 @@ from knowledge.contracts import (
     StoredChunk,
     KnowledgeDocument,
 )
-from knowledge.rag.infrastructure.retrieval.chunk_corpus import (
+from knowledge.rag.infrastructure.corpus import (
     MigratingChunkCorpusAdapter,
 )
 from knowledge.foundation.chunk_store import SQLiteChunkStoreAdapter

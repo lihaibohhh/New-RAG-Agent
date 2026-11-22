@@ -1,13 +1,26 @@
-"""RAG 管理用例使用的 Chroma 诊断与只读访问适配器。"""
+"""Chroma 目录校验、健康检查与只读管理访问。"""
 
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 from typing import Any
 
 from knowledge.contracts import ChunkMetadata, StoredChunk
-from knowledge.rag.infrastructure.storage.chroma import validate_chroma_directory
+
+
+def validate_chroma_directory(chroma_dir: str) -> Path:
+    """拒绝错误目录和空 Chroma 实例，并返回规范化目录。"""
+    path = Path(chroma_dir).expanduser().resolve()
+    if not path.is_dir():
+        raise RuntimeError(f"Chroma 目录不存在：{path}")
+    database_file = path / "chroma.sqlite3"
+    if not database_file.is_file():
+        raise RuntimeError(f"Chroma 数据库文件不存在：{database_file}")
+    if not os.access(path, os.R_OK | os.W_OK | os.X_OK):
+        raise PermissionError(f"Chroma 目录不可读写：{path}")
+    return path
 
 
 class ChromaKnowledgeBaseAdapter:
@@ -86,4 +99,4 @@ class ChromaKnowledgeBaseAdapter:
         return chunks
 
 
-__all__ = ["ChromaKnowledgeBaseAdapter"]
+__all__ = ["ChromaKnowledgeBaseAdapter", "validate_chroma_directory"]

@@ -1,4 +1,4 @@
-"""语义缓存文档与向量的纯编码函数。"""
+"""语义缓存文档与向量的编码函数。"""
 from __future__ import annotations
 
 import json

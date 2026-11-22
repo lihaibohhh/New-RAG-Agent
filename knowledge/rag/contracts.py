@@ -2,9 +2,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
-from knowledge.contracts import KnowledgeDocument, KnowledgeValidationError
+from knowledge.contracts import (
+    KnowledgeDocument,
+    KnowledgeValidationError,
+    StoredChunk,
+    WarmupStatus,
+)
 
 
 @dataclass(frozen=True)
@@ -43,4 +48,95 @@ class CandidateRetrievalTrace:
     timings: dict[str, float] = field(default_factory=dict)
 
 
-__all__ = ["CandidateRetrievalTrace", "RetrievalRequest"]
+class SemanticCachePort(Protocol):
+    async def get(self, query: str) -> list[KnowledgeDocument] | None: ...
+
+    async def set(
+        self,
+        query: str,
+        documents: list[KnowledgeDocument],
+        *,
+        top_score: float,
+    ) -> None: ...
+
+    async def clear(self) -> None: ...
+
+
+class RerankerPort(Protocol):
+    async def rerank(
+        self,
+        query: str,
+        documents: list[KnowledgeDocument],
+        *,
+        top_n: int,
+    ) -> tuple[list[KnowledgeDocument], float]: ...
+
+    async def warmup(self) -> None: ...
+
+
+class WarmupServicePort(Protocol):
+    async def warmup(self) -> WarmupStatus: ...
+
+
+class VectorCandidateRetrieverPort(Protocol):
+    def retrieve(self, query: str) -> list[KnowledgeDocument]: ...
+
+    def warmup(self) -> None: ...
+
+
+class Bm25CandidateRetrieverPort(Protocol):
+    def prepare(self) -> bool: ...
+
+    def retrieve(self, query: str) -> list[KnowledgeDocument]: ...
+
+    def invalidate(self) -> None: ...
+
+    async def close(self) -> None: ...
+
+
+class DocumentCorpusPort(Protocol):
+    def list_documents(self) -> list[KnowledgeDocument]: ...
+
+
+class ChunkCorpusPort(DocumentCorpusPort, Protocol):
+    def prepare(self) -> None: ...
+
+
+class ChunkReaderPort(Protocol):
+    async def list_chunks(
+        self,
+        *,
+        source_file: str | None = None,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> list[StoredChunk]: ...
+
+
+class ChunkStorePort(DocumentCorpusPort, ChunkReaderPort, Protocol):
+    def snapshot_complete(self) -> bool: ...
+
+    def replace_all(self, documents: list[KnowledgeDocument]) -> None: ...
+
+
+class Bm25RepositoryPort(Protocol):
+    def load(self) -> Any | None: ...
+
+    def save(self, backend: Any, document_count: int) -> None: ...
+
+    def clear(self) -> None: ...
+
+
+__all__ = [
+    "Bm25CandidateRetrieverPort",
+    "Bm25RepositoryPort",
+    "CandidateRetrievalTrace",
+    "ChunkCorpusPort",
+    "ChunkReaderPort",
+    "ChunkStorePort",
+    "DocumentCorpusPort",
+    "RerankerPort",
+    "RetrievalRequest",
+    "SemanticCachePort",
+    "VectorCandidateRetrieverPort",
+    "WarmupServicePort",
+]

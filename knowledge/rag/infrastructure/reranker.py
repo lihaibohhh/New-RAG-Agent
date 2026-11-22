@@ -1,4 +1,4 @@
-"""RAG 私有的 Cross-Encoder 精排端口实现。"""
+"""Cross-Encoder 精排实现。"""
 from __future__ import annotations
 
 import asyncio

@@ -1,4 +1,4 @@
-"""RAG 私有的 Chroma 向量候选召回适配器。"""
+"""Chroma 向量候选召回。"""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from collections.abc import Callable
 from typing import Any
 
 from knowledge.contracts import KnowledgeDocument
-from knowledge.rag.infrastructure.storage.chroma import validate_chroma_directory
+from knowledge.rag.infrastructure.chroma import validate_chroma_directory
 
 
 class ChromaCandidateRetriever:
