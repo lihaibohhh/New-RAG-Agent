@@ -540,6 +540,121 @@ def test_finalization_context_recovers_rag_evidence_from_tool_message() -> None:
     assert not any(isinstance(message, ToolMessage) for message in context.messages)
 
 
+def test_finalization_context_prefers_full_rag_tool_evidence_over_ledger() -> None:
+    full_content = "完整证据正文" * 70 + "【关键结论位于正文末尾】"
+    ledger_excerpt = full_content[:240]
+    rag_payload = json.dumps(
+        {
+            "ok": True,
+            "tool": "query_internal_knowledge",
+            "query": "关键结论",
+            "data": {
+                "results": [
+                    {
+                        "source": "report.pdf",
+                        "page": 8,
+                        "chunk_id": "report::8",
+                        "content": full_content,
+                    }
+                ]
+            },
+            "error": None,
+            "meta": {"result_kind": "knowledge_retrieval"},
+        },
+        ensure_ascii=False,
+    )
+    state = State(
+        messages=[
+            HumanMessage(content="报告的关键结论是什么？"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "rag-1",
+                        "name": "query_internal_knowledge",
+                        "args": {"query": "关键结论"},
+                    }
+                ],
+            ),
+            ToolMessage(
+                tool_call_id="rag-1",
+                name="query_internal_knowledge",
+                content=rag_payload,
+            ),
+        ],
+        turn_evidence=[
+            {
+                "key": "report::8",
+                "chunk_id": "report::8",
+                "source": "report.pdf",
+                "page": 8,
+                "queries": ["关键结论"],
+                "excerpt": ledger_excerpt,
+                "excerpt_truncated": True,
+            }
+        ],
+    )
+
+    context = build_finalization_context(
+        state,
+        _config(),
+        system_prompt="系统",
+        directive="最终回答",
+        budget=_budget(4000),
+    )
+
+    rendered = "\n".join(
+        str(getattr(message, "content", message.get("content", "")))
+        if isinstance(message, dict)
+        else str(message.content)
+        for message in context.messages
+    )
+    assert "【关键结论位于正文末尾】" in rendered
+    assert rendered.count('"chunk_id":"report::8"') == 1
+    assert "rag-1" not in rendered
+    assert "query_internal_knowledge" not in rendered
+    assert not any(isinstance(message, ToolMessage) for message in context.messages)
+    assert not any(
+        isinstance(message, AIMessage) and message.tool_calls
+        for message in context.messages
+    )
+    assert state.turn_evidence[0]["excerpt"] == ledger_excerpt
+
+
+def test_finalization_context_uses_turn_evidence_when_tool_result_is_unavailable() -> None:
+    state = State(
+        messages=[HumanMessage(content="报告的关键结论是什么？")],
+        turn_evidence=[
+            {
+                "key": "report::8",
+                "chunk_id": "report::8",
+                "source": "report.pdf",
+                "page": 8,
+                "queries": ["关键结论"],
+                "excerpt": "账本中的回退证据",
+                "excerpt_truncated": True,
+            }
+        ],
+    )
+
+    context = build_finalization_context(
+        state,
+        _config(),
+        system_prompt="系统",
+        directive="最终回答",
+        budget=_budget(2000),
+    )
+
+    rendered = "\n".join(
+        str(getattr(message, "content", message.get("content", "")))
+        if isinstance(message, dict)
+        else str(message.content)
+        for message in context.messages
+    )
+    assert "账本中的回退证据" in rendered
+    assert '"chunk_id":"report::8"' in rendered
+
+
 def test_context_budget_falls_back_to_complete_current_turn() -> None:
     state = State(
         messages=[

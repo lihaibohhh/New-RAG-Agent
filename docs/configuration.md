@@ -164,8 +164,9 @@ TRANSFORMERS_OFFLINE=true
 ```
 
 `auto` 模式只把扫描、图像密集、表格密集、多栏或本地解析质量不足的 PDF 转交
-Docling。`DOCLING_CHUNKING_MAX_TOKENS` 约束普通文本块；Tokenizer 默认与
-`EMBEDDING_MODEL` 对齐。开启 `DOCLING_PRESERVE_TABLES` 时，同一 Docling 表格的
+Docling。`DOCLING_CHUNKING_MAX_TOKENS` 同时约束 Docling 与本地 PDF 正文，
+Tokenizer 默认与 `EMBEDDING_MODEL` 对齐；其他文本格式的解析策略不受影响。
+开启 `DOCLING_PRESERVE_TABLES` 时，同一 Docling 表格的
 分片会在入库前按文档引用重新合并，因此大表可以超过文本 Token 上限并作为一个块保存。
 这些参数只影响之后的解析任务，已有文档需要重新入库才会生效。完整阈值以
 [.env.example](../.env.example) 为准。
