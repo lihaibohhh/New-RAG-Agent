@@ -23,7 +23,7 @@ from react_agent.agent.context_management.compaction import (
 from react_agent.agent.context_management.budgeting import estimate_message_tokens
 from react_agent.agent.contracts.dependencies import AgentDependencies
 from react_agent.agent.contracts.state import State
-from react_agent.agent.workflow.nodes.lifecycle import compact_history
+from react_agent.agent.workflow.nodes import compact_history
 from react_agent.models import bind_output_token_limit
 from react_agent.agent.workflow.graph import build_base_graph
 

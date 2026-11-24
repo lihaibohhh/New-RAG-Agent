@@ -1,13 +1,26 @@
-"""跨 Agent 与 API 的模型用量归一化。"""
+"""模型调用及 Agent 轮次的统一用量与费用契约。"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable, Literal
 
 from langchain_core.messages import AIMessage
 
-from react_agent.metering.contracts import CostEstimate, CostEstimator
+
+@dataclass(frozen=True)
+class CostEstimate:
+    """一次模型调用的可审计费用估算。"""
+
+    amount: float | None
+    currency: str
+    status: Literal["estimated", "unpriced", "invalid_usage"]
+    billing_model: str | None
+    tariff: Literal["peak", "off_peak"] | None
+    rate_card_version: str
+
+
+CostEstimator = Callable[[str, dict[str, int]], CostEstimate]
 
 
 @dataclass(frozen=True)
@@ -20,7 +33,7 @@ class ModelCallMetering:
 
 
 def model_finish_reason(message: AIMessage) -> str:
-    """Normalize OpenAI-compatible and Anthropic completion stop reasons."""
+    """归一化 OpenAI 兼容接口和 Anthropic 的停止原因。"""
     metadata = getattr(message, "response_metadata", None) or {}
     if not isinstance(metadata, dict):
         return ""
@@ -29,7 +42,7 @@ def model_finish_reason(message: AIMessage) -> str:
 
 
 def is_output_truncated(message: AIMessage) -> bool:
-    """Return whether the provider stopped because its output cap was reached."""
+    """判断模型是否因为达到输出上限而停止。"""
     return model_finish_reason(message) in {"length", "max_tokens"}
 
 
@@ -111,9 +124,60 @@ def meter_model_call(
     )
 
 
+_CUMULATIVE_KEYS = (
+    "prompt_tokens",
+    "completion_tokens",
+    "reasoning_tokens",
+    "cache_hit_tokens",
+    "cache_miss_tokens",
+    "total_tokens",
+    "estimated_cost_cny",
+    "unpriced_model_count",
+    "llm_call_count",
+)
+_CURRENT_VALUE_KEYS = (
+    "pricing_requested_model",
+    "pricing_response_model",
+    "pricing_model",
+    "pricing_tariff",
+    "pricing_rate_card_version",
+)
+
+
+def extract_cumulative_snapshot(result: dict[str, Any]) -> dict[str, Any]:
+    """提取供下一轮差值计算使用的累计状态。"""
+    snapshot = {key: result.get(key, 0) for key in _CUMULATIVE_KEYS}
+    snapshot.update({key: result.get(key, "") for key in _CURRENT_VALUE_KEYS})
+    snapshot["tool_run_count"] = int(result.get("tool_run_count", 0) or 0)
+    return snapshot
+
+
+def extract_usage(
+    result: dict[str, Any],
+    prev_snapshot: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """从 Agent 累计状态计算本轮增量。"""
+    previous = prev_snapshot or {}
+    usage = {
+        key: result.get(key, 0) - previous.get(key, 0)
+        for key in _CUMULATIVE_KEYS
+    }
+    usage.update({key: result.get(key, "") for key in _CURRENT_VALUE_KEYS})
+    usage["tool_runs_count"] = max(
+        0,
+        int(result.get("tool_run_count", 0) or 0)
+        - int(previous.get("tool_run_count", 0) or 0),
+    )
+    return usage
+
+
 __all__ = [
+    "CostEstimate",
+    "CostEstimator",
     "ModelCallMetering",
+    "extract_cumulative_snapshot",
     "extract_model_usage",
+    "extract_usage",
     "is_output_truncated",
     "meter_model_call",
     "model_finish_reason",

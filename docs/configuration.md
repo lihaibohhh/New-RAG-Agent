@@ -154,10 +154,18 @@ DOCLING_ENABLED=false
 DOCLING_PARSER_MODE=auto
 DOCLING_BASE_URL=http://127.0.0.1:5001
 DOCLING_MAX_PDF_PAGES=200
+DOCLING_CHUNKING_MAX_TOKENS=448
+DOCLING_CHUNKING_TOKENIZER=BAAI/bge-small-zh-v1.5
+DOCLING_CHUNKING_MERGE_PEERS=true
+DOCLING_PRESERVE_TABLES=true
 
 HF_HUB_OFFLINE=true
 TRANSFORMERS_OFFLINE=true
 ```
 
 `auto` 模式只把扫描、图像密集、表格密集、多栏或本地解析质量不足的 PDF 转交
-Docling。完整阈值以 [.env.example](../.env.example) 为准。
+Docling。`DOCLING_CHUNKING_MAX_TOKENS` 约束普通文本块；Tokenizer 默认与
+`EMBEDDING_MODEL` 对齐。开启 `DOCLING_PRESERVE_TABLES` 时，同一 Docling 表格的
+分片会在入库前按文档引用重新合并，因此大表可以超过文本 Token 上限并作为一个块保存。
+这些参数只影响之后的解析任务，已有文档需要重新入库才会生效。完整阈值以
+[.env.example](../.env.example) 为准。

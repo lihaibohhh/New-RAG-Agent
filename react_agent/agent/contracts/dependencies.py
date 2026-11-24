@@ -11,7 +11,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.tools import BaseTool
 
 from react_agent.agent.config import AgentContext
-from react_agent.metering.contracts import CostEstimator
+from react_agent.metering import CostEstimator
 from react_agent.skills import SkillRegistry
 
 

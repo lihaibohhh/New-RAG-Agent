@@ -1,35 +1,123 @@
-"""动态工具权限、执行与工具调用协议补齐。"""
+"""工具结果裁剪、批次统计与动态执行。"""
 
 from __future__ import annotations
 
 import json
 import logging
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any
 
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, AnyMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.prebuilt import ToolNode
 
+from agent_tools.contracts.retrieval import (
+    bound_retrieval_payload,
+    decode_retrieval_outcome,
+    is_retrieval_payload,
+)
+from agent_tools.contracts.results import decode_tool_result, tool_error
 from react_agent.agent.contracts.dependencies import (
     AgentDependencies,
     ToolCapability,
 )
 from react_agent.agent.contracts.state import State
 from react_agent.agent.policies import TerminationReason
-from react_agent.agent.tool_flow.payload import bound_tool_payload
 from react_agent.agent.tool_flow.protocol import (
+    extract_recent_tool_messages,
     extract_tool_call_ids,
+    find_last_real_human_index,
     get_tool_call_name,
     repair_and_validate_tool_results,
 )
-from react_agent.agent.tool_flow.results import (
-    count_attempted_rag_calls_in_current_turn,
-)
-from agent_tools.contracts.results import tool_error
+from react_agent.agent.time import now_iso_in_timezone
 
 
 logger = logging.getLogger(__name__)
+
+
+_NON_EXECUTED_RAG_ERROR_CODES = frozenset(
+    {
+        "GRAPH_STEP_BUDGET_EXHAUSTED",
+        "INVALID_TOOL_CALL",
+        "RAG_CALL_BUDGET_EXHAUSTED",
+        "TOOL_BUDGET_EXHAUSTED",
+        "TOOL_DISABLED",
+    }
+)
+
+
+# 工具结果裁剪
+
+
+@dataclass(frozen=True)
+class ToolBatch:
+    """工具批次的状态与观测投影。"""
+
+    runs: list[dict[str, Any]]
+    errors: list[dict[str, Any]]
+    error_count: int
+    last_ok_result: dict[str, Any] | None
+    consecutive_rag_misses: int
+
+
+def bound_tool_payload(content: str, max_chars: int) -> str:
+    """按工具结果信封结构裁剪正文，同时保留状态、错误和溯源元数据。"""
+    floor = max(max_chars, 64)
+    try:
+        payload = decode_tool_result(content)
+    except Exception:
+        return _trim_text(content, floor)
+
+    meta = payload.setdefault("meta", {})
+    if not isinstance(meta, dict):
+        meta = payload["meta"] = {}
+
+    if payload.get("ok") is False or payload.get("data") is None:
+        error = payload.get("error")
+        if isinstance(error, dict) and isinstance(error.get("message"), str):
+            if len(error["message"]) > floor:
+                error["message"] = _trim_text(error["message"], floor)
+                meta["truncated"] = True
+        return json.dumps(payload, ensure_ascii=False)
+
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return json.dumps(payload, ensure_ascii=False)
+    if is_retrieval_payload(payload):
+        return bound_retrieval_payload(payload, max_chars)
+    results = data.get("results")
+    if isinstance(results, list) and results:
+        kept: list[Any] = []
+        used = 0
+        for item in results:
+            serialized = json.dumps(item, ensure_ascii=False)
+            if used + len(serialized) > max_chars:
+                break
+            kept.append(item)
+            used += len(serialized)
+        if len(kept) < len(results):
+            data["results"] = kept
+            meta.update(
+                truncated=True,
+                kept_results=len(kept),
+                total_results=len(results),
+            )
+        else:
+            meta.setdefault("truncated", False)
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _trim_text(text: str, max_chars: int) -> str:
+    text = (text or "").strip()
+    if max_chars <= 0:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 1] + "…"
+
+
+# 动态工具执行
 
 
 def bound_tool_messages(messages: list[Any], max_chars: int) -> list[Any]:
@@ -342,4 +430,191 @@ def _recover_from_execution_error(
     }
 
 
-__all__ = ["bound_tool_messages", "execute_dynamic_tools"]
+# 工具批次统计
+
+
+def _current_turn_rag_messages(
+    messages: list[AnyMessage],
+    retrieval_tool_names: frozenset[str],
+) -> list[ToolMessage]:
+    last_human_index = find_last_real_human_index(messages)
+    if last_human_index < 0:
+        return []
+    return [
+        message
+        for message in messages[last_human_index:]
+        if isinstance(message, ToolMessage)
+        and getattr(message, "name", None) in retrieval_tool_names
+    ]
+
+
+def _try_decode(message: ToolMessage) -> dict[str, Any] | None:
+    try:
+        return decode_tool_result(getattr(message, "content", None))
+    except (TypeError, ValueError):
+        return None
+
+
+def count_attempted_rag_calls_in_current_turn(
+    messages: list[AnyMessage],
+    *,
+    retrieval_tool_names: frozenset[str],
+) -> int:
+    """统计当前用户轮次中实际接受执行的 RAG 调用次数。"""
+    count = 0
+    for message in _current_turn_rag_messages(messages, retrieval_tool_names):
+        payload = _try_decode(message)
+        if payload is None:
+            count += 1
+            continue
+
+        meta = payload.get("meta")
+        if isinstance(meta, dict) and meta.get("executed") is False:
+            continue
+        error = payload.get("error")
+        code = error.get("code") if isinstance(error, dict) else None
+        if code in _NON_EXECUTED_RAG_ERROR_CODES:
+            continue
+        count += 1
+    return count
+
+
+def count_successful_rag_calls_in_current_turn(
+    messages: list[AnyMessage],
+    *,
+    retrieval_tool_names: frozenset[str],
+) -> int:
+    """统计当前用户轮次中成功完成的私有知识库检索次数。"""
+    count = 0
+    for message in _current_turn_rag_messages(messages, retrieval_tool_names):
+        payload = _try_decode(message)
+        if payload is not None and payload.get("ok") is True:
+            count += 1
+    return count
+
+
+def parse_tool_batch(
+    messages: list[AnyMessage],
+    *,
+    timezone: str,
+    retrieval_tool_names: frozenset[str],
+) -> ToolBatch | None:
+    """解析消息尾部工具结果，并计算当前轮连续 RAG 未命中次数。"""
+    tool_messages = extract_recent_tool_messages(messages)
+    if not tool_messages:
+        return None
+
+    runs: list[dict[str, Any]] = []
+    last_ok_result: dict[str, Any] | None = None
+    for tool_message in tool_messages:
+        try:
+            payload = decode_tool_result(getattr(tool_message, "content", None))
+        except Exception as exc:
+            payload = {}
+            run_ok: bool | None = False
+            run_error: Any = {
+                "code": "PARSE_FAILED",
+                "message": f"{type(exc).__name__}: {exc}",
+            }
+        else:
+            raw_ok = payload.get("ok")
+            run_ok = bool(raw_ok) if raw_ok is not None else None
+            run_error = payload.get("error")
+
+        meta = payload.get("meta")
+        executed = not (isinstance(meta, dict) and meta.get("executed") is False)
+
+        run = {
+            "tool": getattr(tool_message, "name", "") or "unknown_tool",
+            "query": payload.get("query"),
+            "executed": executed,
+            "ok": run_ok,
+            "error": run_error,
+            "meta": meta,
+            "sources": _source_summaries(payload),
+            "ts": now_iso_in_timezone(timezone),
+        }
+        if payload.get("ok") is True:
+            last_ok_result = payload
+        runs.append(run)
+
+    errors = [run for run in runs if run.get("ok") is False]
+    return ToolBatch(
+        runs=runs,
+        errors=errors,
+        error_count=len(errors),
+        last_ok_result=last_ok_result,
+        consecutive_rag_misses=_count_consecutive_rag_misses(
+            messages,
+            retrieval_tool_names,
+        ),
+    )
+
+
+def _source_summaries(
+    payload: dict[str, Any], *, limit: int = 12
+) -> list[dict[str, Any]]:
+    """为观测面板提取有界来源位置，不复制工具正文。"""
+    try:
+        outcome = decode_retrieval_outcome(payload)
+    except (TypeError, ValueError):
+        return []
+    if outcome is None:
+        return []
+    sources: list[dict[str, Any]] = []
+    seen: set[tuple[str, Any, str]] = set()
+    for item in outcome.evidence:
+        source = item.source_file
+        page = item.source_page
+        chunk_id = item.chunk_id
+        if not source and page is None and not chunk_id:
+            continue
+        key = (source, page, chunk_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        sources.append(
+            {
+                "source_file": source or None,
+                "source_page": page,
+                "chunk_id": chunk_id or None,
+            }
+        )
+        if len(sources) >= limit:
+            break
+    return sources
+
+
+def _count_consecutive_rag_misses(
+    messages: list[AnyMessage],
+    retrieval_tool_names: frozenset[str],
+) -> int:
+    results: list[bool] = []
+    for message in _current_turn_rag_messages(messages, retrieval_tool_names):
+        try:
+            outcome = decode_retrieval_outcome(getattr(message, "content", None))
+        except (TypeError, ValueError):
+            continue
+        if outcome is None or not outcome.ok:
+            continue
+        has_content = outcome.has_relevant_content
+        if has_content is not None:
+            results.append(bool(has_content))
+
+    consecutive_misses = 0
+    for has_content in reversed(results):
+        if has_content:
+            break
+        consecutive_misses += 1
+    return consecutive_misses
+
+
+__all__ = [
+    "ToolBatch",
+    "bound_tool_messages",
+    "bound_tool_payload",
+    "count_attempted_rag_calls_in_current_turn",
+    "count_successful_rag_calls_in_current_turn",
+    "execute_dynamic_tools",
+    "parse_tool_batch",
+]

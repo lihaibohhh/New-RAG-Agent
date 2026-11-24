@@ -5,7 +5,7 @@ from importlib.resources import files
 from agent_tools.config import AgentToolsConfig
 from api.settings import APISettings
 from react_agent.configuration.settings import Settings
-from react_agent.metering.pricing import pricing_path
+from react_agent.metering import pricing_path
 
 
 def test_configuration_assets_are_available_in_package(monkeypatch) -> None:

@@ -18,11 +18,79 @@ from knowledge.ingestion.parsing import source_identity
 
 
 _MARKDOWN_TABLE_RE = re.compile(r"(?m)^\s*\|.*\|\s*$")
+_TABLE_REFERENCE_RE = re.compile(r"#?/tables/[A-Za-z0-9._~-]+")
 _RUNNING_STATES = {"pending", "started", "running", "queued"}
 _SUCCESS_STATES = {"success", "completed"}
 
 
 logger = logging.getLogger(__name__)
+
+
+def _table_references(doc_items: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            {
+                match.group(0).lstrip("#")
+                for item in doc_items
+                for match in _TABLE_REFERENCE_RE.finditer(item)
+            }
+        )
+    )
+
+
+def _merge_table_content(existing: str, incoming: str) -> str:
+    """无损合并同一 Docling 表格的分片，保留重复表头和重复数据行。"""
+    left = existing.strip()
+    right = incoming.strip()
+    if not left:
+        return right
+    if not right:
+        return left
+    return f"{left}\n\n{right}"
+
+
+def _token_count(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _merge_table_chunks(existing: ParsedChunk, incoming: ParsedChunk) -> ParsedChunk:
+    metadata = dict(existing.metadata)
+    fragment_count = int(metadata.get("docling_table_fragment_count") or 1) + 1
+    metadata["docling_table_fragment_count"] = fragment_count
+    metadata["docling_table_preserved"] = True
+    metadata["doc_items"] = tuple(
+        dict.fromkeys(
+            (
+                *tuple(metadata.get("doc_items") or ()),
+                *tuple(incoming.metadata.get("doc_items") or ()),
+            )
+        )
+    )
+    existing_tokens = _token_count(metadata.get("num_tokens"))
+    incoming_tokens = _token_count(incoming.metadata.get("num_tokens"))
+    if existing_tokens is not None and incoming_tokens is not None:
+        metadata["num_tokens"] = existing_tokens + incoming_tokens
+
+    pages = tuple(sorted(set(existing.source_pages) | set(incoming.source_pages)))
+    headings = tuple(dict.fromkeys((*existing.headings, *incoming.headings)))
+    return ParsedChunk(
+        content=_merge_table_content(existing.content, incoming.content),
+        source_file=existing.source_file,
+        source_page=pages[0] if pages else existing.source_page,
+        source_pages=pages,
+        chunk_id=existing.chunk_id,
+        doc_type="table",
+        headings=headings,
+        parser_name=existing.parser_name,
+        parser_version=existing.parser_version,
+        metadata=metadata,
+    )
 
 
 @dataclass(frozen=True)
@@ -56,12 +124,20 @@ class DoclingServiceAdapter:
         poll_interval: float = 2.0,
         max_pages_per_task: int = 3,
         segment_retries: int = 1,
+        chunking_max_tokens: int = 448,
+        chunking_tokenizer: str = "BAAI/bge-small-zh-v1.5",
+        chunking_merge_peers: bool = True,
+        preserve_tables: bool = True,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         if max_pages_per_task < 1:
             raise ValueError("max_pages_per_task 必须大于 0")
         if segment_retries < 0:
             raise ValueError("segment_retries 不能小于 0")
+        if not 64 <= chunking_max_tokens <= 8_192:
+            raise ValueError("chunking_max_tokens 必须在 64 到 8192 之间")
+        if not chunking_tokenizer.strip():
+            raise ValueError("chunking_tokenizer 不能为空")
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._request_timeout = request_timeout
@@ -69,7 +145,20 @@ class DoclingServiceAdapter:
         self._poll_interval = poll_interval
         self._max_pages_per_task = max_pages_per_task
         self._segment_retries = segment_retries
+        self._chunking_max_tokens = chunking_max_tokens
+        self._chunking_tokenizer = chunking_tokenizer.strip()
+        self._chunking_merge_peers = chunking_merge_peers
+        self._preserve_tables = preserve_tables
         self._transport = transport
+
+    def _chunking_form_fields(self) -> dict[str, str]:
+        return {
+            "chunking_max_tokens": str(self._chunking_max_tokens),
+            "chunking_tokenizer": self._chunking_tokenizer,
+            "chunking_merge_peers": str(self._chunking_merge_peers).lower(),
+            "chunking_use_markdown_tables": "true",
+            "chunking_include_raw_text": "true",
+        }
 
     async def ensure_ready(self) -> None:
         """确认 Docling 已可接收任务；失败时给出统一、可操作的异常。"""
@@ -237,6 +326,7 @@ class DoclingServiceAdapter:
                     page_offset=segment.page_offset if segment else 0,
                     segment=segment,
                     segment_count=segment_count,
+                    preserve_tables=self._preserve_tables,
                 )
                 if not result.has_content:
                     logger.info(
@@ -294,8 +384,7 @@ class DoclingServiceAdapter:
                     "convert_table_mode": "fast",
                     "convert_do_pdf_heading_hierarchy": "true",
                     "convert_document_timeout": str(int(self._task_timeout)),
-                    "chunking_use_markdown_tables": "true",
-                    "chunking_include_raw_text": "true",
+                    **self._chunking_form_fields(),
                 },
             )
         response.raise_for_status()
@@ -369,12 +458,14 @@ class DoclingServiceAdapter:
         page_offset: int = 0,
         segment: _PdfSegment | None = None,
         segment_count: int = 1,
+        preserve_tables: bool = True,
     ) -> ParseResult:
         source_file, industry = source_identity(
             request.file_path,
             request.source_root,
         )
         chunks: list[ParsedChunk] = []
+        table_positions: dict[tuple[str, ...], int] = {}
         for fallback_index, item in enumerate(payload.get("chunks") or []):
             if not isinstance(item, dict):
                 continue
@@ -412,6 +503,9 @@ class DoclingServiceAdapter:
                     **({"industry": industry} if industry else {}),
                 }
             )
+            table_key = _table_references(doc_items) if doc_type == "table" else ()
+            if preserve_tables and table_key:
+                metadata["docling_table_preserved"] = True
             if segment is not None:
                 metadata.update(
                     {
@@ -426,19 +520,24 @@ class DoclingServiceAdapter:
                 if segment is not None
                 else f"docling_{int(chunk_index):06d}"
             )
-            chunks.append(
-                ParsedChunk(
-                    content=content,
-                    source_file=source_file,
-                    source_page=page,
-                    source_pages=pages,
-                    chunk_id=(f"{source_file}::pages_{page_label}::" f"{chunk_suffix}"),
-                    doc_type=doc_type,
-                    headings=headings,
-                    parser_name="docling",
-                    metadata=metadata,
-                )
+            chunk = ParsedChunk(
+                content=content,
+                source_file=source_file,
+                source_page=page,
+                source_pages=pages,
+                chunk_id=(f"{source_file}::pages_{page_label}::" f"{chunk_suffix}"),
+                doc_type=doc_type,
+                headings=headings,
+                parser_name="docling",
+                metadata=metadata,
             )
+            if preserve_tables and table_key and table_key in table_positions:
+                position = table_positions[table_key]
+                chunks[position] = _merge_table_chunks(chunks[position], chunk)
+                continue
+            if preserve_tables and table_key:
+                table_positions[table_key] = len(chunks)
+            chunks.append(chunk)
 
         if chunks:
             warnings: tuple[str, ...] = ()

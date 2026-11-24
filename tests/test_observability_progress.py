@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from react_agent.observability.progress import (
+from react_agent.observability import (
     AgentProgress,
     consume_progress_events,
     progress_from_event,
