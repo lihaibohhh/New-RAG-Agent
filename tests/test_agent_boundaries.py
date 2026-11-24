@@ -34,17 +34,19 @@ from react_agent.agent.tool_flow import (
     final_answer_protocol_violation,
     repair_and_validate_tool_exchanges,
 )
-from react_agent.agent.workflow.graph import build_base_graph
+from react_agent.agent.workflow.graph import (
+    build_base_graph,
+    route_after_postprocess,
+)
 from react_agent.agent.workflow.nodes import (
     call_model,
     dynamic_tool_node,
     finalize_model,
     postprocess_tools,
 )
-from react_agent.agent.workflow.routing import route_after_postprocess
 from agent_tools.contracts.results import tool_error, tool_success
 from agent_tools.contracts.retry import with_retry
-from react_agent.metering.model_usage import extract_model_usage
+from react_agent.metering import extract_model_usage
 
 
 RETRIEVAL_TOOL_NAMES = frozenset({"query_internal_knowledge"})
@@ -1521,7 +1523,7 @@ def test_default_prompt_describes_retrieval_semantics_not_wire_fields() -> None:
 
 def test_agent_nodes_remain_thin_orchestration_adapters() -> None:
     project_root = Path(__file__).parent.parent
-    nodes_root = project_root / "react_agent" / "agent" / "workflow" / "nodes"
+    nodes_path = project_root / "react_agent" / "agent" / "workflow" / "nodes.py"
     forbidden_dependencies = (
         "langgraph.prebuilt",
         "agent_tools.contracts",
@@ -1530,7 +1532,6 @@ def test_agent_nodes_remain_thin_orchestration_adapters() -> None:
 
     imports = [
         imported
-        for nodes_path in _python_sources(nodes_root)
         for prefix in forbidden_dependencies
         for imported in _imports_from(nodes_path, prefix)
     ]

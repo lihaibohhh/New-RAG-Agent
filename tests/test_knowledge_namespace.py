@@ -15,6 +15,7 @@ from knowledge.client import (
     load_client_settings,
 )
 from knowledge.server import create_knowledge_settings
+from knowledge.settings import KnowledgeSettings
 
 
 def test_knowledge_namespace_has_no_legacy_top_level_packages() -> None:
@@ -33,6 +34,10 @@ def test_server_runtime_owns_its_environment_projection(
     monkeypatch.setenv("REDIS_MAX_CONNECTIONS", "7")
     monkeypatch.setenv("CHROMA_DB_PATH", str(tmp_path / "chroma"))
     monkeypatch.setenv("DOCLING_ENABLED", "true")
+    monkeypatch.setenv("DOCLING_CHUNKING_MAX_TOKENS", "320")
+    monkeypatch.setenv("DOCLING_CHUNKING_TOKENIZER", "test-tokenizer")
+    monkeypatch.setenv("DOCLING_CHUNKING_MERGE_PEERS", "false")
+    monkeypatch.setenv("DOCLING_PRESERVE_TABLES", "true")
     monkeypatch.setenv("RAG_INGESTION_BATCH_SIZE", "64")
 
     config = create_knowledge_settings()
@@ -42,7 +47,25 @@ def test_server_runtime_owns_its_environment_projection(
     assert config.rag.redis.max_connections == 7
     assert config.storage.chroma_db_path == str((tmp_path / "chroma").resolve())
     assert config.ingestion.docling.enabled is True
+    assert config.ingestion.docling.chunking_max_tokens == 320
+    assert config.ingestion.docling.chunking_tokenizer == "test-tokenizer"
+    assert config.ingestion.docling.chunking_merge_peers is False
+    assert config.ingestion.docling.preserve_tables is True
     assert config.ingestion.batch.batch_size == 64
+
+
+def test_docling_chunker_defaults_follow_embedding_model() -> None:
+    config = KnowledgeSettings.from_env(
+        {"EMBEDDING_MODEL": "test-org/test-embedding-model"}
+    )
+
+    assert config.ingestion.docling.chunking_max_tokens == 448
+    assert (
+        config.ingestion.docling.chunking_tokenizer
+        == "test-org/test-embedding-model"
+    )
+    assert config.ingestion.docling.chunking_merge_peers is True
+    assert config.ingestion.docling.preserve_tables is True
 
 
 @pytest.mark.parametrize(
@@ -59,6 +82,7 @@ def test_server_runtime_owns_its_environment_projection(
         ("CACHE_MIN_SCORE", "-0.1"),
         ("DOCLING_REQUEST_TIMEOUT", "0"),
         ("DOCLING_SEGMENT_RETRIES", "-1"),
+        ("DOCLING_CHUNKING_MAX_TOKENS", "63"),
         ("DOCLING_AUTO_MIN_IMAGE_AREA_RATIO", "1.5"),
         ("DOCLING_LOCAL_MIN_PAGE_COVERAGE", "-0.1"),
         ("RAG_INGESTION_WORKERS", "17"),
@@ -82,6 +106,8 @@ def test_server_runtime_rejects_invalid_numeric_environment(
     [
         "DOCLING_ENABLED",
         "DOCLING_STRICT_MODE",
+        "DOCLING_CHUNKING_MERGE_PEERS",
+        "DOCLING_PRESERVE_TABLES",
         "RAG_INGESTION_FAIL_FAST",
         "RERANKER_DEBUG",
     ],

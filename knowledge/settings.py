@@ -107,6 +107,13 @@ class DoclingSettings(_FrozenSettings):
     poll_interval: float = Field(default=2.0, gt=0, allow_inf_nan=False)
     max_pages_per_task: int = Field(default=3, gt=0)
     segment_retries: int = Field(default=1, ge=0)
+    chunking_max_tokens: int = Field(default=448, ge=64, le=8_192)
+    chunking_tokenizer: str = Field(
+        default="BAAI/bge-small-zh-v1.5",
+        min_length=1,
+    )
+    chunking_merge_peers: bool = True
+    preserve_tables: bool = True
     image_bytes_per_page: int = Field(default=307_200, gt=0)
     min_text_chars_per_page: int = Field(default=100, ge=0)
     min_image_area_ratio: float = Field(default=0.15, ge=0.0, le=1.0)
@@ -191,14 +198,15 @@ class KnowledgeSettings(_FrozenSettings):
     ) -> "KnowledgeSettings":
         source = os.environ if environ is None else environ
         max_pdf_pages = _env(source, "DOCLING_MAX_PDF_PAGES", 200)
+        embedding_model = _env(
+            source,
+            "EMBEDDING_MODEL",
+            "BAAI/bge-small-zh-v1.5",
+        )
         return cls(
             shared=SharedSettings(
                 requested_device=_env(source, "RAG_DEVICE", "auto"),
-                embedding_model=_env(
-                    source,
-                    "EMBEDDING_MODEL",
-                    "BAAI/bge-small-zh-v1.5",
-                ),
+                embedding_model=embedding_model,
             ),
             storage=StorageSettings(
                 chroma_db_path=_env_path(
@@ -305,6 +313,26 @@ class KnowledgeSettings(_FrozenSettings):
                         3,
                     ),
                     segment_retries=_env(source, "DOCLING_SEGMENT_RETRIES", 1),
+                    chunking_max_tokens=_env(
+                        source,
+                        "DOCLING_CHUNKING_MAX_TOKENS",
+                        448,
+                    ),
+                    chunking_tokenizer=_env(
+                        source,
+                        "DOCLING_CHUNKING_TOKENIZER",
+                        embedding_model,
+                    ),
+                    chunking_merge_peers=_env(
+                        source,
+                        "DOCLING_CHUNKING_MERGE_PEERS",
+                        True,
+                    ),
+                    preserve_tables=_env(
+                        source,
+                        "DOCLING_PRESERVE_TABLES",
+                        True,
+                    ),
                     image_bytes_per_page=_env(
                         source,
                         "DOCLING_AUTO_IMAGE_BYTES_PER_PAGE",

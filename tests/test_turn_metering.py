@@ -1,6 +1,6 @@
 """当前轮工具计量不得依赖有界历史轨迹的长度。"""
 
-from react_agent.metering.turn import extract_cumulative_snapshot, extract_usage
+from react_agent.metering import extract_cumulative_snapshot, extract_usage
 
 
 def test_tool_usage_survives_bounded_history_rollover() -> None:

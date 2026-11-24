@@ -96,6 +96,10 @@ Docling 只参与解析和建库，不参与日常在线查询。
 DOCLING_ENABLED=true
 DOCLING_PARSER_MODE=auto
 DOCLING_BASE_URL=http://127.0.0.1:5001
+DOCLING_CHUNKING_MAX_TOKENS=448
+DOCLING_CHUNKING_TOKENIZER=BAAI/bge-small-zh-v1.5
+DOCLING_CHUNKING_MERGE_PEERS=true
+DOCLING_PRESERVE_TABLES=true
 ```
 
 启动服务：
@@ -117,7 +121,9 @@ curl.exe -X POST http://127.0.0.1:8001/api/v1/ingestions `
 ```
 
 `auto` 模式会根据扫描特征、图片比例、表格、多栏布局和本地解析质量选择解析器。
-超过 `DOCLING_MAX_PDF_PAGES` 的文档会在解析前拒绝。
+普通文本块默认限制为 448 Token；同一表格的 Docling 分片会在入库前重新合并。
+Docling 与 Knowledge Service 共用 `data/model_cache`，首次使用新 Tokenizer 时下载一次，
+后续容器重建继续复用。超过 `DOCLING_MAX_PDF_PAGES` 的文档会在解析前拒绝。
 
 完成建库后可停止：
 

@@ -10,7 +10,7 @@ from langgraph.errors import GraphRecursionError
 
 from react_agent.agent.config import AgentContext
 from react_agent.agent.contracts.dependencies import AgentDependencies
-from react_agent.metering.turn import extract_cumulative_snapshot
+from react_agent.metering import extract_cumulative_snapshot
 
 _logger = logging.getLogger(__name__)
 

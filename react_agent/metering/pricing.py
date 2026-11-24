@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
-from react_agent.metering.contracts import CostEstimate
+from react_agent.metering.usage import CostEstimate
 
 
 logger = logging.getLogger(__name__)

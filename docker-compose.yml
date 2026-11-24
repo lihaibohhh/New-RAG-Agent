@@ -252,6 +252,8 @@ services:
       - "127.0.0.1:5001:5001"
     environment:
       DOCLING_DEVICE: cpu
+      HF_ENDPOINT: ${HF_ENDPOINT:-https://huggingface.co}
+      HF_HOME: /app/data/model_cache/huggingface
 
       # 单 Web 进程和单解析 Worker，避免重复加载模型占满内存。
       UVICORN_WORKERS: "1"
@@ -278,6 +280,10 @@ services:
       DOCLING_NUM_THREADS: "2"
       OMP_NUM_THREADS: "2"
       DOCLING_SERVE_LOAD_MODELS_AT_BOOT: "true"
+
+    volumes:
+      # 持久化 HybridChunker Tokenizer，与 Knowledge Service 共用模型缓存。
+      - ./data/model_cache:/app/data/model_cache
 
     cpus: "4.0"
     mem_limit: 6g

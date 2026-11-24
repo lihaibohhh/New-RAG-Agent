@@ -1,10 +1,14 @@
 """Agent 内部的工具调用协议与执行编排。"""
 
 from react_agent.agent.tool_flow.execution import (
+    ToolBatch,
     bound_tool_messages,
+    bound_tool_payload,
+    count_attempted_rag_calls_in_current_turn,
+    count_successful_rag_calls_in_current_turn,
     execute_dynamic_tools,
+    parse_tool_batch,
 )
-from react_agent.agent.tool_flow.payload import bound_tool_payload
 from react_agent.agent.tool_flow.protocol import (
     SYSTEM_SENTINEL_NAMES,
     ToolProtocolError,
@@ -16,12 +20,6 @@ from react_agent.agent.tool_flow.protocol import (
     get_tool_call_name,
     repair_and_validate_tool_exchanges,
     repair_and_validate_tool_results,
-)
-from react_agent.agent.tool_flow.results import (
-    ToolBatch,
-    count_attempted_rag_calls_in_current_turn,
-    count_successful_rag_calls_in_current_turn,
-    parse_tool_batch,
 )
 
 

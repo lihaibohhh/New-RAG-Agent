@@ -7,7 +7,7 @@ from react_agent.agent.config import AgentContext
 from react_agent.agent.contracts.dependencies import AgentDependencies
 from react_agent.agent.contracts.state import State
 from react_agent.agent.model_execution import _build_system_prompt
-from react_agent.agent.workflow.nodes.lifecycle import prepare_turn
+from react_agent.agent.workflow.nodes import prepare_turn
 from react_agent.skills import (
     SkillSelection,
     build_builtin_skill_registry,

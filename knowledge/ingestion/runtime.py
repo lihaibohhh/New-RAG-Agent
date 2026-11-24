@@ -45,6 +45,10 @@ class LocalIngestionService(IngestionPipeline):
             request_timeout=docling_config.request_timeout,
             task_timeout=docling_config.task_timeout,
             poll_interval=docling_config.poll_interval,
+            chunking_max_tokens=docling_config.chunking_max_tokens,
+            chunking_tokenizer=docling_config.chunking_tokenizer,
+            chunking_merge_peers=docling_config.chunking_merge_peers,
+            preserve_tables=docling_config.preserve_tables,
         )
         super().__init__(
             writer=CompositeVectorIndexWriter(
@@ -79,6 +83,10 @@ class LocalIngestionService(IngestionPipeline):
                 poll_interval=docling_config.poll_interval,
                 max_pages_per_task=docling_config.max_pages_per_task,
                 segment_retries=docling_config.segment_retries,
+                chunking_max_tokens=docling_config.chunking_max_tokens,
+                chunking_tokenizer=docling_config.chunking_tokenizer,
+                chunking_merge_peers=docling_config.chunking_merge_peers,
+                preserve_tables=docling_config.preserve_tables,
             ),
             docling_enabled=docling_config.enabled,
             strict_mode=docling_config.strict_mode,

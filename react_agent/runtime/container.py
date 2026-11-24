@@ -28,7 +28,7 @@ from agent_tools.documents.markdown import create_markdown_tool
 from agent_tools.rag import create_rag_tool
 from agent_tools.search import create_search_tool
 from react_agent.models import bind_output_token_limit, load_chat_model
-from react_agent.metering.pricing import estimate_configured_model_cost
+from react_agent.metering import estimate_configured_model_cost
 from react_agent.skills import build_builtin_skill_registry
 
 
