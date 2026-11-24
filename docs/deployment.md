@@ -121,7 +121,7 @@ curl.exe -X POST http://127.0.0.1:8001/api/v1/ingestions `
 ```
 
 `auto` 模式会根据扫描特征、图片比例、表格、多栏布局和本地解析质量选择解析器。
-普通文本块默认限制为 448 Token；同一表格的 Docling 分片会在入库前重新合并。
+Docling 与本地 PDF 正文默认限制为 448 Token；同一表格的 Docling 分片会在入库前重新合并。
 Docling 与 Knowledge Service 共用 `data/model_cache`，首次使用新 Tokenizer 时下载一次，
 后续容器重建继续复用。超过 `DOCLING_MAX_PDF_PAGES` 的文档会在解析前拒绝。
 

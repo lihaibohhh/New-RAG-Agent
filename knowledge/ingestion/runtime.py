@@ -74,7 +74,10 @@ class LocalIngestionService(IngestionPipeline):
     def _build_document_parser(config: IngestionSettings) -> DocumentParsingService:
         docling_config = config.docling
         pdf_parser = PdfParserRouter(
-            local_parser=LocalPdfParserAdapter(),
+            local_parser=LocalPdfParserAdapter(
+                chunking_max_tokens=docling_config.chunking_max_tokens,
+                chunking_tokenizer=docling_config.chunking_tokenizer,
+            ),
             docling_parser=DoclingServiceAdapter(
                 base_url=docling_config.base_url,
                 api_key=docling_config.api_key,

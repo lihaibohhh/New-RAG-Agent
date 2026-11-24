@@ -12,9 +12,11 @@ PDF 路径被拆成多个只有单一调用方的小模块。
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import time
 import warnings
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, List, Tuple
 
@@ -32,6 +34,62 @@ _COL_GAP_RATIO = 0.12   # 双栏之间空白带宽度阈值（相对页宽）
 _TABLE_OVERLAP_THRESH = 0.4   # 文字块与表格区域 IoU 超过此值则视为表格内文字
 _MIN_BLOCK_CHARS = 3      # 过滤掉字符数极少的噪声块（如单个页码）
 _COORD_TOLERANCE = 2.0   # 允许的浮点舍入误差（单位：pt）
+_DEFAULT_CHUNK_MAX_TOKENS = 448
+_DEFAULT_CHUNK_OVERLAP_TOKENS = 48
+_DEFAULT_CHUNK_TOKENIZER = "BAAI/bge-small-zh-v1.5"
+
+
+logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=2)
+def _load_chunk_tokenizer(model_name: str) -> Any:
+    """按进程惰性加载本地 PDF 分块 Tokenizer，避免导入阶段加载模型。"""
+    from transformers import AutoTokenizer
+
+    return AutoTokenizer.from_pretrained(model_name)
+
+
+def _create_text_splitter(
+    *,
+    tokenizer_name: str,
+    chunk_size: int,
+    chunk_overlap: int,
+) -> tuple[RecursiveCharacterTextSplitter, Any]:
+    if not tokenizer_name.strip():
+        raise ValueError("本地 PDF 分块 Tokenizer 不能为空")
+    if chunk_size < 64:
+        raise ValueError("本地 PDF chunk_size 不能小于 64 Token")
+    if chunk_overlap < 0 or chunk_overlap >= chunk_size:
+        raise ValueError("本地 PDF chunk_overlap 必须大于等于 0 且小于 chunk_size")
+
+    tokenizer = _load_chunk_tokenizer(tokenizer_name.strip())
+    tokenizer_limit = _tokenizer_limit(tokenizer)
+    if tokenizer_limit is not None and chunk_size + 2 > tokenizer_limit:
+        raise ValueError(
+            "本地 PDF chunk_size 必须为 Embedding 特殊 Token 预留空间："
+            f"chunk_size={chunk_size}, model_max_length={tokenizer_limit}"
+        )
+    splitter = RecursiveCharacterTextSplitter.from_huggingface_tokenizer(
+        tokenizer,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        # 中文研报常见语义边界：段落 > 句号 > 分号 > 逗号 > 空格。
+        separators=["\n\n", "\n", "。", "！", "？", "；", "，", " ", ""],
+    )
+    return splitter, tokenizer
+
+
+def _token_count(tokenizer: Any, text: str) -> int:
+    return len(tokenizer.encode(text, add_special_tokens=True))
+
+
+def _tokenizer_limit(tokenizer: Any) -> int | None:
+    value = getattr(tokenizer, "model_max_length", None)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    # Transformers 用极大整数表达“未声明上限”，不能把它当作真实模型窗口。
+    return value if 0 < value < 1_000_000 else None
 
 
 # ──────────────────────────────────────────────
@@ -212,8 +270,9 @@ def _extract_text_blocks_fitz(fitz_page, table_bboxes: list) -> List[dict]:
 # ──────────────────────────────────────────────
 def load_pdf_with_layout(
     file_path: str,
-    chunk_size: int = 500,
-    chunk_overlap: int = 50,
+    chunk_size: int = _DEFAULT_CHUNK_MAX_TOKENS,
+    chunk_overlap: int = _DEFAULT_CHUNK_OVERLAP_TOKENS,
+    tokenizer_name: str = _DEFAULT_CHUNK_TOKENIZER,
     source_root: str | None = None,
 ) -> List[Document]:
     """
@@ -223,7 +282,7 @@ def load_pdf_with_layout(
       1. pdfplumber  → 提取表格 bbox + 表格内容（转 Markdown Document）
       2. PyMuPDF     → 提取带坐标文字块，排除表格区域
       3. 版面分析    → 过滤页眉页脚、多栏重排
-      4. 文字分块    → RecursiveCharacterTextSplitter（中文友好分隔符）
+      4. 文字分块    → 与 Embedding 对齐的 Tokenizer + 中文友好分隔符
       5. 汇总        → 文字 chunk + 表格 Document 一并返回
 
     降级策略：
@@ -235,6 +294,12 @@ def load_pdf_with_layout(
         List[Document]，已完成分块，metadata 包含：
           source, page, chunk_id, doc_type ("text" | "table")
     """
+    splitter, tokenizer = _create_text_splitter(
+        tokenizer_name=tokenizer_name,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+    )
+    tokenizer_limit = _tokenizer_limit(tokenizer)
     has_fitz, has_pdfplumber = _check_deps()
     data_dir = source_root or str(Path(file_path).parent)
     try:
@@ -256,7 +321,8 @@ def load_pdf_with_layout(
             stacklevel=2,
         )
         from langchain_community.document_loaders import PyPDFLoader
-        return PyPDFLoader(file_path).load()
+
+        return splitter.split_documents(PyPDFLoader(file_path).load())
 
     if not has_pdfplumber:
         warnings.warn(
@@ -267,13 +333,6 @@ def load_pdf_with_layout(
         )
 
     import fitz
-
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        # 中文研报常见语义边界：段落 > 句号 > 分号 > 逗号 > 换行
-        separators=["\n\n", "\n", "。", "！", "？", "；", "，", " ", ""],
-    )
 
     all_docs: List[Document] = []
     fitz_doc = fitz.open(file_path)
@@ -320,6 +379,21 @@ def load_pdf_with_layout(
                         md = _table_to_markdown(raw_table)
                         if not md.strip():
                             continue
+                        table_tokens = _token_count(tokenizer, md)
+                        exceeds_limit = bool(
+                            tokenizer_limit is not None
+                            and table_tokens > tokenizer_limit
+                        )
+                        if exceeds_limit:
+                            logger.warning(
+                                "[LOCAL_PDF] 完整表格超过 Embedding Token 上限 "
+                                "source=%s page=%s table=%s tokens=%s limit=%s",
+                                filename,
+                                human_page_num,
+                                t_idx,
+                                table_tokens,
+                                tokenizer_limit,
+                            )
                         chunk_id = f"{filename}::page_{human_page_num}::table_{t_idx}"
                         all_docs.append(Document(
                             page_content=md,
@@ -328,6 +402,8 @@ def load_pdf_with_layout(
                                 "page":     human_page_num,
                                 "chunk_id": chunk_id,
                                 "doc_type": "table",
+                                "num_tokens": table_tokens,
+                                "embedding_token_limit_exceeded": exceeds_limit,
                                 **({"industry": industry} if industry else {}),  # ← None 时不写入该字段
                             },
                         ))
@@ -369,6 +445,7 @@ def load_pdf_with_layout(
                         "page":     human_page_num,
                         "chunk_id": chunk_id,
                         "doc_type": "text",
+                        "num_tokens": _token_count(tokenizer, chunk_text),
                         **({"industry": industry} if industry else {}),  # ← None 时不写入该字段
                     },
                 ))
@@ -391,18 +468,39 @@ def load_pdf_with_layout(
 class LocalPdfParserAdapter:
     """执行本地 PDF 解析并返回建库内部的统一契约。"""
 
+    def __init__(
+        self,
+        *,
+        chunking_max_tokens: int = _DEFAULT_CHUNK_MAX_TOKENS,
+        chunking_overlap_tokens: int = _DEFAULT_CHUNK_OVERLAP_TOKENS,
+        chunking_tokenizer: str = _DEFAULT_CHUNK_TOKENIZER,
+    ) -> None:
+        if chunking_max_tokens < 64:
+            raise ValueError("chunking_max_tokens 不能小于 64")
+        if not 0 <= chunking_overlap_tokens < chunking_max_tokens:
+            raise ValueError(
+                "chunking_overlap_tokens 必须大于等于 0 且小于 chunking_max_tokens"
+            )
+        if not chunking_tokenizer.strip():
+            raise ValueError("chunking_tokenizer 不能为空")
+        self._chunking_max_tokens = chunking_max_tokens
+        self._chunking_overlap_tokens = chunking_overlap_tokens
+        self._chunking_tokenizer = chunking_tokenizer.strip()
+
     async def parse(self, request: ParseRequest) -> ParseResult:
         normalized = request.normalized()
         return await asyncio.to_thread(self._parse_sync, normalized)
 
-    @staticmethod
-    def _parse_sync(request: ParseRequest) -> ParseResult:
+    def _parse_sync(self, request: ParseRequest) -> ParseResult:
         started = time.perf_counter()
         with warnings.catch_warnings(record=True) as captured:
             warnings.simplefilter("always")
             documents = load_pdf_with_layout(
                 request.file_path,
                 source_root=request.source_root,
+                chunk_size=self._chunking_max_tokens,
+                chunk_overlap=self._chunking_overlap_tokens,
+                tokenizer_name=self._chunking_tokenizer,
             )
 
         source_file, industry = source_identity(

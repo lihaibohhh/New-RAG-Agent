@@ -134,17 +134,11 @@ def _finalization_evidence_records(
     current_messages: tuple[Any, ...],
 ) -> tuple[list[dict[str, Any]], int]:
     """将当前轮工具结果投影为无工具协议外壳的有界证据记录。"""
-    records = _rag_evidence_records(state)
+    fallback_rag_records = _rag_evidence_records(state)
+    records: list[dict[str, Any]] = []
     omitted = state.turn_evidence_omitted_count
-    rag_keys = {
-        (
-            str(record.get("chunk_id") or ""),
-            str(record.get("source") or ""),
-            record.get("page"),
-        )
-        for record in records
-    }
-    had_collected_rag_evidence = bool(records)
+    rag_keys: set[tuple[str, str, Any]] = set()
+    had_collected_rag_evidence = bool(fallback_rag_records)
     seen_urls: set[str] = set()
     for message in current_messages:
         if not isinstance(message, ToolMessage):
@@ -187,8 +181,8 @@ def _finalization_evidence_records(
         except (TypeError, ValueError):
             retrieval = None
         if retrieval is not None:
-            # 正常路径优先使用 postprocess_tools 已收集的 turn_evidence；
-            # 若状态合并缺失，则从当前 ToolMessage 回退构造同样的有界证据。
+            # ToolMessage 已在工具执行边界做过正文限制；Finalizer 在移除工具
+            # 协议外壳后优先使用其中较完整的可见正文，避免被 240 字符账本替代。
             for item in retrieval.evidence:
                 if not item.content:
                     continue
@@ -203,9 +197,8 @@ def _finalization_evidence_records(
                         "source": item.source_file,
                         "page": item.source_page,
                         "chunk_id": item.chunk_id,
-                        "excerpt": _bounded_text(item.content, 240),
-                        "excerpt_truncated": item.content_truncated
-                        or len(item.content) > 240,
+                        "excerpt": item.content,
+                        "excerpt_truncated": item.content_truncated,
                     }
                 )
             if not had_collected_rag_evidence:
@@ -215,6 +208,19 @@ def _finalization_evidence_records(
             records.extend(_web_evidence_records(payload, seen_urls=seen_urls))
             continue
         records.append(_generic_tool_evidence(payload, raw_content))
+
+    # turn_evidence 是可持久化的紧凑账本。仅当当前 ToolMessage 没有相同
+    # RAG 片段时才用其补缺，不让 240 字符摘录覆盖本轮较完整正文。
+    for record in fallback_rag_records:
+        key = (
+            str(record.get("chunk_id") or ""),
+            str(record.get("source") or ""),
+            record.get("page"),
+        )
+        if key in rag_keys:
+            continue
+        rag_keys.add(key)
+        records.append(record)
 
     if len(records) > _MAX_FINALIZATION_EVIDENCE_RECORDS:
         omitted += len(records) - _MAX_FINALIZATION_EVIDENCE_RECORDS
