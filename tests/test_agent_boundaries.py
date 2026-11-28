@@ -34,6 +34,10 @@ from react_agent.agent.tool_flow import (
     final_answer_protocol_violation,
     repair_and_validate_tool_exchanges,
 )
+from react_agent.agent.tool_flow.execution import (
+    _apply_tool_call_budgets,
+    _tool_call_waves,
+)
 from react_agent.agent.workflow.graph import (
     build_base_graph,
     route_after_postprocess,
@@ -53,6 +57,73 @@ RETRIEVAL_TOOL_NAMES = frozenset({"query_internal_knowledge"})
 RAG_CAPABILITIES = {
     "query_internal_knowledge": frozenset({ToolCapability.KNOWLEDGE_RETRIEVAL})
 }
+
+
+def test_tool_budgets_reject_duplicates_and_gate_extended_search_quota() -> None:
+    config = AgentContext()
+    messages = [
+        HumanMessage(content="研究问题"),
+        ToolMessage(
+            tool_call_id="old-search",
+            name="search",
+            content=json.dumps(
+                tool_success(tool_name="search", query="same query", data={})
+            ),
+        ),
+    ]
+    calls = [
+        {"id": "duplicate", "name": "search", "args": {"query": " Same   Query "}},
+        {"id": "extended", "name": "search", "args": {"query": "new query"}},
+    ]
+
+    allowed, blocked = _apply_tool_call_budgets(
+        calls,
+        messages=messages,
+        attempted_rag=0,
+        attempted_search=config.search_soft_call_limit,
+        attempted_total=config.search_soft_call_limit,
+        config=config,
+        retrieval_tool_names=RETRIEVAL_TOOL_NAMES,
+        search_tool_names=frozenset({"search"}),
+    )
+
+    assert [call["id"] for call in allowed] == ["extended"]
+    assert [(item[0]["id"], item[1]) for item in blocked] == [
+        ("duplicate", "DUPLICATE_TOOL_QUERY")
+    ]
+
+
+def test_tool_budgets_enforce_search_total_and_parallel_limits() -> None:
+    config = AgentContext()
+    call = {"id": "search-limit", "name": "search", "args": {"query": "new"}}
+    allowed, blocked = _apply_tool_call_budgets(
+        [call],
+        messages=[HumanMessage(content="问题")],
+        attempted_rag=0,
+        attempted_search=config.search_call_limit,
+        attempted_total=config.search_call_limit,
+        config=config,
+        retrieval_tool_names=RETRIEVAL_TOOL_NAMES,
+        search_tool_names=frozenset({"search"}),
+    )
+    assert not allowed
+    assert blocked[0][1] == "SEARCH_CALL_BUDGET_EXHAUSTED"
+
+    calls = [
+        {"id": f"rag-{index}", "name": "query_internal_knowledge", "args": {"query": str(index)}}
+        for index in range(3)
+    ] + [
+        {"id": f"search-{index}", "name": "search", "args": {"query": str(index)}}
+        for index in range(3)
+    ]
+    waves = _tool_call_waves(
+        calls,
+        retrieval_tool_names=RETRIEVAL_TOOL_NAMES,
+        search_tool_names=frozenset({"search"}),
+        rag_max_parallel=1,
+        search_max_parallel=2,
+    )
+    assert [len(wave) for wave in waves] == [3, 2, 1]
 
 
 def test_tool_call_ids_cover_valid_invalid_and_provider_payloads() -> None:
@@ -838,9 +909,19 @@ def test_agent_context_contains_only_agent_behavior_configuration() -> None:
         "max_tool_batches",
         "max_tool_retries",
         "rag_call_limit",
+        "search_call_limit",
+        "total_tool_call_limit",
+        "rag_soft_call_limit",
+        "search_soft_call_limit",
+        "rag_max_parallel",
+        "search_max_parallel",
         "consecutive_failure_threshold",
         "max_history_tokens",
         "max_input_tokens",
+        "model_input_target_tokens",
+        "history_rich_tokens",
+        "history_evidence_tokens",
+        "history_recent_rich_turns",
         "context_safety_margin_tokens",
         "enable_history_truncation",
         "enable_history_compaction",

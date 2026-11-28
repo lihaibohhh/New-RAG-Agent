@@ -28,7 +28,7 @@ from react_agent.agent.context_management.contracts import (
 )
 from react_agent.agent.context_management.evidence import attach_evidence_index
 from react_agent.agent.context_management.projection import (
-    project_completed_history,
+    project_historical_turns,
     project_tool_content,
 )
 from react_agent.agent.context_management.segmentation import (
@@ -52,6 +52,22 @@ def _bounded_text(value: Any, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 1)] + "…"
+
+
+def _historical_fallback_records(state: State) -> list[dict[str, Any]]:
+    """新轮次记忆缺失时，共享旧版 RAG 来源索引作为兼容回退。"""
+    return [] if state.conversation_turn_memories else state.conversation_evidence
+
+
+def _historical_memory_evidence_count(state: State) -> int:
+    count = 0
+    for raw in state.conversation_turn_memories:
+        if not isinstance(raw, dict):
+            continue
+        evidence = raw.get("evidence")
+        if isinstance(evidence, list):
+            count += len(evidence)
+    return count
 
 
 def _rag_evidence_records(state: State) -> list[dict[str, Any]]:
@@ -81,6 +97,9 @@ def _web_evidence_records(
     raw_results = data.get("results")
     raw_results = raw_results if isinstance(raw_results, list) else []
     query = _bounded_text(payload.get("query"), 160)
+    meta = payload.get("meta")
+    meta = meta if isinstance(meta, dict) else {}
+    retrieved_at = meta.get("retrieved_at") or meta.get("timestamp")
     records: list[dict[str, Any]] = []
     for raw in raw_results:
         if not isinstance(raw, dict):
@@ -97,6 +116,7 @@ def _web_evidence_records(
                 "title": _bounded_text(raw.get("title"), 200),
                 "url": url,
                 "published_date": raw.get("published_date"),
+                "retrieved_at": retrieved_at,
                 "excerpt": _bounded_text(
                     raw.get("content"), _MAX_WEB_EVIDENCE_CHARS
                 ),
@@ -108,6 +128,7 @@ def _web_evidence_records(
             {
                 "kind": "web_search_answer",
                 "query": query,
+                "retrieved_at": retrieved_at,
                 "excerpt": answer,
             }
         )
@@ -290,12 +311,17 @@ def build_model_context(
     summary_text = render_summary(summary) if summary else None
     filtered = full_filtered[summarized_count:]
     source_segments = segment_current_turn(filtered)
-    projected_history = project_completed_history(list(source_segments.completed))
+    projected_history = project_historical_turns(
+        list(source_segments.completed), state.conversation_turn_memories
+    )
+    historical_fallback_records = _historical_fallback_records(state)
     removed_historical_protocol_messages = (
         len(source_segments.completed) - len(projected_history)
     )
     filtered = [*projected_history, *source_segments.current]
-    counter = MessageTokenCounter()
+    counter = MessageTokenCounter(
+        multiplier=budget.token_estimate_multiplier if budget else 1.0
+    )
     try:
         selection = select_context_messages(
             filtered,
@@ -308,10 +334,12 @@ def build_model_context(
             summary_text=summary_text,
             turn_evidence=state.turn_evidence,
             turn_evidence_omitted_count=state.turn_evidence_omitted_count,
-            conversation_evidence=state.conversation_evidence,
+            conversation_evidence=historical_fallback_records,
             conversation_evidence_omitted_count=(
                 state.conversation_evidence_omitted_count
             ),
+            historical_source_messages=list(source_segments.completed),
+            turn_memories=state.conversation_turn_memories,
         )
     except ContextBudgetExceeded as exc:
         exc.completed_model_messages = tuple(latest_turn_ai_messages(source_messages))
@@ -348,9 +376,17 @@ def build_model_context(
         current_turn_message_count=len(source_segments.current),
         evidence_record_count=len(state.turn_evidence),
         evidence_omitted_count=state.turn_evidence_omitted_count,
-        historical_evidence_record_count=len(state.conversation_evidence),
+        historical_evidence_record_count=(
+            _historical_memory_evidence_count(state)
+            if state.conversation_turn_memories
+            else len(state.conversation_evidence)
+        ),
         historical_evidence_omitted_count=(
-            state.conversation_evidence_omitted_count
+            (
+                state.conversation_turn_evidence_omitted_count
+                if state.conversation_turn_memories
+                else state.conversation_evidence_omitted_count
+            )
             + selection.historical_evidence_omitted_by_budget
         ),
         history_truncated=bool(summarized_count)
@@ -368,6 +404,12 @@ def build_model_context(
             "historical_protocol_messages_removed": (
                 removed_historical_protocol_messages
             ),
+            "historical_projection": (
+                "turn_memory"
+                if state.conversation_turn_memories
+                else "legacy_messages"
+            ),
+            "historical_turn_levels": dict(selection.historical_turn_levels),
         },
     )
 
@@ -394,8 +436,13 @@ def build_finalization_context(
     if not user_text:
         raise ValueError("finalizer 上下文缺少当前用户问题")
 
-    history = project_completed_history(list(segments.completed))
-    counter = MessageTokenCounter()
+    history = project_historical_turns(
+        list(segments.completed), state.conversation_turn_memories
+    )
+    historical_fallback_records = _historical_fallback_records(state)
+    counter = MessageTokenCounter(
+        multiplier=budget.token_estimate_multiplier if budget else 1.0
+    )
     user_section = f"【用户问题】\n{user_text}"
     boundary_section = (
         "【执行边界】\n工具阶段已经结束，不能继续调用任何工具。"
@@ -448,8 +495,12 @@ def build_finalization_context(
             summary_text=summary_text,
             turn_evidence=[],
             turn_evidence_omitted_count=0,
-            conversation_evidence=[],
-            conversation_evidence_omitted_count=0,
+            conversation_evidence=historical_fallback_records,
+            conversation_evidence_omitted_count=(
+                state.conversation_evidence_omitted_count
+            ),
+            historical_source_messages=list(segments.completed),
+            turn_memories=state.conversation_turn_memories,
         )
     except ContextBudgetExceeded as exc:
         exc.completed_model_messages = tuple(latest_turn_ai_messages(source_messages))
@@ -458,6 +509,7 @@ def build_finalization_context(
 
     selected = selection.messages
     summary_text = selection.summary_text
+    historical_evidence_text = selection.historical_evidence_text
     budget_report = selection.budget_report
     if budget_report is not None:
         question_tokens = counter.count([HumanMessage(content=user_section)])
@@ -484,20 +536,42 @@ def build_finalization_context(
         model_input.append({"role": "system", "content": directive})
     if summary_text:
         model_input.append({"role": "assistant", "content": summary_text})
+    if historical_evidence_text:
+        model_input.append(
+            {"role": "assistant", "content": historical_evidence_text}
+        )
     model_input.extend(selected)
 
     removed_protocol_messages = len(segments.completed) - len(history)
     diagnostics = ContextDiagnostics(
         source_message_count=len(source_messages),
-        selected_message_count=len(selected) + bool(summary_text),
+        selected_message_count=len(selected)
+        + bool(summary_text)
+        + bool(historical_evidence_text),
         estimated_history_tokens=counter.count(selected)
-        + (counter.count([{"content": summary_text}]) if summary_text else 0),
+        + (counter.count([{"content": summary_text}]) if summary_text else 0)
+        + (
+            counter.count([{"content": historical_evidence_text}])
+            if historical_evidence_text
+            else 0
+        ),
         completed_message_count=len(segments.completed),
         current_turn_message_count=len(segments.current),
         evidence_record_count=visible_evidence,
         evidence_omitted_count=total_evidence_omitted,
-        historical_evidence_record_count=0,
-        historical_evidence_omitted_count=0,
+        historical_evidence_record_count=(
+            _historical_memory_evidence_count(state)
+            if state.conversation_turn_memories
+            else len(state.conversation_evidence)
+        ),
+        historical_evidence_omitted_count=(
+            (
+                state.conversation_turn_evidence_omitted_count
+                if state.conversation_turn_memories
+                else state.conversation_evidence_omitted_count
+            )
+            + selection.historical_evidence_omitted_by_budget
+        ),
         history_truncated=bool(summarized_count)
         or removed_protocol_messages > 0
         or selection.history_truncated,
@@ -513,6 +587,12 @@ def build_finalization_context(
             "evidence_count": visible_evidence,
             "omitted_evidence_count": total_evidence_omitted,
             "termination_reason": state.termination_reason,
+            "historical_projection": (
+                "turn_memory"
+                if state.conversation_turn_memories
+                else "legacy_messages"
+            ),
+            "historical_turn_levels": dict(selection.historical_turn_levels),
         },
     )
 

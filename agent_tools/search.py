@@ -3,6 +3,7 @@ import time
 import asyncio
 import logging
 from collections.abc import Callable
+from datetime import datetime, timezone
 from typing import Any
 from langchain_core.tools import tool
 from agent_tools.contracts.results import tool_error as _err
@@ -192,7 +193,10 @@ async def _execute_search(
             tool_name=tool_name,
             query=q,
             data=data,
-            meta={"max_results": max_results},
+            meta={
+                "max_results": max_results,
+                "retrieved_at": datetime.now(timezone.utc).isoformat(),
+            },
         )
 
     # ════════════════════ 阶段 4：异常处理 ════════════════════

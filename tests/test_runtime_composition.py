@@ -240,15 +240,25 @@ async def test_warmup_state_is_instance_scoped() -> None:
 
 
 @pytest.mark.asyncio
-async def test_admin_composition_does_not_load_query_models() -> None:
+async def test_admin_composition_does_not_load_query_models(monkeypatch) -> None:
     runtime = create_test_knowledge_runtime()
     rag_service = runtime.rag
 
-    assert rag_service._admin_service is not None
-    assert rag_service._vector_retriever._vectorstore is None
-    assert rag_service._reranker._model is None
-    assert runtime._resources._embedding_provider is None
-    await runtime.close()
+    async def inspect() -> dict[str, object]:
+        return {"status": "knowledge_base_ready", "chunk_count": 3}
+
+    monkeypatch.setattr(rag_service._knowledge_base, "inspect", inspect)
+    try:
+        health = await rag_service.health()
+
+        assert health.ready is True
+        assert health.details["knowledge_base"]["chunk_count"] == 3
+        assert not hasattr(rag_service, "_admin_service")
+        assert rag_service._vector_retriever._vectorstore is None
+        assert rag_service._reranker._model is None
+        assert runtime._resources._embedding_provider is None
+    finally:
+        await runtime.close()
 
 
 @pytest.mark.asyncio

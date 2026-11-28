@@ -41,6 +41,11 @@ _NON_EXECUTED_RAG_ERROR_CODES = frozenset(
         "GRAPH_STEP_BUDGET_EXHAUSTED",
         "INVALID_TOOL_CALL",
         "RAG_CALL_BUDGET_EXHAUSTED",
+        "SEARCH_CALL_BUDGET_EXHAUSTED",
+        "TOTAL_TOOL_CALL_BUDGET_EXHAUSTED",
+        "DUPLICATE_TOOL_QUERY",
+        "TOOL_SOFT_BUDGET_EXTENSION_DENIED",
+        "TOOL_FAILURE_CIRCUIT_OPEN",
         "TOOL_BUDGET_EXHAUSTED",
         "TOOL_DISABLED",
     }
@@ -156,6 +161,7 @@ async def execute_dynamic_tools(
     retrieval_tool_names = dependencies.tool_names_for(
         ToolCapability.KNOWLEDGE_RETRIEVAL
     )
+    search_tool_names = dependencies.tool_names_for(ToolCapability.WEB_SEARCH)
     try:
         last_message = state.messages[-1] if state.messages else None
         invalid_messages = _invalid_tool_messages(last_message)
@@ -180,19 +186,37 @@ async def execute_dynamic_tools(
             last_message,
             active_names,
         )
-        attempted_rag_calls = count_attempted_rag_calls_in_current_turn(
-            list(state.messages),
-            retrieval_tool_names=retrieval_tool_names,
+        current_messages = list(state.messages)
+        attempted_rag_calls = count_attempted_tool_calls_in_current_turn(
+            current_messages, tool_names=retrieval_tool_names
         )
-        allowed_calls, budget_blocked_calls = _apply_rag_call_budget(
+        attempted_search_calls = count_attempted_tool_calls_in_current_turn(
+            current_messages, tool_names=search_tool_names
+        )
+        attempted_total_calls = count_attempted_tool_calls_in_current_turn(
+            current_messages
+        )
+        allowed_calls, budget_blocked_calls = _apply_tool_call_budgets(
             executable_calls,
-            attempted=attempted_rag_calls,
-            limit=agent_config.rag_call_limit,
+            messages=current_messages,
+            attempted_rag=attempted_rag_calls,
+            attempted_search=attempted_search_calls,
+            attempted_total=attempted_total_calls,
+            config=agent_config,
             retrieval_tool_names=retrieval_tool_names,
+            search_tool_names=search_tool_names,
         )
         if not disabled_calls and not budget_blocked_calls:
-            node = ToolNode(active_tools, handle_tool_errors=True)
-            result = await node.ainvoke(state, config)
+            result = await _execute_tool_calls(
+                state,
+                config,
+                active_tools=active_tools,
+                calls=allowed_calls,
+                retrieval_tool_names=retrieval_tool_names,
+                search_tool_names=search_tool_names,
+                rag_max_parallel=agent_config.rag_max_parallel,
+                search_max_parallel=agent_config.search_max_parallel,
+            )
             all_messages = invalid_messages + result.get("messages", [])
             result["messages"] = _validated_tool_messages(
                 last_message,
@@ -202,20 +226,21 @@ async def execute_dynamic_tools(
             return result
 
         blocked_messages = _blocked_tool_messages(disabled_calls, active_names)
-        budget_messages = _rag_budget_messages(
+        budget_messages = _tool_budget_messages(
             budget_blocked_calls,
-            attempted=attempted_rag_calls,
-            limit=agent_config.rag_call_limit,
         )
         executed_messages: list[Any] = []
         if allowed_calls and isinstance(last_message, AIMessage):
-            filtered_message = last_message.model_copy(
-                update={"tool_calls": allowed_calls}
+            invoke_result = await _execute_tool_calls(
+                state,
+                config,
+                active_tools=active_tools,
+                calls=allowed_calls,
+                retrieval_tool_names=retrieval_tool_names,
+                search_tool_names=search_tool_names,
+                rag_max_parallel=agent_config.rag_max_parallel,
+                search_max_parallel=agent_config.search_max_parallel,
             )
-            transient_messages = list(state.messages[:-1]) + [filtered_message]
-            transient_state = replace(state, messages=transient_messages)
-            node = ToolNode(active_tools, handle_tool_errors=True)
-            invoke_result = await node.ainvoke(transient_state, config)
             executed_messages = invoke_result.get("messages", [])
 
         update: dict[str, Any] = {
@@ -228,10 +253,15 @@ async def execute_dynamic_tools(
                 max_chars=agent_config.max_tool_output_chars,
             )
         }
-        if budget_blocked_calls:
-            update["termination_reason"] = (
-                TerminationReason.RAG_CALL_BUDGET_EXHAUSTED.value
-            )
+        terminal_codes = [item[1] for item in budget_blocked_calls]
+        if "TOTAL_TOOL_CALL_BUDGET_EXHAUSTED" in terminal_codes:
+            update["termination_reason"] = TerminationReason.TOTAL_TOOL_CALL_BUDGET_EXHAUSTED.value
+        elif "RAG_CALL_BUDGET_EXHAUSTED" in terminal_codes:
+            update["termination_reason"] = TerminationReason.RAG_CALL_BUDGET_EXHAUSTED.value
+        elif "SEARCH_CALL_BUDGET_EXHAUSTED" in terminal_codes:
+            update["termination_reason"] = TerminationReason.SEARCH_CALL_BUDGET_EXHAUSTED.value
+        elif "TOOL_FAILURE_CIRCUIT_OPEN" in terminal_codes:
+            update["termination_reason"] = TerminationReason.TOOL_FAILURE_CIRCUIT_OPEN.value
         return update
     except Exception as exc:
         return _recover_from_execution_error(state, dependencies, exc)
@@ -285,25 +315,179 @@ def _partition_tool_calls(
     return blocked, allowed
 
 
-def _apply_rag_call_budget(
+def _tool_call_waves(
     calls: list[Any],
     *,
-    attempted: int,
-    limit: int,
     retrieval_tool_names: frozenset[str],
-) -> tuple[list[Any], list[Any]]:
-    """Reserve remaining RAG slots while preserving non-RAG calls."""
-    remaining = max(0, limit - attempted)
+    search_tool_names: frozenset[str],
+    rag_max_parallel: int,
+    search_max_parallel: int,
+) -> list[list[Any]]:
+    """按能力并发上限把同一模型批次拆成顺序执行波次。"""
+    pending = list(calls)
+    waves: list[list[Any]] = []
+    while pending:
+        wave: list[Any] = []
+        deferred: list[Any] = []
+        rag_count = search_count = 0
+        for call in pending:
+            name = get_tool_call_name(call) or ""
+            if name in retrieval_tool_names and rag_count >= rag_max_parallel:
+                deferred.append(call)
+                continue
+            if name in search_tool_names and search_count >= search_max_parallel:
+                deferred.append(call)
+                continue
+            wave.append(call)
+            rag_count += int(name in retrieval_tool_names)
+            search_count += int(name in search_tool_names)
+        waves.append(wave)
+        pending = deferred
+    return waves
+
+
+async def _execute_tool_calls(
+    state: State,
+    config: RunnableConfig,
+    *,
+    active_tools: tuple[Any, ...],
+    calls: list[Any],
+    retrieval_tool_names: frozenset[str],
+    search_tool_names: frozenset[str],
+    rag_max_parallel: int,
+    search_max_parallel: int,
+) -> dict[str, Any]:
+    """通过多个 ToolNode 波次执行，保持每个调用仍只产生一个 ToolMessage。"""
+    if not calls:
+        return {"messages": []}
+    last_message = state.messages[-1]
+    if not isinstance(last_message, AIMessage):
+        return {"messages": []}
+    node = ToolNode(active_tools, handle_tool_errors=True)
+    combined_result: dict[str, Any] = {"messages": []}
+    for wave in _tool_call_waves(
+        calls,
+        retrieval_tool_names=retrieval_tool_names,
+        search_tool_names=search_tool_names,
+        rag_max_parallel=rag_max_parallel,
+        search_max_parallel=search_max_parallel,
+    ):
+        filtered_message = last_message.model_copy(update={"tool_calls": wave})
+        transient_messages = list(state.messages[:-1]) + [filtered_message]
+        transient_state = replace(state, messages=transient_messages)
+        invoke_result = await node.ainvoke(transient_state, config)
+        for key, value in invoke_result.items():
+            if key == "messages":
+                combined_result["messages"].extend(value or [])
+            elif isinstance(value, list) and isinstance(combined_result.get(key), list):
+                combined_result[key].extend(value)
+            else:
+                combined_result[key] = value
+    return combined_result
+
+
+def _normalized_query(tool_call: Any) -> str:
+    return " ".join(_tool_query(tool_call).casefold().split())
+
+
+def _previous_tool_queries(messages: list[AnyMessage]) -> set[tuple[str, str]]:
+    seen: set[tuple[str, str]] = set()
+    last_human_index = find_last_real_human_index(messages)
+    for message in messages[max(0, last_human_index) :]:
+        if not isinstance(message, ToolMessage):
+            continue
+        payload = _try_decode(message)
+        meta = payload.get("meta") if payload else None
+        if isinstance(meta, dict) and meta.get("executed") is False:
+            continue
+        query = str(payload.get("query") or "") if payload else ""
+        normalized = " ".join(query.casefold().split())
+        if normalized:
+            seen.add((getattr(message, "name", "") or "", normalized))
+    return seen
+
+
+def _consecutive_tool_failures(
+    messages: list[AnyMessage], tool_names: frozenset[str]
+) -> int:
+    failures = 0
+    for message in reversed(_current_turn_tool_messages(messages, tool_names)):
+        payload = _try_decode(message)
+        meta = payload.get("meta") if payload else None
+        if isinstance(meta, dict) and meta.get("executed") is False:
+            continue
+        if payload is None or payload.get("ok") is False:
+            failures += 1
+            continue
+        break
+    return failures
+
+
+def _apply_tool_call_budgets(
+    calls: list[Any],
+    *,
+    messages: list[AnyMessage],
+    attempted_rag: int,
+    attempted_search: int,
+    attempted_total: int,
+    config: Any,
+    retrieval_tool_names: frozenset[str],
+    search_tool_names: frozenset[str],
+) -> tuple[list[Any], list[tuple[Any, str, str, dict[str, Any]]]]:
+    """统一应用重复、软扩展、熔断及三类硬预算。"""
     allowed: list[Any] = []
-    blocked: list[Any] = []
+    blocked: list[tuple[Any, str, str, dict[str, Any]]] = []
+    seen_queries = _previous_tool_queries(messages)
+    rag_failures = _consecutive_tool_failures(messages, retrieval_tool_names)
+    search_failures = _consecutive_tool_failures(messages, search_tool_names)
     for tool_call in calls:
-        if get_tool_call_name(tool_call) not in retrieval_tool_names:
-            allowed.append(tool_call)
-        elif remaining > 0:
-            allowed.append(tool_call)
-            remaining -= 1
-        else:
-            blocked.append(tool_call)
+        name = get_tool_call_name(tool_call) or "unknown"
+        is_rag = name in retrieval_tool_names
+        is_search = name in search_tool_names
+        normalized = _normalized_query(tool_call)
+        meta = {"executed": False}
+        if normalized and (name, normalized) in seen_queries:
+            blocked.append((tool_call, "DUPLICATE_TOOL_QUERY", "本轮已执行过相同查询，该调用未执行。", meta))
+            continue
+        if attempted_total >= config.total_tool_call_limit:
+            meta.update(attempted=attempted_total, limit=config.total_tool_call_limit)
+            blocked.append((tool_call, "TOTAL_TOOL_CALL_BUDGET_EXHAUSTED", "本轮工具调用总次数已达到上限，该调用未执行。", meta))
+            continue
+        if is_rag and attempted_rag >= config.rag_call_limit:
+            meta.update(attempted=attempted_rag, limit=config.rag_call_limit)
+            blocked.append((tool_call, "RAG_CALL_BUDGET_EXHAUSTED", "本轮知识库检索次数已达到上限，该调用未执行。", meta))
+            continue
+        if is_search and attempted_search >= config.search_call_limit:
+            meta.update(attempted=attempted_search, limit=config.search_call_limit)
+            blocked.append((tool_call, "SEARCH_CALL_BUDGET_EXHAUSTED", "本轮联网搜索次数已达到上限，该调用未执行。", meta))
+            continue
+        failures = rag_failures if is_rag else search_failures if is_search else 0
+        if failures >= config.consecutive_failure_threshold:
+            meta.update(consecutive_failures=failures)
+            blocked.append((tool_call, "TOOL_FAILURE_CIRCUIT_OPEN", "同类工具连续失败，熔断器已开启，该调用未执行。", meta))
+            continue
+        soft_limit = config.rag_soft_call_limit if is_rag else config.search_soft_call_limit if is_search else None
+        attempted_kind = attempted_rag if is_rag else attempted_search
+        if soft_limit is not None and attempted_kind >= soft_limit and not normalized:
+            meta.update(attempted=attempted_kind, soft_limit=soft_limit)
+            blocked.append((tool_call, "TOOL_SOFT_BUDGET_EXTENSION_DENIED", "普通额度已用尽；扩展额度要求提供非空且未重复的新查询。", meta))
+            continue
+        if soft_limit is not None and attempted_kind >= soft_limit:
+            meta["extended_budget"] = True
+            logger.info(
+                "tool_extended_budget_accepted | tool=%s attempted=%s soft_limit=%s",
+                name,
+                attempted_kind,
+                soft_limit,
+            )
+        allowed.append(tool_call)
+        attempted_total += 1
+        if is_rag:
+            attempted_rag += 1
+        if is_search:
+            attempted_search += 1
+        if normalized:
+            seen_queries.add((name, normalized))
     return allowed, blocked
 
 
@@ -314,11 +498,8 @@ def _tool_query(tool_call: Any) -> str:
     return str(args)[:200]
 
 
-def _rag_budget_messages(
-    blocked_calls: list[Any],
-    *,
-    attempted: int,
-    limit: int,
+def _tool_budget_messages(
+    blocked_calls: list[tuple[Any, str, str, dict[str, Any]]],
 ) -> list[ToolMessage]:
     return [
         ToolMessage(
@@ -328,18 +509,14 @@ def _rag_budget_messages(
                 tool_error(
                     tool_name=get_tool_call_name(tool_call) or "unknown",
                     query=_tool_query(tool_call),
-                    code="RAG_CALL_BUDGET_EXHAUSTED",
-                    message="本轮知识库检索次数已达到上限，该调用未执行。",
-                    meta={
-                        "attempted": attempted,
-                        "executed": False,
-                        "limit": limit,
-                    },
+                    code=code,
+                    message=message,
+                    meta=meta,
                 ),
                 ensure_ascii=False,
             ),
         )
-        for tool_call in blocked_calls
+        for tool_call, code, message, meta in blocked_calls
     ]
 
 
@@ -448,6 +625,20 @@ def _current_turn_rag_messages(
     ]
 
 
+def _current_turn_tool_messages(
+    messages: list[AnyMessage], tool_names: frozenset[str] | None = None
+) -> list[ToolMessage]:
+    last_human_index = find_last_real_human_index(messages)
+    if last_human_index < 0:
+        return []
+    return [
+        message
+        for message in messages[last_human_index:]
+        if isinstance(message, ToolMessage)
+        and (tool_names is None or getattr(message, "name", None) in tool_names)
+    ]
+
+
 def _try_decode(message: ToolMessage) -> dict[str, Any] | None:
     try:
         return decode_tool_result(getattr(message, "content", None))
@@ -474,6 +665,25 @@ def count_attempted_rag_calls_in_current_turn(
         error = payload.get("error")
         code = error.get("code") if isinstance(error, dict) else None
         if code in _NON_EXECUTED_RAG_ERROR_CODES:
+            continue
+        count += 1
+    return count
+
+
+def count_attempted_tool_calls_in_current_turn(
+    messages: list[AnyMessage],
+    *,
+    tool_names: frozenset[str] | None = None,
+) -> int:
+    """统计当前用户轮次中实际执行的指定能力或全部工具调用。"""
+    count = 0
+    for message in _current_turn_tool_messages(messages, tool_names):
+        payload = _try_decode(message)
+        if payload is None:
+            count += 1
+            continue
+        meta = payload.get("meta")
+        if isinstance(meta, dict) and meta.get("executed") is False:
             continue
         count += 1
     return count
@@ -614,6 +824,7 @@ __all__ = [
     "bound_tool_messages",
     "bound_tool_payload",
     "count_attempted_rag_calls_in_current_turn",
+    "count_attempted_tool_calls_in_current_turn",
     "count_successful_rag_calls_in_current_turn",
     "execute_dynamic_tools",
     "parse_tool_batch",

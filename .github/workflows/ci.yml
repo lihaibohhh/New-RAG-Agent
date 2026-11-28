@@ -49,3 +49,36 @@ jobs:
             --cov=knowledge \
             --cov-report=term \
             --cov-fail-under=35
+
+  docker-build:
+    name: Docker build checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Download repository
+        uses: actions/checkout@v7
+
+      - name: Validate Docker Compose configurations
+        run: |
+          touch .env
+          docker compose \
+            -f docker-compose.yml \
+            config --quiet
+          docker compose \
+            -f docker-compose.yml \
+            -f docker-compose.dev.yml \
+            config --quiet
+
+      - name: Build backend image
+        run: |
+          docker build \
+            --target app \
+            --tag research-agent-backend:ci \
+            .
+
+      - name: Build frontend image
+        run: |
+          docker build \
+            --tag research-agent-frontend:ci \
+            ./frontend

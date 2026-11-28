@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 import pytest
@@ -224,8 +225,19 @@ def test_rag_search_chain_has_no_forwarding_service_layers() -> None:
     assert "class HttpRagService(_KnowledgeHttpTransport)" in client_source
     assert "self._client = KnowledgeServiceClient" not in client_source
     assert "class LocalRagService(RetrievalApplicationService)" in runtime_source
-    assert "self._retrieval_service" not in runtime_source
-    assert "_get_retrieval_service(" not in runtime_source
+    runtime_tree = ast.parse(runtime_source)
+    forbidden_attributes = {"_retrieval_service", "_get_retrieval_service"}
+    violations = [
+        node.attr
+        for node in ast.walk(runtime_tree)
+        if isinstance(node, ast.Attribute) and node.attr in forbidden_attributes
+    ]
+    assert not violations, f"发现旧检索服务转发层：{violations}"
+    assert not any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "_get_retrieval_service"
+        for node in ast.walk(runtime_tree)
+    )
 
 
 def test_ingestion_chain_has_no_forwarding_runtime_or_worker_bridge() -> None:
