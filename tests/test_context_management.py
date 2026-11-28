@@ -12,7 +12,6 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from react_agent.agent.context_management import (
     ContextBudget,
     ContextBudgetExceeded,
-    ConversationSummary,
     EvidenceSnapshot,
     TurnMemory,
     build_finalization_context,
@@ -990,18 +989,6 @@ def test_context_builder_repairs_dangling_tool_protocol() -> None:
     assert "工具调用未完成" in context.messages[-1].content
 
 
-def test_conversation_summary_contract_requires_traceable_content() -> None:
-    summary = ConversationSummary(
-        content="用户正在比较两份资本开支指引。",
-        source_message_ids=("message-1", "message-2"),
-        summarized_through_message_id="message-2",
-    )
-
-    assert summary.version == 1
-    with pytest.raises(ValueError, match="不能为空"):
-        ConversationSummary(content="  ")
-
-
 def test_token_estimator_is_offline_and_counts_tool_arguments(monkeypatch) -> None:
     original_import = builtins.__import__
 
@@ -1167,7 +1154,6 @@ def test_budget_report_includes_final_input_and_bound_tool_schema() -> None:
                         content="工具正文" * 100,
                     ),
                 ],
-                turn_compaction_usage={"prompt_tokens": 5},
             ),
             "系统",
             50,
@@ -1191,7 +1177,6 @@ def test_budget_gate_classifies_irreducible_context(
     assert captured.value.report.outcome == reason.lower()
     if reason == "CURRENT_TURN_CONTEXT_TOO_LARGE":
         assert len(captured.value.completed_model_messages) == 1
-        assert captured.value.compaction_usage == {"prompt_tokens": 5}
 
 
 def test_budget_drops_completed_history_without_mutating_state() -> None:

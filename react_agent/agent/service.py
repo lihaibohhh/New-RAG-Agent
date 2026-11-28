@@ -15,6 +15,21 @@ from react_agent.metering import extract_cumulative_snapshot
 _logger = logging.getLogger(__name__)
 
 
+def _prepare_input_messages(messages: List[Any]) -> tuple[list[Any], str | None]:
+    """复制入站消息，并为缺少 ID 的用户消息分配稳定标识。"""
+    prepared = list(messages)
+    current_human_id: str | None = None
+    for index, message in enumerate(prepared):
+        if not isinstance(message, HumanMessage):
+            continue
+        current_human_id = message.id or str(uuid4())
+        if not message.id:
+            prepared[index] = message.model_copy(
+                update={"id": current_human_id}
+            )
+    return prepared, current_human_id
+
+
 class AgentService:
     """
     Agent 对话用例服务。
@@ -79,17 +94,7 @@ class AgentService:
             "configurable": {"thread_id": thread_id},
         }
 
-        input_messages = list(messages)
-        current_human_id: str | None = None
-        for index in range(len(input_messages) - 1, -1, -1):
-            message = input_messages[index]
-            if isinstance(message, HumanMessage):
-                current_human_id = message.id or str(uuid4())
-                if not message.id:
-                    input_messages[index] = message.model_copy(
-                        update={"id": current_human_id}
-                    )
-                break
+        input_messages, current_human_id = _prepare_input_messages(messages)
 
         try:
             result = await self._graph.ainvoke(
@@ -118,7 +123,6 @@ class AgentService:
                             for message in persisted_messages[current_index + 1 :]
                             if isinstance(message, AIMessage)
                         )
-                        exc.compaction_usage = values.get("turn_compaction_usage")
                 except Exception:
                     _logger.exception(
                         "无法读取图步数异常后的用量状态 | thread_id=%s", thread_id
@@ -151,9 +155,10 @@ class AgentService:
             "recursion_limit": self.ctx.recursion_limit,
             "configurable": {"thread_id": thread_id},
         }
+        input_messages, _ = _prepare_input_messages(messages)
 
         async for event in self._graph.astream_events(
-            {"messages": messages},
+            {"messages": input_messages},
             context=self._dependencies,
             config=config,
             version="v2",

@@ -29,14 +29,6 @@ def _safe_tool_name(value: Any) -> str:
     return safe[:48] or "unknown"
 
 
-def _is_compaction_event(event: Mapping[str, Any]) -> bool:
-    metadata = event.get("metadata")
-    node = metadata.get("langgraph_node") if isinstance(metadata, Mapping) else None
-    return node == "compact_history" or "context_compaction" in tuple(
-        event.get("tags") or ()
-    )
-
-
 def progress_from_event(event: Mapping[str, Any]) -> AgentProgress | None:
     """将 LangChain 事件转换为有界且不泄露载荷的进度信息。"""
     event_name = str(event.get("event") or "")
@@ -44,11 +36,6 @@ def progress_from_event(event: Mapping[str, Any]) -> AgentProgress | None:
     node = metadata.get("langgraph_node") if isinstance(metadata, Mapping) else None
 
     if event_name == "on_chat_model_start":
-        if _is_compaction_event(event):
-            return AgentProgress(
-                stage="history_compaction",
-                label="正在整理较早的对话上下文……",
-            )
         if node == "finalize_model":
             return AgentProgress(
                 stage="finalize_model",
@@ -62,8 +49,6 @@ def progress_from_event(event: Mapping[str, Any]) -> AgentProgress | None:
         return None
 
     if event_name == "on_chat_model_stream":
-        if _is_compaction_event(event):
-            return None
         data = event.get("data")
         chunk = data.get("chunk") if isinstance(data, Mapping) else None
         if not getattr(chunk, "content", None):

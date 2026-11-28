@@ -199,11 +199,7 @@ async def invoke_chat_model(
         estimate_error_ratio,
         updated_calibration.multiplier,
         level_counts,
-        (
-            report.recent_history_tokens + report.summary_tokens
-            if report
-            else None
-        ),
+        report.recent_history_tokens if report else None,
         report.evidence_tokens if report else None,
         (
             report.current_user_tokens + report.current_turn_other_tokens
@@ -219,9 +215,7 @@ async def invoke_chat_model(
         "estimate_error_ratio": estimate_error_ratio,
         "token_estimate_multiplier": updated_calibration.multiplier,
         "compression_level_counts": level_counts,
-        "history_tokens": (
-            report.recent_history_tokens + report.summary_tokens if report else 0
-        ),
+        "history_tokens": report.recent_history_tokens if report else 0,
         "evidence_tokens": report.evidence_tokens if report else 0,
         "current_turn_tokens": (
             report.current_user_tokens + report.current_turn_other_tokens
@@ -338,7 +332,7 @@ async def invoke_finalizer_model(
 def model_usage_update(
     state: State, dependencies: AgentDependencies, response: AIMessage
 ) -> dict[str, Any]:
-    """主调用与历史压缩调用共用同一用量累计口径。"""
+    """将本次模型调用的用量与成本累加到会话状态。"""
     metered = meter_model_call(
         response,
         model_ref=dependencies.model_ref,

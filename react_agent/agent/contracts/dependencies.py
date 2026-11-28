@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
-from typing import Any, Callable, Mapping
+from typing import Callable, Mapping
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.tools import BaseTool
@@ -16,7 +16,6 @@ from react_agent.skills import SkillRegistry
 
 
 ModelProvider = Callable[[], BaseChatModel]
-OutputTokenLimiter = Callable[..., Any]
 
 
 class ToolCapability(str, Enum):
@@ -41,7 +40,6 @@ class AgentDependencies:
     skill_registry: SkillRegistry | None = None
     model_ref: str = "unknown"
     cost_estimator: CostEstimator | None = None
-    output_token_limiter: OutputTokenLimiter | None = None
     model_context_window_tokens: int | None = None
     reserved_completion_tokens: int = 8192
 
@@ -54,10 +52,6 @@ class AgentDependencies:
             raise ValueError("model_ref 不能为空")
         if self.cost_estimator is not None and not callable(self.cost_estimator):
             raise TypeError("cost_estimator 必须可调用")
-        if self.output_token_limiter is not None and not callable(
-            self.output_token_limiter
-        ):
-            raise TypeError("output_token_limiter 必须可调用")
         if self.model_context_window_tokens is not None and self.model_context_window_tokens < 1:
             raise ValueError("model_context_window_tokens 必须大于 0")
         if self.reserved_completion_tokens < 1:
@@ -91,13 +85,6 @@ class AgentDependencies:
         """按需取得由 Runtime 选择的聊天模型。"""
         return self.model_provider()
 
-    def limit_model_output(self, model: BaseChatModel, max_tokens: int) -> Any:
-        """Apply the Runtime-injected provider-specific output limit."""
-        if self.output_token_limiter is not None:
-            return self.output_token_limiter(model, max_tokens=max_tokens)
-        bind = getattr(model, "bind", None)
-        return bind(max_tokens=max_tokens) if callable(bind) else model
-
     def active_tools(self) -> tuple[tuple[BaseTool, ...], frozenset[str]]:
         """返回由 Runtime 注入且受 Agent 总开关控制的工具。"""
         if not self.config.enable_tools:
@@ -116,6 +103,5 @@ class AgentDependencies:
 __all__ = [
     "AgentDependencies",
     "ModelProvider",
-    "OutputTokenLimiter",
     "ToolCapability",
 ]

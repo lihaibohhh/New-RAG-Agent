@@ -17,7 +17,7 @@ import asyncio
 import json
 import logging
 import time
-from typing import Any, AsyncGenerator, Mapping, Sequence
+from typing import AsyncGenerator, Mapping, Sequence
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -62,8 +62,6 @@ async def _record_invoke_model_usage(
     messages: Sequence[AIMessage],
     agent: AgentService,
     bucket_key: str,
-    *,
-    compaction_usage: Mapping[str, Any] | None = None,
 ) -> None:
     """成功与预算中止共用计量路径，避免已发生的模型调用漏记。"""
     from api.metrics import llm_cost_cny_total, llm_tokens_total
@@ -88,20 +86,6 @@ async def _record_invoke_model_usage(
             )
         if metered.cost.status == "estimated" and metered.cost.amount:
             llm_cost_cny_total.labels(model=model_name).inc(metered.cost.amount)
-    if compaction_usage:
-        model_name = str(compaction_usage.get("model_name") or agent.model_ref)
-        prompt_tokens = int(compaction_usage.get("prompt_tokens") or 0)
-        completion_tokens = int(compaction_usage.get("completion_tokens") or 0)
-        invoke_tokens += int(compaction_usage.get("total_tokens") or 0)
-        if prompt_tokens:
-            llm_tokens_total.labels(type="prompt", model=model_name).inc(prompt_tokens)
-        if completion_tokens:
-            llm_tokens_total.labels(type="completion", model=model_name).inc(
-                completion_tokens
-            )
-        amount = float(compaction_usage.get("cost_cny") or 0.0)
-        if compaction_usage.get("priced") and amount:
-            llm_cost_cny_total.labels(model=model_name).inc(amount)
     await record_token_usage(bucket_key, invoke_tokens)
 
 
@@ -117,11 +101,7 @@ def _map_event(ev: dict, state: dict, agent: AgentService, start: float) -> str 
 
     if name == "on_chat_model_stream":
         metadata = ev.get("metadata") or {}
-        if (
-            "context_compaction" in (ev.get("tags") or ())
-            or metadata.get("langgraph_node") == "compact_history"
-            or metadata.get("model_context_kind") == "finalizer"
-        ):
+        if metadata.get("model_context_kind") == "finalizer":
             return None
         chunk = data.get("chunk")
         if chunk and hasattr(chunk, "content") and chunk.content:
@@ -568,7 +548,6 @@ async def chat_invoke(
             exc.completed_model_messages,
             agent,
             bucket_key,
-            compaction_usage=exc.compaction_usage,
         )
         raise AppError(status=status, title=title, detail=detail) from exc
     except GraphRecursionError as exc:
@@ -582,7 +561,6 @@ async def chat_invoke(
                 completed_messages,
                 agent,
                 bucket_key,
-                compaction_usage=getattr(exc, "compaction_usage", None),
             )
         raise AppError(status=status, title=title, detail=detail) from exc
     except ValueError as e:
@@ -600,7 +578,6 @@ async def chat_invoke(
         latest_turn_ai_messages(msgs),
         agent,
         bucket_key,
-        compaction_usage=result.get("turn_compaction_usage"),
     )
 
     return ChatResponse(content=content, session_id=session_id, thread_id=thread_id)

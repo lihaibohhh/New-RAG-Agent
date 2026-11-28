@@ -20,7 +20,6 @@ from react_agent.agent.policies import TerminationReason
 from react_agent.agent.tool_flow import extract_tool_call_ids
 from react_agent.agent.workflow.nodes import (
     call_model,
-    compact_history,
     close_pending_tool_calls,
     dynamic_tool_node,
     finalize_model,
@@ -84,7 +83,6 @@ def build_base_graph() -> StateGraph:
     )
 
     builder.add_node("prepare_turn", prepare_turn)
-    builder.add_node("compact_history", compact_history)
     builder.add_node("call_model", call_model)
     builder.add_node("tools", dynamic_tool_node)
     builder.add_node("postprocess_tools", postprocess_tools)
@@ -93,8 +91,7 @@ def build_base_graph() -> StateGraph:
     builder.add_node("finalize_model", finalize_model)
 
     builder.add_edge("__start__", "prepare_turn")
-    builder.add_edge("prepare_turn", "compact_history")
-    builder.add_edge("compact_history", "call_model")
+    builder.add_edge("prepare_turn", "call_model")
     builder.add_conditional_edges("call_model", route_model_output)
     builder.add_edge("tools", "postprocess_tools")
     builder.add_conditional_edges("postprocess_tools", route_after_postprocess)

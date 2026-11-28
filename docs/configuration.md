@@ -42,9 +42,6 @@ Copy-Item .env.example .env
 | `HISTORY_EVIDENCE_TOKENS` | 历史证据正文的独立预算 |
 | `HISTORY_RECENT_RICH_TURNS` | 最后降级的最近轮次数 |
 | `CONTEXT_SAFETY_MARGIN_TOKENS` | 为估算误差预留的安全余量 |
-| `ENABLE_HISTORY_COMPACTION` | 是否允许压缩较旧的完整对话轮次 |
-| `HISTORY_COMPACTION_MAX_OUTPUT_TOKENS` | 历史摘要最大输出 |
-| `HISTORY_COMPACTION_RETRY_NEW_TOKENS` | 摘要失败后再次尝试所需的新内容门槛 |
 
 有效输入上限取以下较小值：
 
@@ -60,8 +57,7 @@ MAX_INPUT_TOKENS
 `MAX_HISTORY_TOKENS` 只限制历史消息，不包括系统提示词、工具 Schema、当前轮和证据。
 当前轮超过历史子预算时仍会保留，最后由总输入预算判断能否调用模型。
 
-历史压缩不会修改 Checkpoint 原文，只影响当前模型输入。摘要调用会计入模型调用次数、
-Token 和成本。
+历史分级只作用于当次模型输入。L2 使用本地抽取的逐轮摘要，Checkpoint 保留原始消息。
 
 ## Agent 与工具预算
 
