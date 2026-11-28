@@ -506,19 +506,15 @@ def test_budget_can_omit_summary_without_changing_checkpoint() -> None:
 
 
 @pytest.mark.asyncio
-async def test_graph_persists_summary_without_replacing_original_messages() -> None:
+async def test_graph_persists_turn_memories_without_replacing_original_messages() -> None:
     old, recent, current = _messages()
     source = old + recent + current
 
     class FakeModel:
         async def ainvoke(self, messages, *, config=None):
-            is_compaction = "context_compaction" in (config or {}).get("tags", ())
+            assert "context_compaction" not in (config or {}).get("tags", ())
             return AIMessage(
-                content=(
-                    "用户讨论资本开支的比较口径。"
-                    if is_compaction
-                    else "最终回答"
-                ),
+                content="最终回答",
                 usage_metadata={"input_tokens": 20, "output_tokens": 4, "total_tokens": 24},
             )
 
@@ -537,12 +533,29 @@ async def test_graph_persists_summary_without_replacing_original_messages() -> N
         message.content for message in source
     ]
     assert result["messages"][-1].content == "最终回答"
-    assert result["conversation_summary"]["summarized_through_message_id"] == "m6"
-    persisted_summary, covered_count = load_valid_summary(
-        snapshot.values["conversation_summary"], snapshot.values["messages"]
-    )
-    assert persisted_summary is not None
-    assert persisted_summary.summarized_through_message_id == "m6"
-    assert covered_count == len(old)
+    assert result.get("conversation_summary") is None
+    assert snapshot.values.get("conversation_summary") is None
+    assert snapshot.values["conversation_turn_memories"] == result[
+        "conversation_turn_memories"
+    ]
+    memories = [
+        TurnMemory.from_state(raw) for raw in snapshot.values["conversation_turn_memories"]
+    ]
+    assert [memory.turn_id for memory in memories] == ["m1", "m5", "m7", "m9", "m11"]
+    assert [memory.user_messages for memory in memories] == [
+        (old[0].content,),
+        (old[4].content,),
+        ("近期话题0",),
+        ("近期话题1",),
+        ("近期话题2",),
+    ]
+    assert memories[0].source_message_ids == ("m1", "m2", "m3", "m4")
+    assert memories[1].source_message_ids == ("m5", "m6")
+    assert memories[0].final_answer == old[3].content
+    assert memories[1].final_answer == old[5].content
+    assert [message.content for message in snapshot.values["messages"][: len(source)]] == [
+        message.content for message in source
+    ]
     assert len(snapshot.values["messages"]) == len(source) + 1
-    assert result["llm_call_count"] == 2
+    assert result["llm_call_count"] == 1
+    assert result.get("turn_compaction_usage") is None

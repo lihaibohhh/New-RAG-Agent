@@ -29,37 +29,33 @@ class FakeCache:
         return None
 
 
-class FakeRetriever:
+class FakeVectorRetriever:
     def __init__(self, document: KnowledgeDocument) -> None:
         self.document = document
         self.calls = 0
 
-    async def retrieve(self, query: str, *, filters=None) -> list[KnowledgeDocument]:
+    def retrieve(self, query: str) -> list[KnowledgeDocument]:
         self.calls += 1
         return [self.document]
 
-    async def warmup(self) -> None:
-        return None
-
-    async def invalidate(self) -> None:
+    def warmup(self) -> None:
         return None
 
 
-class ModeAwareRetriever(FakeRetriever):
+class FakeBm25Retriever(FakeVectorRetriever):
     def __init__(self, document: KnowledgeDocument) -> None:
         super().__init__(document)
-        self.modes: list[str] = []
+        self.prepare_calls = 0
 
-    async def retrieve(
-        self,
-        query: str,
-        *,
-        filters=None,
-        mode: str = "hybrid",
-    ) -> list[KnowledgeDocument]:
-        self.calls += 1
-        self.modes.append(mode)
-        return [self.document]
+    def prepare(self) -> bool:
+        self.prepare_calls += 1
+        return True
+
+    def invalidate(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
 
 
 class FakeReranker:
@@ -87,10 +83,12 @@ async def test_evaluation_can_bypass_query_cache() -> None:
         metadata={"source_file": "new.pdf", "page": 2, "chunk_id": "new"},
     )
     cache = FakeCache([cached])
-    retriever = FakeRetriever(fresh)
+    vector = FakeVectorRetriever(fresh)
+    bm25 = FakeBm25Retriever(fresh)
     service = RetrievalApplicationService(
         cache=cache,
-        retriever=retriever,
+        vector_retriever=vector,
+        bm25_retriever=bm25,
         reranker=FakeReranker(),
     )
 
@@ -100,7 +98,8 @@ async def test_evaluation_can_bypass_query_cache() -> None:
     assert result.chunks[0].chunk_id == "new"
     assert cache.get_calls == 0
     assert cache.set_calls == 0
-    assert retriever.calls == 1
+    assert vector.calls == 1
+    assert bm25.calls == 1
 
 
 @pytest.mark.asyncio
@@ -110,10 +109,12 @@ async def test_online_default_still_uses_query_cache() -> None:
         metadata={"source_file": "cached.pdf", "page": 1, "chunk_id": "cached"},
     )
     cache = FakeCache([cached])
-    retriever = FakeRetriever(cached)
+    vector = FakeVectorRetriever(cached)
+    bm25 = FakeBm25Retriever(cached)
     service = RetrievalApplicationService(
         cache=cache,
-        retriever=retriever,
+        vector_retriever=vector,
+        bm25_retriever=bm25,
         reranker=FakeReranker(),
     )
 
@@ -121,7 +122,10 @@ async def test_online_default_still_uses_query_cache() -> None:
 
     assert result.cache_hit is True
     assert cache.get_calls == 1
-    assert retriever.calls == 0
+    assert cache.set_calls == 0
+    assert vector.calls == 0
+    assert bm25.calls == 0
+    assert bm25.prepare_calls == 0
 
 
 @pytest.mark.asyncio
@@ -135,10 +139,12 @@ async def test_single_source_evaluation_never_reuses_hybrid_query_cache() -> Non
         metadata={"source_file": "bm25.pdf", "page": 2, "chunk_id": "bm25"},
     )
     cache = FakeCache([cached])
-    retriever = ModeAwareRetriever(bm25)
+    vector = FakeVectorRetriever(cached)
+    bm25_retriever = FakeBm25Retriever(bm25)
     service = RetrievalApplicationService(
         cache=cache,
-        retriever=retriever,
+        vector_retriever=vector,
+        bm25_retriever=bm25_retriever,
         reranker=FakeReranker(),
     )
 
@@ -153,4 +159,6 @@ async def test_single_source_evaluation_never_reuses_hybrid_query_cache() -> Non
     assert result.stage == "bm25_retrieve+rerank"
     assert cache.get_calls == 0
     assert cache.set_calls == 0
-    assert retriever.modes == ["bm25"]
+    assert bm25_retriever.prepare_calls == 1
+    assert bm25_retriever.calls == 1
+    assert vector.calls == 0

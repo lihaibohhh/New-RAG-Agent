@@ -626,12 +626,24 @@ async def test_graph_merges_two_rag_batches_before_finalization() -> None:
     ]
     assert result["messages"][-1].content == "已汇总。"
     assert model.final_input is not None
-    assert any(
-        isinstance(item, ToolMessage)
-        and '"chunk_id":"chunk-1"' in item.content
-        and '"chunk_id":"chunk-2"' in item.content
+    assert not any(isinstance(item, ToolMessage) for item in model.final_input)
+    evidence_input = next(
+        item.content
         for item in model.final_input
+        if isinstance(item, HumanMessage) and "【本轮工具证据" in item.content
     )
+    records = [
+        json.loads(line)
+        for line in evidence_input.splitlines()
+        if line.startswith('{"kind":')
+    ]
+    assert [record["chunk_id"] for record in records] == ["chunk-1", "chunk-2"]
+    assert [record["source"] for record in records] == ["report-1.pdf", "report-2.pdf"]
+    assert [record["page"] for record in records] == [1, 2]
+    assert [record["excerpt"] for record in records] == [
+        "第 1 份报告的证据",
+        "第 2 份报告的证据",
+    ]
 
 
 @pytest.mark.asyncio
