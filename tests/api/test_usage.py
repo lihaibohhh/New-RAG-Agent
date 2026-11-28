@@ -155,17 +155,6 @@ def test_root_graph_does_not_commit_previous_turn_answer() -> None:
     assert frame is None
 
 
-def _compaction_usage() -> dict[str, Any]:
-    return {
-        "model_name": "known-model",
-        "prompt_tokens": 5,
-        "completion_tokens": 1,
-        "total_tokens": 6,
-        "cost_cny": 0.06,
-        "priced": True,
-    }
-
-
 def test_provider_prompt_total_fills_missing_cache_miss() -> None:
     usage = extract_model_usage(_message("known-model", 8, 2))
     assert usage["prompt_tokens"] == 8
@@ -225,40 +214,6 @@ def test_stream_usage_serializes_cost_and_unknown_price(monkeypatch: pytest.Monk
     assert state["total_tokens"] == 18
     assert state["total_cost"] == pytest.approx(0.10)
     assert state["unpriced_model_count"] == 1
-
-
-def test_stream_hides_compaction_tokens_but_counts_its_usage(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(chat, "estimate_configured_model_cost", _estimate)
-
-    class Agent:
-        model_ref = "test/known-model"
-
-    state = _state()
-    hidden = chat._map_event(
-        {
-            "event": "on_chat_model_stream",
-            "tags": ["context_compaction"],
-            "data": {"chunk": AIMessage(content="内部摘要")},
-        },
-        state,
-        Agent(),
-        time.perf_counter(),
-    )
-    usage = chat._map_event(
-        {
-            "event": "on_chat_model_end",
-            "tags": ["context_compaction"],
-            "data": {"output": _message("known-model", 5, 1)},
-        },
-        state,
-        Agent(),
-        time.perf_counter(),
-    )
-    assert hidden is None
-    assert usage is not None and usage.startswith("event: usage")
-    assert state["total_tokens"] == 6
 
 
 def test_finalizer_usage_is_counted_while_candidate_tokens_are_hidden(
@@ -436,44 +391,10 @@ async def test_invoke_records_every_model_call_in_latest_turn(
     assert recorded == [("api-key", 18)]
 
 
-@pytest.mark.asyncio
-async def test_invoke_adds_compaction_call_to_token_quota(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(chat, "estimate_configured_model_cost", _estimate)
-    recorded: list[int] = []
-
-    async def no_limit(*args: Any) -> None:
-        return None
-
-    async def record(bucket_key: str, tokens: int) -> None:
-        recorded.append(tokens)
-
-    monkeypatch.setattr(chat, "check_rate_limit", no_limit)
-    monkeypatch.setattr(chat, "check_token_budget", no_limit)
-    monkeypatch.setattr(chat, "record_token_usage", record)
-
-    class Agent:
-        model_ref = "test/known-model"
-
-        async def invoke(self, messages: list[Any], thread_id: str) -> dict[str, Any]:
-            return {
-                "messages": [HumanMessage(content="问题"), _message("known-model", 8, 2, content="回答")],
-                "turn_compaction_usage": _compaction_usage(),
-            }
-
-    response = await chat.chat_invoke(
-        ChatRequest(message="问题", session_id="session"), None, Agent(), "api-key"
-    )
-    assert response.content == "回答"
-    assert recorded == [16]
-
-
 def _budget_error(
     reason: str,
     *,
     completed_model_messages: tuple[AIMessage, ...] = (),
-    compaction_usage: dict[str, Any] | None = None,
 ) -> ContextBudgetExceeded:
     return ContextBudgetExceeded(
         reason,
@@ -494,7 +415,6 @@ def _budget_error(
             outcome=reason.lower(),
         ),
         completed_model_messages=completed_model_messages,
-        compaction_usage=compaction_usage,
     )
 
 
@@ -674,38 +594,3 @@ async def test_invoke_budget_error_records_prior_model_usage(
 
     assert captured.value.status == 413
     assert recorded == [("api-key", 10)]
-
-
-@pytest.mark.asyncio
-async def test_invoke_budget_error_also_records_compaction_usage(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(chat, "estimate_configured_model_cost", _estimate)
-    recorded: list[int] = []
-
-    async def no_limit(*args: Any) -> None:
-        return None
-
-    async def record(bucket_key: str, tokens: int) -> None:
-        recorded.append(tokens)
-
-    monkeypatch.setattr(chat, "check_rate_limit", no_limit)
-    monkeypatch.setattr(chat, "check_token_budget", no_limit)
-    monkeypatch.setattr(chat, "record_token_usage", record)
-
-    class Agent:
-        model_ref = "test/known-model"
-
-        async def invoke(self, messages: list[Any], thread_id: str) -> dict[str, Any]:
-            raise _budget_error(
-                "CURRENT_TURN_CONTEXT_TOO_LARGE",
-                completed_model_messages=(_message("known-model", 8, 2),),
-                compaction_usage=_compaction_usage(),
-            )
-
-    with pytest.raises(AppError) as captured:
-        await chat.chat_invoke(
-            ChatRequest(message="问题", session_id="session"), None, Agent(), "api-key"
-        )
-    assert captured.value.status == 413
-    assert recorded == [16]

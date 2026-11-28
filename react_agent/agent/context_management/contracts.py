@@ -172,29 +172,6 @@ class TurnSegments:
 
 
 @dataclass(frozen=True)
-class ConversationSummary:
-    """较早已完成轮次的可追溯压缩结果。"""
-
-    content: str
-    source_message_ids: tuple[str, ...] = ()
-    summarized_through_message_id: str | None = None
-    version: int = 1
-    exact_excerpts: tuple[str, ...] = ()
-    source_references: tuple[str, ...] = ()
-    source_fingerprint: str = ""
-
-    def __post_init__(self) -> None:
-        if not self.content.strip():
-            raise ValueError("ConversationSummary.content 不能为空")
-        if self.version < 1:
-            raise ValueError("ConversationSummary.version 必须大于 0")
-        if self.source_message_ids and (
-            self.summarized_through_message_id != self.source_message_ids[-1]
-        ):
-            raise ValueError("摘要游标必须是最后一条来源消息 ID")
-
-
-@dataclass(frozen=True)
 class ContextBudget:
     """一次模型调用的输入策略上限与可选模型窗口能力。"""
 
@@ -254,7 +231,6 @@ class BudgetReport:
     reserved_completion_tokens: int
     safety_margin_tokens: int
     context_window_tokens: int | None
-    summary_tokens: int = 0
     historical_evidence_tokens: int = 0
     dropped_completed_message_count: int = 0
     outcome: str = "within_budget"
@@ -263,7 +239,6 @@ class BudgetReport:
     evidence_excerpt_chars_removed: int = 0
     evidence_records_omitted_by_budget: int = 0
     projection_reasons: tuple[str, ...] = ()
-    summary_omitted_by_budget: bool = False
     historical_turn_levels: tuple[tuple[str, str], ...] = ()
     token_estimate_multiplier: float = 1.0
     soft_target_exceeded: bool = False
@@ -278,12 +253,10 @@ class ContextBudgetExceeded(ValueError):
         report: BudgetReport,
         *,
         completed_model_messages: tuple[Any, ...] = (),
-        compaction_usage: dict[str, Any] | None = None,
     ) -> None:
         self.reason = reason
         self.report = report
         self.completed_model_messages = completed_model_messages
-        self.compaction_usage = compaction_usage
         super().__init__(reason)
 
 
@@ -301,8 +274,6 @@ class ContextDiagnostics:
     historical_evidence_record_count: int = 0
     historical_evidence_omitted_count: int = 0
     history_truncated: bool = False
-    summary_included: bool = False
-    summarized_message_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -323,7 +294,6 @@ __all__ = [
     "ContextBudget",
     "ContextBudgetExceeded",
     "ContextDiagnostics",
-    "ConversationSummary",
     "EvidenceSnapshot",
     "ModelContext",
     "TurnMemory",

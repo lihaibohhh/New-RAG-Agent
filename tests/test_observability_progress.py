@@ -15,7 +15,6 @@ from react_agent.observability import (
     [
         ("call_model", "正在分析问题并规划下一步……"),
         ("finalize_model", "正在整理最终回答……"),
-        ("compact_history", "正在整理较早的对话上下文……"),
     ],
 )
 def test_model_start_progress_uses_graph_node(node: str, expected: str) -> None:
@@ -30,23 +29,13 @@ def test_model_start_progress_uses_graph_node(node: str, expected: str) -> None:
     assert progress.label == expected
 
 
-def test_model_stream_progress_requires_visible_non_compaction_content() -> None:
+def test_model_stream_progress_requires_visible_content() -> None:
     assert progress_from_event(
         {
             "event": "on_chat_model_stream",
             "data": {"chunk": SimpleNamespace(content="结论")},
         }
     ) == AgentProgress(stage="model_stream", label="正在生成回答……")
-    assert (
-        progress_from_event(
-            {
-                "event": "on_chat_model_stream",
-                "tags": ["context_compaction"],
-                "data": {"chunk": SimpleNamespace(content="历史摘要")},
-            }
-        )
-        is None
-    )
     assert (
         progress_from_event(
             {

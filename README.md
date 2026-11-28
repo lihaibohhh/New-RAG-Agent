@@ -23,7 +23,7 @@
 | 来源追溯 | 尽量保留 `source_file`、`source_page` 和 `chunk_id` |
 | 公开信息补充 | 通过 Web 搜索补充公告、政策和其他时效性信息 |
 | 多格式交付 | 生成 Markdown、Word、Excel 等研究产物 |
-| 上下文管理 | 按完整轮次裁剪历史，维护证据索引并支持可选历史压缩 |
+| 上下文管理 | 按预算对历史轮次执行 L0–L3 分级投影，保留有来源的证据 |
 | 会话持久化 | 支持 PostgreSQL、SQLite 和 Memory Checkpointer |
 | 服务接入 | 提供 Streamlit UI、FastAPI REST/SSE 和 MCP stdio |
 | 安全与观测 | API Key、限流、每日 Token 预算、Prometheus 指标和成本统计 |

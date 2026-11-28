@@ -27,7 +27,7 @@ from agent_tools.documents.excel import create_excel_tool
 from agent_tools.documents.markdown import create_markdown_tool
 from agent_tools.rag import create_rag_tool
 from agent_tools.search import create_search_tool
-from react_agent.models import bind_output_token_limit, load_chat_model
+from react_agent.models import load_chat_model
 from react_agent.metering import estimate_configured_model_cost
 from react_agent.skills import build_builtin_skill_registry
 
@@ -129,10 +129,6 @@ def _compose_agent_dependencies(
         skill_registry=build_builtin_skill_registry(),
         model_ref=settings.llm.model,
         cost_estimator=estimate_configured_model_cost,
-        output_token_limiter=partial(
-            bind_output_token_limit,
-            model_ref=settings.llm.model,
-        ),
         model_context_window_tokens=settings.llm.llm_context_window_tokens,
         reserved_completion_tokens=settings.llm.llm_max_tokens,
     )

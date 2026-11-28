@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
+from langchain_core.messages import HumanMessage
 
 from react_agent.agent.config import AgentContext
 from react_agent.agent.contracts.dependencies import (
@@ -113,6 +114,37 @@ async def test_agent_service_stream_events_preserves_v1_streaming_contract() -> 
         "configurable": {"thread_id": "user:stream"},
     }
     assert graph.version == "v2"
+
+
+@pytest.mark.asyncio
+async def test_agent_service_assigns_user_message_ids_at_shared_input_boundary() -> None:
+    dependencies = AgentDependencies(
+        config=AgentContext(),
+        model_provider=lambda: object(),
+        tools=(),
+    )
+    graph = _FakeGraph()
+    service = AgentService(dependencies, graph)
+    invoke_message = HumanMessage(content="普通调用")
+    stream_message = HumanMessage(content="流式调用")
+
+    invoke_result = await service.invoke(
+        [invoke_message], thread_id="user:invoke-id"
+    )
+    stream_events = [
+        event
+        async for event in service.stream_events(
+            [stream_message], thread_id="user:stream-id"
+        )
+    ]
+
+    invoke_input = invoke_result["messages"][0]
+    stream_input = stream_events[0]["data"]["inputs"]["messages"][0]
+    assert invoke_input.id is not None
+    assert stream_input.id is not None
+    assert invoke_input.id != stream_input.id
+    assert invoke_message.id is None
+    assert stream_message.id is None
 
 
 @pytest.mark.asyncio
@@ -303,16 +335,6 @@ def test_runtime_selects_model_and_tool_catalog(monkeypatch) -> None:
         "load_chat_model",
         lambda model_ref: ("model", model_ref),
     )
-    monkeypatch.setattr(
-        container,
-        "bind_output_token_limit",
-        lambda model, *, model_ref, max_tokens: (
-            "limited",
-            model,
-            model_ref,
-            max_tokens,
-        ),
-    )
 
     runtime = create_test_knowledge_runtime()
     dependencies = container._compose_agent_dependencies(
@@ -324,12 +346,6 @@ def test_runtime_selects_model_and_tool_catalog(monkeypatch) -> None:
     assert dependencies.model_ref == "provider/model"
     assert dependencies.model_context_window_tokens == 8192
     assert dependencies.reserved_completion_tokens == 1024
-    assert dependencies.limit_model_output("base-model", 768) == (
-        "limited",
-        "base-model",
-        "provider/model",
-        768,
-    )
     assert [tool.name for tool in dependencies.tools] == [
         "search",
         "make_excel_table",

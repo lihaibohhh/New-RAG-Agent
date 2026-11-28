@@ -420,7 +420,7 @@ async def test_last_step_tool_call_retries_once_then_uses_protocol_fallback() ->
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("recursion_limit", [4, 5, 6])
+@pytest.mark.parametrize("recursion_limit", [3, 4, 5])
 async def test_low_graph_step_budget_avoids_tool_call_before_model_invocation(
     recursion_limit: int,
 ) -> None:
@@ -590,9 +590,7 @@ async def test_failed_invoke_collects_only_its_checkpointed_model_usage(
                         ),
                     ]
                 )
-            return SimpleNamespace(
-                values={"messages": messages, "turn_compaction_usage": None}
-            )
+            return SimpleNamespace(values={"messages": messages})
 
     graph = FailingGraph()
     dependencies = AgentDependencies(
@@ -666,7 +664,7 @@ async def test_actual_graph_recursion_error_preserves_completed_model_usage() ->
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("recursion_limit", [7, 8])
+@pytest.mark.parametrize("recursion_limit", [6, 7])
 async def test_tool_result_finalizes_while_one_graph_step_is_reserved(
     recursion_limit: int,
 ) -> None:
@@ -924,9 +922,6 @@ def test_agent_context_contains_only_agent_behavior_configuration() -> None:
         "history_recent_rich_turns",
         "context_safety_margin_tokens",
         "enable_history_truncation",
-        "enable_history_compaction",
-        "history_compaction_max_output_tokens",
-        "history_compaction_retry_new_tokens",
     }
 
 

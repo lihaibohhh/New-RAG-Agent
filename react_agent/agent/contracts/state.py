@@ -122,19 +122,6 @@ class State(InputState):
     conversation_turn_evidence_omitted_count: int = 0
     """因工具输出或派生记忆容量限制而未保存的历史证据数。"""
 
-    conversation_summary: Optional[Dict[str, Any]] = None
-    """已完成旧轮次的派生摘要、来源消息 ID 与游标；不替换 messages 原文。"""
-
-    turn_compaction_usage: Optional[Dict[str, Any]] = None
-    """本轮额外摘要模型调用的用量；供非流式 API 精确计入配额。"""
-
-    compaction_control: Optional[Dict[str, Any]] = None
-    """历史压缩的持久化控制记录。
-
-    记录最近候选批次、拒绝原因和下次重试所需的最小来源 Token，
-    避免同一批不可压缩历史在每个用户轮次反复付费。
-    """
-
     # -----------------------------
     # 事实缓存与工作记忆（中文问答很实用）
     # -----------------------------

@@ -39,7 +39,6 @@ class ContextSelection:
     """上下文策略选出的模型可见消息与诊断摘要。"""
 
     messages: list[Any]
-    summary_text: str | None
     historical_evidence_text: str
     historical_evidence_omitted_by_budget: int
     budget_report: BudgetReport | None
@@ -122,7 +121,6 @@ def _budget_report(
     system_tokens: int,
     directive_tokens: int,
     tool_schema_tokens: int,
-    summary_tokens: int,
     evidence_tokens: int,
     historical_evidence_tokens: int,
     original_completed_count: int,
@@ -141,7 +139,6 @@ def _budget_report(
         system_tokens
         + directive_tokens
         + tool_schema_tokens
-        + summary_tokens
         + historical_evidence_tokens
         + recent_history_tokens
         + current_user_tokens
@@ -179,7 +176,6 @@ def _budget_report(
         current_turn_other_tokens=current_turn_other_tokens,
         evidence_tokens=evidence_tokens + historical_evidence_tokens,
         recent_history_tokens=recent_history_tokens,
-        summary_tokens=summary_tokens,
         historical_evidence_tokens=historical_evidence_tokens,
         reserved_completion_tokens=budget.reserved_completion_tokens,
         safety_margin_tokens=budget.safety_margin_tokens,
@@ -247,7 +243,6 @@ def select_context_messages(
     system_prompt: str,
     directive: str | None,
     bound_tools: tuple[Any, ...],
-    summary_text: str | None,
     turn_evidence: list[dict[str, Any]],
     turn_evidence_omitted_count: int,
     conversation_evidence: list[dict[str, Any]],
@@ -349,7 +344,6 @@ def select_context_messages(
     else:
         selected = collapse_consecutive_humans(selected)
 
-    had_summary = summary_text is not None
     evidence_index = render_evidence_index(
         turn_evidence, omitted_count=turn_evidence_omitted_count
     )
@@ -395,11 +389,6 @@ def select_context_messages(
             if historical_evidence_text
             else 0
         )
-        summary_tokens = (
-            counter.count([{"role": "assistant", "content": summary_text}])
-            if summary_text
-            else 0
-        )
         budget_report = _budget_report(
             selected,
             projected,
@@ -408,7 +397,6 @@ def select_context_messages(
             system_tokens=system_tokens,
             directive_tokens=directive_tokens,
             tool_schema_tokens=tool_schema_tokens,
-            summary_tokens=summary_tokens,
             evidence_tokens=evidence_tokens,
             historical_evidence_tokens=historical_evidence_tokens,
             original_completed_count=original_completed_count,
@@ -450,7 +438,6 @@ def select_context_messages(
                         system_tokens=system_tokens,
                         directive_tokens=directive_tokens,
                         tool_schema_tokens=tool_schema_tokens,
-                        summary_tokens=summary_tokens,
                         evidence_tokens=counter.count(old_candidate)
                         - counter.count(old_base),
                         historical_evidence_tokens=historical_evidence_tokens,
@@ -470,9 +457,6 @@ def select_context_messages(
                 if shorter is not None:
                     selected = shorter
                     continue
-            if summary_text is not None:
-                summary_text = None
-                continue
             if historical_evidence_limit > 0 and historical_records:
                 historical_evidence_limit = (
                     0
@@ -498,7 +482,6 @@ def select_context_messages(
                     system_tokens=system_tokens,
                     directive_tokens=directive_tokens,
                     tool_schema_tokens=tool_schema_tokens,
-                    summary_tokens=summary_tokens,
                     evidence_tokens=counter.count(candidate)
                     - counter.count(candidate_base),
                     historical_evidence_tokens=historical_evidence_tokens,
@@ -536,12 +519,6 @@ def select_context_messages(
             reason, replace(budget_report, outcome=reason.lower())
         )
 
-    if budget_report is not None and had_summary and summary_text is None:
-        budget_report = replace(
-            budget_report,
-            summary_omitted_by_budget=True,
-            projection_reasons=budget_report.projection_reasons + ("summary_budget",),
-        )
     if budget_report is not None and historical_evidence_omitted_by_budget:
         budget_report = replace(
             budget_report,
@@ -554,7 +531,6 @@ def select_context_messages(
         )
     return ContextSelection(
         messages=selected,
-        summary_text=summary_text,
         historical_evidence_text=historical_evidence_text,
         historical_evidence_omitted_by_budget=historical_evidence_omitted_by_budget,
         budget_report=budget_report,

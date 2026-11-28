@@ -275,23 +275,6 @@ class AgentContext:
         metadata={"description": "是否启用历史消息截断；不影响总输入预算闸门。"},
     )
 
-    enable_history_compaction: bool = field(
-        default=True,
-        metadata={"description": "超出历史触发阈值时，压缩较早已完成轮次。"},
-    )
-
-    history_compaction_max_output_tokens: int = field(
-        default=768,
-        metadata={"description": "历史摘要模型单次最大输出 Token。"},
-    )
-
-    history_compaction_retry_new_tokens: int = field(
-        default=512,
-        metadata={
-            "description": "压缩被拒绝后，候选来源至少新增该 Token 数才重试。"
-        },
-    )
-
     def __post_init__(self) -> None:
         apply_environment_overrides(self)
         self._validate_execution_budget()
@@ -317,10 +300,6 @@ class AgentContext:
             raise ValueError("history_rich_tokens 不能为负数")
         if self.history_recent_rich_turns < 0:
             raise ValueError("history_recent_rich_turns 不能为负数")
-        if self.history_compaction_max_output_tokens < 1:
-            raise ValueError("history_compaction_max_output_tokens 必须大于 0")
-        if self.history_compaction_retry_new_tokens < 1:
-            raise ValueError("history_compaction_retry_new_tokens 必须大于 0")
 
     @property
     def minimum_recursion_limit(self) -> int:

@@ -16,10 +16,6 @@ from react_agent.agent.context_management.budget_policy import (
 from react_agent.agent.context_management.budgeting import (
     MessageTokenCounter,
 )
-from react_agent.agent.context_management.compaction import (
-    load_valid_summary,
-    render_summary,
-)
 from react_agent.agent.context_management.contracts import (
     ContextBudget,
     ContextBudgetExceeded,
@@ -304,13 +300,7 @@ def build_model_context(
 ) -> ModelContext:
     """协调消息选择、预算策略与协议校验，返回模型输入及诊断。"""
     source_messages = list(state.messages)
-    full_filtered = filter_runtime_sentinels(source_messages)
-    summary, summarized_count = load_valid_summary(
-        state.conversation_summary, full_filtered
-    )
-    summary_text = render_summary(summary) if summary else None
-    filtered = full_filtered[summarized_count:]
-    source_segments = segment_current_turn(filtered)
+    source_segments = segment_current_turn(filter_runtime_sentinels(source_messages))
     projected_history = project_historical_turns(
         list(source_segments.completed), state.conversation_turn_memories
     )
@@ -331,7 +321,6 @@ def build_model_context(
             system_prompt=system_prompt,
             directive=directive,
             bound_tools=bound_tools,
-            summary_text=summary_text,
             turn_evidence=state.turn_evidence,
             turn_evidence_omitted_count=state.turn_evidence_omitted_count,
             conversation_evidence=historical_fallback_records,
@@ -343,18 +332,14 @@ def build_model_context(
         )
     except ContextBudgetExceeded as exc:
         exc.completed_model_messages = tuple(latest_turn_ai_messages(source_messages))
-        exc.compaction_usage = state.turn_compaction_usage
         raise
 
     selected = repair_and_validate_tool_exchanges(selection.messages)
-    summary_text = selection.summary_text
     historical_evidence_text = selection.historical_evidence_text
     budget_report = selection.budget_report
     model_input: list[Any] = [{"role": "system", "content": system_prompt}]
     if directive:
         model_input.append({"role": "system", "content": directive})
-    if summary_text:
-        model_input.append({"role": "assistant", "content": summary_text})
     if historical_evidence_text:
         model_input.append(
             {"role": "assistant", "content": historical_evidence_text}
@@ -362,11 +347,8 @@ def build_model_context(
     model_input.extend(selected)
     diagnostics = ContextDiagnostics(
         source_message_count=len(source_messages),
-        selected_message_count=len(selected)
-        + bool(summary_text)
-        + bool(historical_evidence_text),
+        selected_message_count=len(selected) + bool(historical_evidence_text),
         estimated_history_tokens=counter.count(selected)
-        + (counter.count([{"content": summary_text}]) if summary_text else 0)
         + (
             counter.count([{"content": historical_evidence_text}])
             if historical_evidence_text
@@ -389,11 +371,9 @@ def build_model_context(
             )
             + selection.historical_evidence_omitted_by_budget
         ),
-        history_truncated=bool(summarized_count)
-        or removed_historical_protocol_messages > 0
-        or selection.history_truncated,
-        summary_included=bool(summary_text),
-        summarized_message_count=summarized_count if summary_text else 0,
+        history_truncated=(
+            removed_historical_protocol_messages > 0 or selection.history_truncated
+        ),
     )
     return ModelContext(
         messages=tuple(model_input),
@@ -424,14 +404,7 @@ def build_finalization_context(
 ) -> ModelContext:
     """构造仅面向最终回答的上下文，不向模型暴露工具调用协议。"""
     source_messages = list(state.messages)
-    full_filtered = filter_runtime_sentinels(source_messages)
-    summary, summarized_count = load_valid_summary(
-        state.conversation_summary, full_filtered
-    )
-    summary_text = render_summary(summary) if summary else None
-
-    filtered = full_filtered[summarized_count:]
-    segments = segment_current_turn(filtered)
+    segments = segment_current_turn(filter_runtime_sentinels(source_messages))
     user_text = _current_user_text(segments.current)
     if not user_text:
         raise ValueError("finalizer 上下文缺少当前用户问题")
@@ -492,7 +465,6 @@ def build_finalization_context(
             system_prompt=system_prompt,
             directive=directive,
             bound_tools=(),
-            summary_text=summary_text,
             turn_evidence=[],
             turn_evidence_omitted_count=0,
             conversation_evidence=historical_fallback_records,
@@ -504,11 +476,9 @@ def build_finalization_context(
         )
     except ContextBudgetExceeded as exc:
         exc.completed_model_messages = tuple(latest_turn_ai_messages(source_messages))
-        exc.compaction_usage = state.turn_compaction_usage
         raise
 
     selected = selection.messages
-    summary_text = selection.summary_text
     historical_evidence_text = selection.historical_evidence_text
     budget_report = selection.budget_report
     if budget_report is not None:
@@ -534,8 +504,6 @@ def build_finalization_context(
     model_input: list[Any] = [{"role": "system", "content": system_prompt}]
     if directive:
         model_input.append({"role": "system", "content": directive})
-    if summary_text:
-        model_input.append({"role": "assistant", "content": summary_text})
     if historical_evidence_text:
         model_input.append(
             {"role": "assistant", "content": historical_evidence_text}
@@ -545,11 +513,8 @@ def build_finalization_context(
     removed_protocol_messages = len(segments.completed) - len(history)
     diagnostics = ContextDiagnostics(
         source_message_count=len(source_messages),
-        selected_message_count=len(selected)
-        + bool(summary_text)
-        + bool(historical_evidence_text),
+        selected_message_count=len(selected) + bool(historical_evidence_text),
         estimated_history_tokens=counter.count(selected)
-        + (counter.count([{"content": summary_text}]) if summary_text else 0)
         + (
             counter.count([{"content": historical_evidence_text}])
             if historical_evidence_text
@@ -572,11 +537,9 @@ def build_finalization_context(
             )
             + selection.historical_evidence_omitted_by_budget
         ),
-        history_truncated=bool(summarized_count)
-        or removed_protocol_messages > 0
-        or selection.history_truncated,
-        summary_included=bool(summary_text),
-        summarized_message_count=summarized_count if summary_text else 0,
+        history_truncated=(
+            removed_protocol_messages > 0 or selection.history_truncated
+        ),
     )
     return ModelContext(
         messages=tuple(model_input),
