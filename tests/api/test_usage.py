@@ -479,6 +479,7 @@ def _budget_error(
         reason,
         BudgetReport(
             input_limit_tokens=20,
+            input_target_tokens=18,
             estimated_input_tokens=100,
             system_tokens=5,
             directive_tokens=0,

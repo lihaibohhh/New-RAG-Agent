@@ -73,8 +73,9 @@ Recall、MRR、nDCG 和 P95 延迟的联合评测为依据。
 
 ## 分离业务预算与图熔断
 
-`MAX_MODEL_ROUNDS`、`MAX_TOOL_BATCHES`、`MAX_TOOL_RETRIES` 和
-`RAG_CALL_LIMIT` 表达业务预算；`RECURSION_LIMIT` 只防止图异常循环。
+`MAX_MODEL_ROUNDS`、`MAX_TOOL_BATCHES`、`MAX_TOOL_RETRIES`、
+`RAG_CALL_LIMIT`、`SEARCH_CALL_LIMIT` 和 `TOTAL_TOOL_CALL_LIMIT`
+表达业务预算；`RECURSION_LIMIT` 只防止图异常循环。
 
 剩余步骤判断拆成多个函数，是因为它们位于不同生命周期位置：
 
@@ -89,7 +90,8 @@ Recall、MRR、nDCG 和 P95 延迟的联合评测为依据。
 ## RAG 配额与连续未命中
 
 `RAG_CALL_LIMIT` 是当前用户轮的独立 RAG 次数上限；其他工具不会直接扣减它，但会
-共享工具批次和图步骤预算。
+共享总工具次数、工具批次和图步骤预算。RAG/Search 的软额度允许模型为新的、
+非重复查询使用扩展额度；硬额度负责确定性终止。
 
 `CONSECUTIVE_FAILURE_THRESHOLD` 统计连续
 `has_relevant_content=False` 的 RAG 结果。达到阈值后继续改写相似查询通常收益很低，

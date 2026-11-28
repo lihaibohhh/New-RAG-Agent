@@ -24,6 +24,8 @@ from react_agent.agent.context_management.evidence import (
 from react_agent.agent.context_management.projection import (
     project_completed_tool_messages,
     project_current_tool_messages,
+    project_historical_turns,
+    resolve_historical_turn_memories,
 )
 from react_agent.agent.context_management.segmentation import (
     collapse_consecutive_humans,
@@ -44,6 +46,59 @@ class ContextSelection:
     completed_message_count: int
     current_turn_message_count: int
     history_truncated: bool
+    historical_turn_levels: tuple[tuple[str, str], ...]
+
+
+_HISTORY_LEVELS = ("L0", "L1", "L2", "L3")
+
+
+def _advance_oldest_turn_level(
+    levels: dict[str, str],
+    *,
+    summaries: dict[str, bool],
+    recent_rich_turns: int = 4,
+) -> bool:
+    """优先逐级降低较早轮次，最近四轮最后处理。"""
+    turn_ids = list(levels)
+    split = max(0, len(turn_ids) - max(0, recent_rich_turns))
+    preferred = [*turn_ids[:split], *turn_ids[split:]]
+    for turn_id in preferred:
+        current = levels[turn_id]
+        if current == "L3":
+            continue
+        next_index = _HISTORY_LEVELS.index(current) + 1
+        next_level = _HISTORY_LEVELS[next_index]
+        if next_level == "L2" and not summaries.get(turn_id, False):
+            next_level = "L3"
+        levels[turn_id] = next_level
+        return True
+    return False
+
+
+def _historical_evidence_tokens(
+    memories: list[Any],
+    levels: dict[str, str],
+    counter: MessageTokenCounter,
+) -> int:
+    """估算逐轮投影中真正保留的历史证据正文。"""
+    excerpts: list[dict[str, str]] = []
+    for memory in memories:
+        level = levels.get(memory.turn_id, memory.compression_level)
+        if level == "L3":
+            continue
+        evidence = list(memory.evidence)
+        if level == "L2":
+            evidence = evidence[:1]
+        for item in evidence:
+            limit = None
+            if level == "L1":
+                limit = 160 if item.kind == "web_search" else 240
+            elif level == "L2":
+                limit = 120
+            excerpt = item.exact_excerpt if limit is None else item.exact_excerpt[:limit]
+            if excerpt:
+                excerpts.append({"content": excerpt})
+    return counter.count(excerpts)
 
 
 def _drop_oldest_completed_turn(messages: list[Any]) -> list[Any] | None:
@@ -75,6 +130,7 @@ def _budget_report(
     tool_content_chars_removed: int = 0,
     evidence_excerpt_chars_removed: int = 0,
     evidence_records_omitted_by_budget: int = 0,
+    historical_turn_levels: tuple[tuple[str, str], ...] = (),
 ) -> BudgetReport:
     segments = segment_current_turn(projected)
     current = list(segments.current)
@@ -97,11 +153,24 @@ def _budget_report(
             (tool_content_chars_removed > 0, "tool_payload_budget"),
             (evidence_excerpt_chars_removed > 0, "evidence_excerpt_budget"),
             (evidence_records_omitted_by_budget > 0, "evidence_record_budget"),
+            (
+                any(level == "L1" for _, level in historical_turn_levels),
+                "history_level_l1",
+            ),
+            (
+                any(level == "L2" for _, level in historical_turn_levels),
+                "history_level_l2",
+            ),
+            (
+                any(level == "L3" for _, level in historical_turn_levels),
+                "history_level_l3",
+            ),
         )
         if applied
     )
     return BudgetReport(
         input_limit_tokens=budget.input_limit_tokens,
+        input_target_tokens=budget.input_target_tokens,
         estimated_input_tokens=estimated_input_tokens,
         system_tokens=system_tokens,
         directive_tokens=directive_tokens,
@@ -124,6 +193,9 @@ def _budget_report(
         evidence_excerpt_chars_removed=evidence_excerpt_chars_removed,
         evidence_records_omitted_by_budget=evidence_records_omitted_by_budget,
         projection_reasons=projection_reasons,
+        historical_turn_levels=historical_turn_levels,
+        token_estimate_multiplier=budget.token_estimate_multiplier,
+        soft_target_exceeded=estimated_input_tokens > budget.input_target_tokens,
     )
 
 
@@ -180,13 +252,85 @@ def select_context_messages(
     turn_evidence_omitted_count: int,
     conversation_evidence: list[dict[str, Any]],
     conversation_evidence_omitted_count: int,
+    historical_source_messages: list[Any] | None = None,
+    turn_memories: list[dict[str, Any]] | None = None,
 ) -> ContextSelection:
     """统一应用历史上限与总输入预算，保持当前轮工具交换完整。"""
     original_segments = segment_current_turn(messages)
     original_completed_count = len(original_segments.completed)
     selected = list(messages)
     history_truncated = False
-    if config.enable_history_truncation and config.max_history_tokens > 0:
+    source_history = list(historical_source_messages or [])
+    resolved_memories = resolve_historical_turn_memories(
+        source_history, list(turn_memories or [])
+    )
+    turn_levels = {
+        memory.turn_id: memory.compression_level for memory in resolved_memories
+    }
+    turn_summaries = {
+        memory.turn_id: bool(memory.summary) for memory in resolved_memories
+    }
+    turn_memory_mode = bool(turn_levels)
+    history_floor_exceeded = False
+    recent_rich_turns = int(getattr(config, "history_recent_rich_turns", 4))
+    history_evidence_tokens = int(
+        getattr(config, "history_evidence_tokens", config.max_history_tokens)
+    )
+    history_rich_tokens = int(
+        getattr(config, "history_rich_tokens", config.max_history_tokens)
+    )
+
+    def projected_turn_history() -> list[Any]:
+        return project_historical_turns(
+            source_history,
+            list(turn_memories or []),
+            level_overrides=turn_levels,
+        )
+
+    def reproject_turn_history() -> list[Any]:
+        history = projected_turn_history()
+        return collapse_consecutive_humans(
+            [*history, *list(original_segments.current)]
+        )
+
+    if turn_memory_mode:
+        selected = reproject_turn_history()
+        if config.enable_history_truncation and config.max_history_tokens > 0:
+            while _historical_evidence_tokens(
+                resolved_memories, turn_levels, counter
+            ) > min(history_evidence_tokens, config.max_history_tokens):
+                if not _advance_oldest_turn_level(
+                    turn_levels,
+                    summaries=turn_summaries,
+                    recent_rich_turns=recent_rich_turns,
+                ):
+                    break
+                selected = reproject_turn_history()
+            while counter.count(projected_turn_history()) > min(
+                history_rich_tokens, config.max_history_tokens
+            ):
+                if not _advance_oldest_turn_level(
+                    turn_levels,
+                    summaries=turn_summaries,
+                    recent_rich_turns=recent_rich_turns,
+                ):
+                    break
+                selected = reproject_turn_history()
+            while counter.count(projected_turn_history()) > config.max_history_tokens:
+                if not _advance_oldest_turn_level(
+                    turn_levels,
+                    summaries=turn_summaries,
+                    recent_rich_turns=recent_rich_turns,
+                ):
+                    break
+                selected = reproject_turn_history()
+            history_truncated = any(
+                level != "L0" for level in turn_levels.values()
+            )
+            history_floor_exceeded = (
+                counter.count(projected_turn_history()) > config.max_history_tokens
+            )
+    elif config.enable_history_truncation and config.max_history_tokens > 0:
         source_tokens = counter.count(selected)
         trimmed = trim_history_to_budget(
             selected,
@@ -223,6 +367,7 @@ def select_context_messages(
         tool_schema_tokens = estimate_tool_schema_tokens(
             bound_tools, token_counter=counter
         )
+        active_limit_tokens = budget.input_target_tokens
 
     while True:
         historical_records = select_historical_evidence(
@@ -267,17 +412,27 @@ def select_context_messages(
             evidence_tokens=evidence_tokens,
             historical_evidence_tokens=historical_evidence_tokens,
             original_completed_count=original_completed_count,
+            historical_turn_levels=tuple(turn_levels.items()),
         )
         fixed_tokens = system_tokens + directive_tokens + tool_schema_tokens
         if fixed_tokens > budget.input_limit_tokens:
             reason = "FIXED_CONTEXT_TOO_LARGE"
         elif fixed_tokens + budget_report.current_user_tokens > budget.input_limit_tokens:
             reason = "USER_INPUT_TOO_LARGE"
-        elif budget_report.estimated_input_tokens <= budget.input_limit_tokens:
+        elif history_floor_exceeded:
+            reason = "HISTORY_QUESTIONS_TOO_LARGE"
+        elif budget_report.estimated_input_tokens <= active_limit_tokens:
             selected = projected
             break
         else:
             if segment_current_turn(selected).completed:
+                if turn_memory_mode and _advance_oldest_turn_level(
+                    turn_levels,
+                    summaries=turn_summaries,
+                    recent_rich_turns=recent_rich_turns,
+                ):
+                    selected = reproject_turn_history()
+                    continue
                 for tool_chars in (2048, 1024, 512, 256, 0):
                     old_base, projected_count, removed_chars = (
                         project_completed_tool_messages(
@@ -302,17 +457,19 @@ def select_context_messages(
                         original_completed_count=original_completed_count,
                         projected_tool_message_count=projected_count,
                         tool_content_chars_removed=removed_chars,
+                        historical_turn_levels=tuple(turn_levels.items()),
                     )
-                    if candidate_report.estimated_input_tokens <= budget.input_limit_tokens:
+                    if candidate_report.estimated_input_tokens <= active_limit_tokens:
                         selected = old_candidate
                         budget_report = candidate_report
                         break
-                if budget_report.estimated_input_tokens <= budget.input_limit_tokens:
+                if budget_report.estimated_input_tokens <= active_limit_tokens:
                     break
-            shorter = _drop_oldest_completed_turn(selected)
-            if shorter is not None:
-                selected = shorter
-                continue
+            if not turn_memory_mode:
+                shorter = _drop_oldest_completed_turn(selected)
+                if shorter is not None:
+                    selected = shorter
+                    continue
             if summary_text is not None:
                 summary_text = None
                 continue
@@ -350,13 +507,30 @@ def select_context_messages(
                     tool_content_chars_removed=removed_chars,
                     evidence_excerpt_chars_removed=excerpt_chars_removed,
                     evidence_records_omitted_by_budget=records_omitted,
+                    historical_turn_levels=tuple(turn_levels.items()),
                 )
-                if budget_report.estimated_input_tokens <= budget.input_limit_tokens:
+                if budget_report.estimated_input_tokens <= active_limit_tokens:
                     selected = candidate
                     break
             else:
-                reason = "CURRENT_TURN_CONTEXT_TOO_LARGE"
-            if budget_report.estimated_input_tokens <= budget.input_limit_tokens:
+                if active_limit_tokens < budget.input_limit_tokens:
+                    active_limit_tokens = budget.input_limit_tokens
+                    continue
+                minimal_history_tokens = counter.count(
+                    list(segment_current_turn(selected).completed)
+                )
+                reason = (
+                    "HISTORY_QUESTIONS_TOO_LARGE"
+                    if turn_memory_mode
+                    and turn_levels
+                    and all(level == "L3" for level in turn_levels.values())
+                    and fixed_tokens
+                    + budget_report.current_user_tokens
+                    + minimal_history_tokens
+                    > budget.input_limit_tokens
+                    else "CURRENT_TURN_CONTEXT_TOO_LARGE"
+                )
+            if budget_report.estimated_input_tokens <= active_limit_tokens:
                 break
         raise ContextBudgetExceeded(
             reason, replace(budget_report, outcome=reason.lower())
@@ -387,5 +561,7 @@ def select_context_messages(
         completed_message_count=len(original_segments.completed),
         current_turn_message_count=len(original_segments.current),
         history_truncated=history_truncated
+        or any(level != "L0" for level in turn_levels.values())
         or bool(budget_report and budget_report.dropped_completed_message_count),
+        historical_turn_levels=tuple(turn_levels.items()),
     )

@@ -116,6 +116,12 @@ class State(InputState):
     conversation_evidence_scanned_message_count: int = 0
     """跨轮来源索引已扫描到的完整消息数量，用于旧 Checkpoint 增量迁移。"""
 
+    conversation_turn_memories: List[Dict[str, Any]] = field(default_factory=list)
+    """以用户轮次为边界的派生记忆；不替换或改写原始 messages。"""
+
+    conversation_turn_evidence_omitted_count: int = 0
+    """因工具输出或派生记忆容量限制而未保存的历史证据数。"""
+
     conversation_summary: Optional[Dict[str, Any]] = None
     """已完成旧轮次的派生摘要、来源消息 ID 与游标；不替换 messages 原文。"""
 
@@ -175,6 +181,8 @@ class State(InputState):
     pricing_tariff: str = ""
     pricing_rate_card_version: str = ""
     llm_call_count: int = 0
+    last_context_diagnostics: Dict[str, Any] = field(default_factory=dict)
+    """最近一次模型调用的估算/实测 Token 校准与上下文分项。"""
 
     pending_directive: Optional[str] = None
     """瞬态系统控制指令（如反思提示）。reflection_node 写入，call_model 读取后作为 SystemMessage

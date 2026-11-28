@@ -14,6 +14,12 @@ class ExecutionBudget(Protocol):
     max_tool_batches: int
     max_tool_retries: int
     rag_call_limit: int
+    search_call_limit: int
+    total_tool_call_limit: int
+    rag_soft_call_limit: int
+    search_soft_call_limit: int
+    rag_max_parallel: int
+    search_max_parallel: int
     consecutive_failure_threshold: int
 
 
@@ -22,6 +28,9 @@ class TerminationReason(str, Enum):
     TOOL_BATCH_BUDGET_EXHAUSTED = "TOOL_BATCH_BUDGET_EXHAUSTED"
     TOOL_RETRY_BUDGET_EXHAUSTED = "TOOL_RETRY_BUDGET_EXHAUSTED"
     RAG_CALL_BUDGET_EXHAUSTED = "RAG_CALL_BUDGET_EXHAUSTED"
+    SEARCH_CALL_BUDGET_EXHAUSTED = "SEARCH_CALL_BUDGET_EXHAUSTED"
+    TOTAL_TOOL_CALL_BUDGET_EXHAUSTED = "TOTAL_TOOL_CALL_BUDGET_EXHAUSTED"
+    TOOL_FAILURE_CIRCUIT_OPEN = "TOOL_FAILURE_CIRCUIT_OPEN"
     RAG_CONSECUTIVE_MISS = "RAG_CONSECUTIVE_MISS"
     EVIDENCE_OUTPUT_BUDGET_EXHAUSTED = "EVIDENCE_OUTPUT_BUDGET_EXHAUSTED"
     GRAPH_STEP_BUDGET_EXHAUSTED = "GRAPH_STEP_BUDGET_EXHAUSTED"
@@ -76,10 +85,23 @@ def validate_execution_budget(config: ExecutionBudget) -> None:
         "max_model_rounds": config.max_model_rounds,
         "max_tool_batches": config.max_tool_batches,
         "max_tool_retries": config.max_tool_retries,
+        "rag_call_limit": config.rag_call_limit,
+        "search_call_limit": config.search_call_limit,
+        "total_tool_call_limit": config.total_tool_call_limit,
+        "rag_soft_call_limit": config.rag_soft_call_limit,
+        "search_soft_call_limit": config.search_soft_call_limit,
+        "rag_max_parallel": config.rag_max_parallel,
+        "search_max_parallel": config.search_max_parallel,
     }
     invalid = [name for name, value in limits.items() if value < 1]
     if invalid:
         raise ValueError(f"Agent 业务预算必须大于 0: {', '.join(invalid)}")
+    if config.rag_soft_call_limit > config.rag_call_limit:
+        raise ValueError("rag_soft_call_limit 不能大于 rag_call_limit")
+    if config.search_soft_call_limit > config.search_call_limit:
+        raise ValueError("search_soft_call_limit 不能大于 search_call_limit")
+    if max(config.rag_call_limit, config.search_call_limit) > config.total_tool_call_limit:
+        raise ValueError("单类工具硬上限不能大于 total_tool_call_limit")
 
     required = minimum_recursion_limit(
         max_model_rounds=config.max_model_rounds,
@@ -98,18 +120,31 @@ def model_termination_reason(
     *,
     tool_names: list[str],
     retrieval_tool_names: frozenset[str],
+    search_tool_names: frozenset[str],
     next_model_round: int,
     completed_tool_batches: int,
     attempted_rag_calls: int,
+    attempted_search_calls: int,
+    attempted_total_tool_calls: int,
 ) -> str | None:
     """模型请求工具后，判断是否应先闭合调用并主动收口。"""
     if not tool_names:
         return None
     if (
+        attempted_total_tool_calls >= config.total_tool_call_limit
+        and tool_names
+    ):
+        return TerminationReason.TOTAL_TOOL_CALL_BUDGET_EXHAUSTED.value
+    if (
         attempted_rag_calls >= config.rag_call_limit
         and any(name in retrieval_tool_names for name in tool_names)
     ):
         return TerminationReason.RAG_CALL_BUDGET_EXHAUSTED.value
+    if (
+        attempted_search_calls >= config.search_call_limit
+        and any(name in search_tool_names for name in tool_names)
+    ):
+        return TerminationReason.SEARCH_CALL_BUDGET_EXHAUSTED.value
     if next_model_round >= config.max_model_rounds:
         return TerminationReason.MODEL_ROUND_BUDGET_EXHAUSTED.value
     if completed_tool_batches >= config.max_tool_batches:

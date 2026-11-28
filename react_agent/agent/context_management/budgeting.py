@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import math
+from dataclasses import dataclass
+from threading import Lock
 from typing import Any
 
 from react_agent.agent.context_management.segmentation import (
@@ -29,7 +32,10 @@ def _estimate_text_tokens(text: str) -> int:
 class MessageTokenCounter:
     """在一次上下文构造中，每条消息只估算一次。"""
 
-    def __init__(self) -> None:
+    def __init__(self, *, multiplier: float = 1.0) -> None:
+        if multiplier < 1.0:
+            raise ValueError("token estimate multiplier cannot be less than 1.0")
+        self.multiplier = multiplier
         self._cache: dict[int, tuple[Any, int]] = {}
 
     def count(self, messages: list[Any]) -> int:
@@ -48,11 +54,63 @@ class MessageTokenCounter:
             content = getattr(message, "content", "")
             tool_calls = getattr(message, "tool_calls", None) or []
         text = _serialized_text(content or "")
-        tokens = 4 + _estimate_text_tokens(text)
+        raw_tokens = 4 + _estimate_text_tokens(text)
         for tool_call in tool_calls:
-            tokens += _estimate_text_tokens(_serialized_text(tool_call))
+            raw_tokens += _estimate_text_tokens(_serialized_text(tool_call))
+        tokens = math.ceil(raw_tokens * self.multiplier)
         self._cache[key] = (message, tokens)
         return tokens
+
+
+@dataclass(frozen=True)
+class TokenEstimateCalibration:
+    """进程内某模型的保守估算校准快照。"""
+
+    multiplier: float = 1.0
+    sample_count: int = 0
+    last_error_ratio: float | None = None
+
+
+_CALIBRATION_LOCK = Lock()
+_CALIBRATIONS: dict[str, TokenEstimateCalibration] = {}
+
+
+def token_estimate_calibration(model_ref: str) -> TokenEstimateCalibration:
+    """返回模型当前校准值；未知模型使用保守基线 1.0。"""
+    key = (model_ref or "unknown").strip().lower()
+    with _CALIBRATION_LOCK:
+        return _CALIBRATIONS.get(key, TokenEstimateCalibration())
+
+
+def observe_token_estimate(
+    model_ref: str,
+    *,
+    estimated_tokens: int,
+    actual_prompt_tokens: int,
+    applied_multiplier: float,
+) -> TokenEstimateCalibration:
+    """用实际 prompt_tokens 更新 EWMA，只上调、不低于无依赖估算基线。"""
+    if estimated_tokens < 1 or actual_prompt_tokens < 1 or applied_multiplier < 1.0:
+        return token_estimate_calibration(model_ref)
+    raw_estimate = estimated_tokens / applied_multiplier
+    error_ratio = actual_prompt_tokens / estimated_tokens
+    base_ratio = actual_prompt_tokens / max(1.0, raw_estimate)
+    key = (model_ref or "unknown").strip().lower()
+    with _CALIBRATION_LOCK:
+        previous = _CALIBRATIONS.get(key, TokenEstimateCalibration())
+        observed = min(3.0, max(1.0, base_ratio * 1.05))
+        multiplier = (
+            observed
+            if previous.sample_count == 0
+            else min(3.0, max(1.0, previous.multiplier * 0.8 + observed * 0.2))
+        )
+        updated = TokenEstimateCalibration(
+            multiplier=multiplier,
+            sample_count=previous.sample_count + 1,
+            last_error_ratio=error_ratio,
+        )
+        _CALIBRATIONS[key] = updated
+        return updated
 
 
 def estimate_tool_schema_tokens(
@@ -103,7 +161,10 @@ def trim_history_to_budget(
 
 __all__ = [
     "MessageTokenCounter",
+    "TokenEstimateCalibration",
     "estimate_message_tokens",
     "estimate_tool_schema_tokens",
+    "observe_token_estimate",
+    "token_estimate_calibration",
     "trim_history_to_budget",
 ]

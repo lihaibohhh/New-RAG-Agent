@@ -241,6 +241,10 @@ def plan_compaction(
     """达到历史阈值后，取游标后的最早完整轮次，保留近期三轮。"""
     if not config.enable_history_compaction or not config.enable_history_truncation:
         return None
+    # 新会话使用 TurnMemory 的逐轮 L0-L3 确定性投影；累积式单摘要仅保留
+    # 给尚未生成 TurnMemory 的内部测试/兼容路径，不再参与新会话压缩。
+    if getattr(state, "conversation_turn_memories", None):
+        return None
     messages = filter_runtime_sentinels(state.messages)
     previous, covered_count = load_valid_summary(state.conversation_summary, messages)
     if state.conversation_summary and previous is None:

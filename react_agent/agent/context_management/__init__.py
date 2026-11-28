@@ -10,10 +10,15 @@ from react_agent.agent.context_management.contracts import (
     ContextBudgetExceeded,
     ContextDiagnostics,
     ConversationSummary,
+    EvidenceSnapshot,
     ModelContext,
+    TurnMemory,
     TurnSegments,
 )
 from react_agent.agent.context_management.segmentation import latest_turn_ai_messages
+from react_agent.agent.context_management.turn_memory import (
+    materialize_completed_turn_memories,
+)
 
 
 __all__ = [
@@ -22,9 +27,12 @@ __all__ = [
     "ContextBudgetExceeded",
     "ContextDiagnostics",
     "ConversationSummary",
+    "EvidenceSnapshot",
     "ModelContext",
+    "TurnMemory",
     "TurnSegments",
     "build_finalization_context",
     "build_model_context",
     "latest_turn_ai_messages",
+    "materialize_completed_turn_memories",
 ]

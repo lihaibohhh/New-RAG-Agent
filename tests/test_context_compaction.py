@@ -10,7 +10,11 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
 
 from react_agent.agent.config import AgentContext
-from react_agent.agent.context_management import ContextBudget, build_model_context
+from react_agent.agent.context_management import (
+    ContextBudget,
+    TurnMemory,
+    build_model_context,
+)
 from react_agent.agent.context_management.compaction import (
     accept_compaction,
     compaction_messages,
@@ -94,11 +98,31 @@ def test_context_defaults_increase_history_and_total_budget(monkeypatch) -> None
     monkeypatch.delenv("HISTORY_COMPACTION_MAX_OUTPUT_TOKENS", raising=False)
     monkeypatch.delenv("HISTORY_COMPACTION_RETRY_NEW_TOKENS", raising=False)
     config = AgentContext()
-    assert config.max_history_tokens == 80000
-    assert config.max_input_tokens == 96000
+    assert config.max_history_tokens == 64000
+    assert config.max_input_tokens == 144000
+    assert config.model_input_target_tokens == 132000
+    assert config.history_rich_tokens == 44000
+    assert config.history_evidence_tokens == 18000
+    assert config.history_recent_rich_turns == 4
     assert config.enable_history_compaction is True
     assert config.history_compaction_max_output_tokens == 768
     assert config.history_compaction_retry_new_tokens == 512
+
+
+def test_turn_memory_sessions_do_not_create_legacy_cumulative_summary() -> None:
+    old, recent, current = _messages()
+    memory = TurnMemory(
+        turn_id="m1",
+        user_messages=(str(old[0].content),),
+        final_answer=str(old[-1].content),
+        summary="资本开支历史轮次摘要",
+    )
+    state = State(
+        messages=[*old, *recent, *current],
+        conversation_turn_memories=[memory.to_state()],
+    )
+
+    assert plan_compaction(state, _config()) is None
 
 
 def test_summary_preserves_numbers_negation_sources_and_later_correction() -> None:

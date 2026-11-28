@@ -187,6 +187,36 @@ class AgentContext:
         },
     )
 
+    search_call_limit: int = field(
+        default=7,
+        metadata={"description": "单轮联网搜索实际执行次数硬上限。"},
+    )
+
+    total_tool_call_limit: int = field(
+        default=13,
+        metadata={"description": "单轮所有工具实际执行次数硬上限。"},
+    )
+
+    rag_soft_call_limit: int = field(
+        default=3,
+        metadata={"description": "知识检索普通额度；仅新查询可进入扩展额度。"},
+    )
+
+    search_soft_call_limit: int = field(
+        default=4,
+        metadata={"description": "联网搜索普通额度；仅新查询可进入扩展额度。"},
+    )
+
+    rag_max_parallel: int = field(
+        default=1,
+        metadata={"description": "单个工具执行波次内知识检索最大并发数。"},
+    )
+
+    search_max_parallel: int = field(
+        default=2,
+        metadata={"description": "单个工具执行波次内联网搜索最大并发数。"},
+    )
+
     consecutive_failure_threshold: int = field(
         default=2,
         metadata={
@@ -200,17 +230,39 @@ class AgentContext:
     # -----------------------------
 
     max_history_tokens: int = field(
-        default=80000,
+        default=64000,
         metadata={
             "description": "发给模型前保留的最大历史估算 token 数；最终仍受总输入预算约束。"
         },
     )
 
     max_input_tokens: int = field(
-        default=96000,
+        default=144000,
         metadata={
             "description": "单次模型调用的本地输入估算上限；包含提示词、工具 schema、证据和历史。"
         },
+    )
+
+    model_input_target_tokens: int = field(
+        default=132000,
+        metadata={
+            "description": "单次模型输入软目标；超过后先主动降级，硬上限仍由 max_input_tokens 决定。"
+        },
+    )
+
+    history_rich_tokens: int = field(
+        default=44000,
+        metadata={"description": "历史在该预算内尽量维持 L0 丰富投影。"},
+    )
+
+    history_evidence_tokens: int = field(
+        default=18000,
+        metadata={"description": "历史证据正文的独立估算 Token 上限。"},
+    )
+
+    history_recent_rich_turns: int = field(
+        default=4,
+        metadata={"description": "逐级压缩时最后降级的最近历史轮次数。"},
     )
 
     context_safety_margin_tokens: int = field(
@@ -247,6 +299,8 @@ class AgentContext:
             raise ValueError("max_history_tokens 不能为负数")
         if self.max_input_tokens < 1:
             raise ValueError("max_input_tokens 必须大于 0")
+        if self.model_input_target_tokens < 1:
+            raise ValueError("model_input_target_tokens 必须大于 0")
         if (
             self.enable_history_truncation
             and self.max_history_tokens > self.max_input_tokens
@@ -257,6 +311,12 @@ class AgentContext:
             )
         if self.context_safety_margin_tokens < 0:
             raise ValueError("context_safety_margin_tokens 不能为负数")
+        if self.history_evidence_tokens < 0:
+            raise ValueError("history_evidence_tokens 不能为负数")
+        if self.history_rich_tokens < 0:
+            raise ValueError("history_rich_tokens 不能为负数")
+        if self.history_recent_rich_turns < 0:
+            raise ValueError("history_recent_rich_turns 不能为负数")
         if self.history_compaction_max_output_tokens < 1:
             raise ValueError("history_compaction_max_output_tokens 必须大于 0")
         if self.history_compaction_retry_new_tokens < 1:

@@ -49,6 +49,8 @@ SYSTEM_PROMPT = """你是一个面向金融与行业研究场景、以可验证�
    - 连续 {consecutive_failure_threshold} 次无效检索后，立即执行拒答终止，不再继续。
    - 若知识检索返回了可用证据，则不计入无效次数，可继续检索其他子问题。
    - 若结果标记 truncated 或 content_truncated，只能据可见正文作答；不能推断被裁剪部分的内容。
+   - 知识检索普通额度为 {rag_soft_call_limit} 次、硬上限为 {rag_call_limit} 次；联网搜索普通额度为 {search_soft_call_limit} 次、硬上限为 {search_call_limit} 次；全部工具合计硬上限为 {total_tool_call_limit} 次。
+   - 超过普通额度后，只能为尚未覆盖的独立子问题提交非空新查询；禁止用近义改写重复检索已经覆盖的问题。
  
 3. 时效性声明：当检索结果来自多份同类型文档（如多期行业周报）时，
    必须在回答开头注明所引用文档的完整文件名，并提示用户确认是否为目标版本。
@@ -106,6 +108,9 @@ def render_finalization_directive(reason: str | None) -> str:
         "TOOL_BATCH_BUDGET_EXHAUSTED": "工具执行批次已达到上限",
         "TOOL_RETRY_BUDGET_EXHAUSTED": "工具失败恢复次数已达到上限",
         "RAG_CALL_BUDGET_EXHAUSTED": "内部知识库调用次数已达到上限",
+        "SEARCH_CALL_BUDGET_EXHAUSTED": "联网搜索调用次数已达到上限",
+        "TOTAL_TOOL_CALL_BUDGET_EXHAUSTED": "本轮工具调用总次数已达到上限",
+        "TOOL_FAILURE_CIRCUIT_OPEN": "同类工具连续失败，执行熔断器已开启",
         "RAG_CONSECUTIVE_MISS": "内部知识库连续未检索到相关内容",
         "EVIDENCE_OUTPUT_BUDGET_EXHAUSTED": "检索结果超过可展示预算，部分证据无法读取",
         "GRAPH_STEP_BUDGET_EXHAUSTED": "本轮执行空间即将耗尽",

@@ -14,6 +14,10 @@ from react_agent.agent.context_management import (
     build_finalization_context,
     build_model_context,
 )
+from react_agent.agent.context_management.budgeting import (
+    observe_token_estimate,
+    token_estimate_calibration,
+)
 from react_agent.agent.contracts.dependencies import AgentDependencies
 from react_agent.agent.contracts.state import State
 from react_agent.agent.prompts import (
@@ -66,6 +70,11 @@ def _build_system_prompt(
         language=config.language,
         tool_catalog=tool_catalog,
         consecutive_failure_threshold=config.consecutive_failure_threshold,
+        rag_soft_call_limit=config.rag_soft_call_limit,
+        rag_call_limit=config.rag_call_limit,
+        search_soft_call_limit=config.search_soft_call_limit,
+        search_call_limit=config.search_call_limit,
+        total_tool_call_limit=config.total_tool_call_limit,
     )
     selection = SkillSelection.from_state(state.selected_skill)
     if selection is not None and dependencies.skill_registry is not None:
@@ -99,11 +108,14 @@ async def invoke_chat_model(
         dependencies,
         tools_enabled=tools_enabled,
     )
+    calibration = token_estimate_calibration(dependencies.model_ref)
     context_budget = ContextBudget(
         max_input_tokens=agent_config.max_input_tokens,
+        target_input_tokens=agent_config.model_input_target_tokens,
         reserved_completion_tokens=dependencies.reserved_completion_tokens,
         safety_margin_tokens=agent_config.context_safety_margin_tokens,
         context_window_tokens=dependencies.model_context_window_tokens,
+        token_estimate_multiplier=calibration.multiplier,
     )
     if context_kind == "finalizer":
         model_context = build_finalization_context(
@@ -155,9 +167,27 @@ async def invoke_chat_model(
         raise
 
     usage = extract_model_usage(response)
+    report = model_context.budget_report
+    updated_calibration = calibration
+    estimate_error_ratio: float | None = None
+    if report is not None and usage["prompt_tokens"] > 0:
+        updated_calibration = observe_token_estimate(
+            dependencies.model_ref,
+            estimated_tokens=report.estimated_input_tokens,
+            actual_prompt_tokens=usage["prompt_tokens"],
+            applied_multiplier=report.token_estimate_multiplier,
+        )
+        estimate_error_ratio = updated_calibration.last_error_ratio
+    level_counts: dict[str, int] = {}
+    if report is not None:
+        for _, level in report.historical_turn_levels:
+            level_counts[level] = level_counts.get(level, 0) + 1
     logger.info(
         "model_call_completed | kind=%s model=%s output_limit_tokens=%s "
-        "prompt_tokens=%s output_tokens=%s reasoning_tokens=%s finish_reason=%s",
+        "prompt_tokens=%s output_tokens=%s reasoning_tokens=%s finish_reason=%s "
+        "estimated_input_tokens=%s estimate_error_ratio=%s "
+        "token_estimate_multiplier=%s compression_level_counts=%s "
+        "history_tokens=%s evidence_tokens=%s current_turn_tokens=%s",
         context_kind,
         dependencies.model_ref,
         dependencies.reserved_completion_tokens,
@@ -165,9 +195,42 @@ async def invoke_chat_model(
         usage["completion_tokens"],
         usage["reasoning_tokens"],
         model_finish_reason(response) or "unknown",
+        report.estimated_input_tokens if report else None,
+        estimate_error_ratio,
+        updated_calibration.multiplier,
+        level_counts,
+        (
+            report.recent_history_tokens + report.summary_tokens
+            if report
+            else None
+        ),
+        report.evidence_tokens if report else None,
+        (
+            report.current_user_tokens + report.current_turn_other_tokens
+            if report
+            else None
+        ),
     )
-
-    return response, model_usage_update(state, dependencies, response)
+    usage_update = model_usage_update(state, dependencies, response)
+    usage_update["last_context_diagnostics"] = {
+        "context_kind": context_kind,
+        "estimated_input_tokens": report.estimated_input_tokens if report else None,
+        "actual_prompt_tokens": usage["prompt_tokens"],
+        "estimate_error_ratio": estimate_error_ratio,
+        "token_estimate_multiplier": updated_calibration.multiplier,
+        "compression_level_counts": level_counts,
+        "history_tokens": (
+            report.recent_history_tokens + report.summary_tokens if report else 0
+        ),
+        "evidence_tokens": report.evidence_tokens if report else 0,
+        "current_turn_tokens": (
+            report.current_user_tokens + report.current_turn_other_tokens
+            if report
+            else 0
+        ),
+        "soft_target_exceeded": report.soft_target_exceeded if report else False,
+    }
+    return response, usage_update
 
 
 def _aggregate_response_usage(

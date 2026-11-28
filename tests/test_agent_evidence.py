@@ -21,6 +21,13 @@ from react_agent.agent.context_management.evidence import (
 )
 from react_agent.agent.context_management.builder import build_model_context
 from react_agent.agent.context_management.contracts import ContextBudget
+from react_agent.agent.context_management.contracts import (
+    EvidenceSnapshot,
+    TurnMemory,
+)
+from react_agent.agent.context_management.turn_memory import (
+    materialize_completed_turn_memories,
+)
 from react_agent.agent.tool_flow import bound_tool_payload, parse_tool_batch
 from react_agent.agent.workflow.nodes import (
     finalize_model,
@@ -60,6 +67,169 @@ def _rag_message(query: str, call_id: str, items: list[dict]) -> ToolMessage:
         tool_call_id=call_id,
         content=bound_tool_payload(json.dumps(payload, ensure_ascii=False), 600),
     )
+
+
+def _web_message(query: str, call_id: str, items: list[dict]) -> ToolMessage:
+    payload = tool_success(
+        tool_name="search",
+        query=query,
+        data={"results": items},
+        meta={"retrieved_at": "2026-11-24T10:00:00+08:00"},
+    )
+    return ToolMessage(
+        id=f"message-{call_id}",
+        name="search",
+        tool_call_id=call_id,
+        content=json.dumps(payload, ensure_ascii=False),
+    )
+
+
+def test_turn_memory_contract_round_trips_checkpoint_state() -> None:
+    evidence = EvidenceSnapshot(
+        kind="rag",
+        query="资本开支",
+        exact_excerpt="公司预计资本开支为 520 亿元。",
+        source_file="report.pdf",
+        source_page=12,
+        chunk_id="report::12",
+        rank=1,
+        tool_message_id="tool-message-1",
+    )
+    memory = TurnMemory(
+        turn_id="human-1",
+        user_messages=("资本开支是多少？",),
+        final_answer="预计为 520 亿元。",
+        evidence=(evidence,),
+        source_message_ids=("human-1", "tool-message-1", "answer-1"),
+    )
+
+    assert TurnMemory.from_state(memory.to_state()) == memory
+
+
+def test_completed_turn_memory_keeps_bounded_rag_and_web_excerpts() -> None:
+    rag_items = [
+        {
+            "source": f"report-{index}.pdf",
+            "page": index + 1,
+            "chunk_id": f"chunk-{index}",
+            "content": f"RAG-{index}-" + "证" * 700,
+        }
+        for index in range(4)
+    ]
+    web_items = [
+        {
+            "title": f"网页 {index}",
+            "url": f"https://example.com/{index}",
+            "content": f"WEB-{index}-" + "闻" * 400,
+            "published_date": f"2026-11-{index + 1:02d}",
+        }
+        for index in range(3)
+    ]
+    rag_payload = tool_success(
+        tool_name="query_internal_knowledge",
+        query="资本开支",
+        data={"results": rag_items, "has_relevant_content": True},
+        meta={"has_relevant_content": True},
+    )
+    rag_message = ToolMessage(
+        id="message-rag-call",
+        name="query_internal_knowledge",
+        tool_call_id="rag-call",
+        content=json.dumps(rag_payload, ensure_ascii=False),
+    )
+    messages = [
+        HumanMessage(id="human-1", content="研究资本开支和相关新闻"),
+        AIMessage(
+            id="planner-1",
+            content="",
+            tool_calls=[
+                {
+                    "id": "rag-call",
+                    "name": "query_internal_knowledge",
+                    "args": {"query": "资本开支"},
+                }
+            ],
+        ),
+        rag_message,
+        AIMessage(
+            id="planner-2",
+            content="",
+            tool_calls=[
+                {"id": "web-call", "name": "search", "args": {"query": "新闻"}}
+            ],
+        ),
+        _web_message("资本开支 新闻", "web-call", web_items),
+        AIMessage(id="answer-1", content="历史最终回答"),
+        HumanMessage(id="human-2", content="继续追问"),
+    ]
+
+    memories, omitted = materialize_completed_turn_memories(
+        messages,
+        retrieval_tool_names=RETRIEVAL_TOOL_NAMES,
+        web_search_tool_names=frozenset({"search"}),
+    )
+
+    assert len(memories) == 1
+    memory = memories[0]
+    assert memory.turn_id == "human-1"
+    assert memory.user_messages == ("研究资本开支和相关新闻",)
+    assert memory.final_answer == "历史最终回答"
+    assert memory.compression_level == "L0"
+    assert [record.kind for record in memory.evidence] == [
+        "rag",
+        "rag",
+        "rag",
+        "web_search",
+        "web_search",
+    ]
+    assert len(memory.evidence[0].exact_excerpt) == 600
+    assert memory.evidence[0].excerpt_truncated is True
+    assert memory.evidence[0].source_file == "report-0.pdf"
+    assert memory.evidence[0].chunk_id == "chunk-0"
+    assert len(memory.evidence[3].exact_excerpt) == 320
+    assert memory.evidence[3].url == "https://example.com/0"
+    assert memory.evidence[3].retrieved_at == "2026-11-24T10:00:00+08:00"
+    assert memory.evidence_omitted is True
+    assert memory.evidence_omitted_count == 2
+    assert omitted == 2
+    assert all(record.kind != "other" for record in memory.evidence)
+
+
+def test_turn_memory_global_limit_prefers_recent_completed_turns() -> None:
+    messages = []
+    for turn in range(4):
+        messages.extend(
+            [
+                HumanMessage(id=f"human-{turn}", content=f"问题 {turn}"),
+                _rag_message(
+                    f"查询 {turn}",
+                    f"rag-{turn}",
+                    [
+                        {
+                            "source": f"report-{turn}-{index}.pdf",
+                            "page": index + 1,
+                            "chunk_id": f"chunk-{turn}-{index}",
+                            "content": f"证据 {turn}-{index}",
+                        }
+                        for index in range(3)
+                    ],
+                ),
+                AIMessage(id=f"answer-{turn}", content=f"回答 {turn}"),
+            ]
+        )
+    messages.append(HumanMessage(id="current", content="当前问题"))
+
+    memories, omitted = materialize_completed_turn_memories(
+        messages,
+        retrieval_tool_names=RETRIEVAL_TOOL_NAMES,
+        web_search_tool_names=frozenset(),
+        max_records=5,
+    )
+
+    assert [len(memory.evidence) for memory in memories] == [0, 0, 2, 3]
+    assert memories[0].evidence_omitted is True
+    assert memories[-1].evidence_omitted is False
+    assert omitted == 7
 
 
 def test_evidence_merges_visible_chunks_across_batches_without_mutation() -> None:
@@ -216,14 +386,25 @@ async def test_prepare_turn_backfills_sources_from_legacy_checkpoint() -> None:
         ],
     )
     state = State(
-        messages=[HumanMessage(content="旧问题"), message, AIMessage(content="旧回答")]
+        messages=[
+            HumanMessage(id="legacy-human", content="旧问题"),
+            message,
+            AIMessage(id="legacy-answer", content="旧回答"),
+            HumanMessage(id="current-human", content="新问题"),
+        ]
     )
 
     dependencies = _retrieval_dependencies()
     update = await prepare_turn(state, SimpleNamespace(context=dependencies))
 
     assert update["conversation_evidence"][0]["chunk_id"] == "legacy::4"
-    assert update["conversation_evidence_scanned_message_count"] == 3
+    assert update["conversation_evidence_scanned_message_count"] == 4
+    assert update["conversation_turn_memories"][0]["turn_id"] == "legacy-human"
+    assert update["conversation_turn_memories"][0]["user_messages"] == ["旧问题"]
+    assert update["conversation_turn_memories"][0]["final_answer"] == "旧回答"
+    assert update["conversation_turn_memories"][0]["evidence"][0][
+        "exact_excerpt"
+    ] == "历史证据"
 
 
 def test_historical_sources_remain_visible_after_rag_turn_is_trimmed() -> None:

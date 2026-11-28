@@ -37,6 +37,10 @@ Copy-Item .env.example .env
 |---|---|
 | `MAX_HISTORY_TOKENS` | 为会话历史分配的估算 Token 子预算 |
 | `MAX_INPUT_TOKENS` | 单次模型输入的本地估算总上限 |
+| `MODEL_INPUT_TARGET_TOKENS` | 触发主动分级降级的软目标 |
+| `HISTORY_RICH_TOKENS` | 在该预算内尽量保持 L0 丰富历史 |
+| `HISTORY_EVIDENCE_TOKENS` | 历史证据正文的独立预算 |
+| `HISTORY_RECENT_RICH_TURNS` | 最后降级的最近轮次数 |
 | `CONTEXT_SAFETY_MARGIN_TOKENS` | 为估算误差预留的安全余量 |
 | `ENABLE_HISTORY_COMPACTION` | 是否允许压缩较旧的完整对话轮次 |
 | `HISTORY_COMPACTION_MAX_OUTPUT_TOKENS` | 历史摘要最大输出 |
@@ -48,6 +52,10 @@ Copy-Item .env.example .env
 MAX_INPUT_TOKENS
 模型窗口 - LLM_MAX_TOKENS - CONTEXT_SAFETY_MARGIN_TOKENS
 ```
+
+达到 `MODEL_INPUT_TARGET_TOKENS` 后先按轮次执行 L0→L1→L2→L3 降级；
+软目标无法满足时可以使用软目标与硬上限之间的余量，但绝不会越过有效输入上限。
+估算器会把模型返回的 `prompt_tokens` 与本地估算持续对比，并在进程内按模型保守校准。
 
 `MAX_HISTORY_TOKENS` 只限制历史消息，不包括系统提示词、工具 Schema、当前轮和证据。
 当前轮超过历史子预算时仍会保留，最后由总输入预算判断能否调用模型。
@@ -63,16 +71,21 @@ Token 和成本。
 | `MAX_TOOL_BATCHES` | 当前用户轮内工具批次上限 |
 | `MAX_TOOL_RETRIES` | 工具失败后的恢复重试上限 |
 | `RAG_CALL_LIMIT` | 当前用户轮内被接受执行的 RAG 调用上限 |
+| `SEARCH_CALL_LIMIT` | 当前用户轮内联网搜索硬上限 |
+| `TOTAL_TOOL_CALL_LIMIT` | 当前用户轮内全部工具调用硬上限 |
+| `RAG_SOFT_CALL_LIMIT` / `SEARCH_SOFT_CALL_LIMIT` | 普通额度；其后只接受非空且未重复的新查询 |
+| `RAG_MAX_PARALLEL` / `SEARCH_MAX_PARALLEL` | 每个执行波次的分能力并发上限 |
 | `CONSECUTIVE_FAILURE_THRESHOLD` | RAG 连续返回无有效内容后主动终止的阈值 |
 | `RECURSION_LIMIT` | LangGraph 图步骤的最后安全熔断 |
 | `MAX_TOOL_OUTPUT_CHARS` | 单次工具 observation 的硬截断字符数 |
 
-RAG 配额规则：
+工具配额规则：
 
 - 成功、未命中和执行失败的 RAG 调用都会占用一次配额。
 - 执行前因配额不足而被拒绝的调用不占用配额。
-- 其他工具不占用 `RAG_CALL_LIMIT`，但会占用共享的工具批次预算。
+- 其他工具不占用 `RAG_CALL_LIMIT`，但所有工具都会占用 `TOTAL_TOOL_CALL_LIMIT`。
 - 同一模型批次中的多个 RAG 调用只会放行剩余配额。
+- 同轮完全相同的工具查询会在执行前拒绝，不消耗次数；连续同类错误会触发熔断。
 - 连续无有效内容达到 `CONSECUTIVE_FAILURE_THRESHOLD` 后，Agent 会停止继续检索并收口。
 
 `RECURSION_LIMIT` 必须足以容纳所配置的模型轮次和工具批次。启动时会按当前图拓扑校验：

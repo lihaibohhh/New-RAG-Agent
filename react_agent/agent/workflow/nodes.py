@@ -29,6 +29,9 @@ from react_agent.agent.context_management.evidence import (
 )
 from react_agent.agent.context_management.budgeting import estimate_message_tokens
 from react_agent.agent.context_management.contracts import ContextBudget
+from react_agent.agent.context_management.turn_memory import (
+    materialize_completed_turn_memories,
+)
 from react_agent.agent.contracts.dependencies import (
     AgentDependencies,
     ToolCapability,
@@ -56,6 +59,7 @@ from react_agent.agent.prompts import (
 from react_agent.agent.tool_flow import (
     close_tool_calls_for_budget,
     count_attempted_rag_calls_in_current_turn,
+    count_attempted_tool_calls_in_current_turn,
     execute_dynamic_tools,
     extract_recent_tool_messages,
     extract_tool_call_ids,
@@ -123,6 +127,19 @@ async def prepare_turn(
             ),
             conversation_evidence_scanned_message_count=len(state.messages),
         )
+    turn_memories, turn_evidence_omitted = materialize_completed_turn_memories(
+        list(state.messages),
+        retrieval_tool_names=runtime.context.tool_names_for(
+            ToolCapability.KNOWLEDGE_RETRIEVAL
+        ),
+        web_search_tool_names=runtime.context.tool_names_for(
+            ToolCapability.WEB_SEARCH
+        ),
+    )
+    update.update(
+        conversation_turn_memories=[memory.to_state() for memory in turn_memories],
+        conversation_turn_evidence_omitted_count=turn_evidence_omitted,
+    )
     return update
 
 
@@ -382,17 +399,27 @@ async def call_model(
     retrieval_tool_names = dependencies.tool_names_for(
         ToolCapability.KNOWLEDGE_RETRIEVAL
     )
+    search_tool_names = dependencies.tool_names_for(ToolCapability.WEB_SEARCH)
     rag_calls = count_attempted_rag_calls_in_current_turn(
         list(state.messages),
         retrieval_tool_names=retrieval_tool_names,
+    )
+    search_calls = count_attempted_tool_calls_in_current_turn(
+        list(state.messages), tool_names=search_tool_names
+    )
+    total_tool_calls = count_attempted_tool_calls_in_current_turn(
+        list(state.messages)
     )
     termination_reason = model_termination_reason(
         dependencies.config,
         tool_names=tool_names if tool_call_ids else [],
         retrieval_tool_names=retrieval_tool_names,
+        search_tool_names=search_tool_names,
         next_model_round=next_model_round,
         completed_tool_batches=state.turn_tool_batches,
         attempted_rag_calls=rag_calls,
+        attempted_search_calls=search_calls,
+        attempted_total_tool_calls=total_tool_calls,
     )
 
     if not tools_allowed and tool_call_ids:
@@ -661,6 +688,16 @@ async def close_pending_tool_calls(state: State) -> dict[str, Any]:
         kwargs = {
             "error_code": "RAG_CALL_BUDGET_EXHAUSTED",
             "error_message": "本轮知识库检索次数已达到上限，该调用未执行。",
+        }
+    elif state.termination_reason == TerminationReason.SEARCH_CALL_BUDGET_EXHAUSTED.value:
+        kwargs = {
+            "error_code": "SEARCH_CALL_BUDGET_EXHAUSTED",
+            "error_message": "本轮联网搜索次数已达到上限，该调用未执行。",
+        }
+    elif state.termination_reason == TerminationReason.TOTAL_TOOL_CALL_BUDGET_EXHAUSTED.value:
+        kwargs = {
+            "error_code": "TOTAL_TOOL_CALL_BUDGET_EXHAUSTED",
+            "error_message": "本轮工具调用总次数已达到上限，该调用未执行。",
         }
     closed = close_tool_calls_for_budget(
         last_message,
